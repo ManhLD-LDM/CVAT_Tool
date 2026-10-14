@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build & Bundle outputs
+dist/
+build/
+*.zip
+
+# Testing & Verification outputs
+test-results/
+playwright-report/
+coverage/
+
+# Point Cloud & Data Cache
+data/
+data_*/
+*.pcd
+*.bin
+*.las
+*.laz
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Environment secrets and tokens
+.env
+.env.local
+*.local.json
+credentials.json
+*.key
+
+# Editor and OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+.reference/

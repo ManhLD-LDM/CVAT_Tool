@@ -1,0 +1,266 @@
+/* Isolated-world HUD. Reads unsaved CVAT editor snapshots via the bridge.
+ * No credentials, cached-job fallback or direct annotation REST writes.
+ */
+(function () {
+    'use strict';
+    window.__CVAT_COPILOT_PANEL?.dispose();
+    const pending = new Map();
+    function geometry(required=true) {
+        const api=window.__CVAT_COPILOT_MATH;
+        if(api && ['makePlane','parseCVAT16Points','auditFrame'].every(name=>typeof api[name]==='function'))return api;
+        if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
+        return null;
+    }
+    let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
+    let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
+    let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
+    const el = id => root?.querySelector('#' + id);
+    const text = (id, value) => { const node=el(id); if(node) node.textContent=value; };
+    const scopeKey = s => s ? `${s.sessionId}:${s.jobId}:${s.frame}` : '';
+    function request(type, payload = {}) {
+        return new Promise((resolve,reject) => {
+            const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
+            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},20000);
+            pending.set(requestId,{resolve,reject,timeout});
+            window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
+        });
+    }
+    function receive(event) {
+        if(typeof event.detail!=='string') return;
+        let response; try {response=JSON.parse(event.detail);} catch(_){return;}
+        const waiter=pending.get(response.requestId);if(!waiter)return;
+        pending.delete(response.requestId);clearTimeout(waiter.timeout);
+        if(response.ok)waiter.resolve(response.result);else waiter.reject(new Error(response.error || 'Operation failed'));
+    }
+    function receiveSnapshot(event) {
+        if(typeof event.detail!=='string') return;
+        try {acceptSnapshot(JSON.parse(event.detail));} catch(error){console.warn('[CVAT 3D TOOL] snapshot:',error.message);}
+    }
+    function reference(id = snapshot?.activeBoxId) {
+        if(!snapshot?.connected || id == null)throw new Error('Select a box in CVAT or list first');
+        return {sessionId:snapshot.sessionId,jobId:snapshot.jobId,frame:snapshot.frame,revision:snapshot.revision,clientId:Number(id)};
+    }
+    function toast(message,error=false) {
+        text('c3d-toast',message);const node=el('c3d-toast');if(!node)return;
+        node.dataset.error=String(error);node.style.display='block';clearTimeout(toastTimer);
+        toastTimer=setTimeout(()=>{node.style.display='none';},5000);
+    }
+    function status(message) {text('c3d-status-msg',message);}
+    async function action(type,payload={}) {
+        if(busy)return;
+        busy=true;renderInspector();status('Processing…');
+        try {
+            if(type==='AUTO_FIT'){toast('Auto-Fitting: reading cluster points and estimating heading…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
+            const result=await request(type,type==='FREECAM'?payload:{ref:reference(),...payload});
+            if(type==='AUTO_FIT'){
+                const timing=Number.isFinite(result.elapsedMs)?` · ${(result.elapsedMs/1000).toFixed(2)}s`:'';
+                toast((result.previousFrame?result.message:result.groundFallback?'Auto-Fit XY/yaw · low ground confidence, preserved Z/height · please inspect box':'Auto-Fit updated · rule-based dimensions · review box and Save CVAT')+timing);
+                if(result.timingsMs)console.info('[CVAT 3D TOOL] Auto-Fit timings (ms)',result.timingsMs);
+            }
+            else if(type==='ROTATE'||type==='SNAP_GROUND'||type==='SET_LABEL') {
+                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ground · ΔZ ${result.deltaZ.toFixed(2)}m · save via Save CVAT` : 'Editor updated · save via Save CVAT');
+            } else if(type==='FREECAM')toast(result.enabled?'Free Cam: WASD/QE · Shift fast · right-click drag to look · Esc exit':'Returned camera control to CVAT');
+            acceptSnapshot(await request('GET_SNAPSHOT'));
+            status('Ready');
+        } catch(error) {status('Operation incomplete');toast(error.message,true);}
+        finally {busy=false;renderInspector();}
+    }
+    async function selectBox(id,focus=false,issueId=null) {
+        selectedIssue=issueId;
+        if(issueId){filter='ALL';if(el('c3d-filter'))el('c3d-filter').value='ALL';}
+        try {const result=await request('SELECT_OBJECT',{ref:reference(id),focus});acceptSnapshot(await request('GET_SNAPSHOT'));if(focus&&result.focused===false)toast(result.message||'Box selected; camera does not support Focus',true);}
+        catch(error){toast(error.message,true);renderInspector();}
+    }
+    function acceptSnapshot(next) {
+        if(!next || !Array.isArray(next.boxes) || !Array.isArray(next.labels))return;
+        const previousScope=scopeKey(snapshot), nextScope=scopeKey(next);
+        if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
+        snapshot=next;
+        if(!root && shouldShow())createHUD();
+        if(!root)return;
+        renderInspector();
+        renderIssues();
+        const key=`${nextScope}:${next.revision}`;
+        if(key!==lastRevisionKey) {
+            lastRevisionKey=key;
+            if(autoQc) {clearTimeout(qcTimer);qcTimer=setTimeout(()=>runQC(true),140);}
+        }
+    }
+    function createHUD() {
+        if(root)return;
+        root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
+        root.innerHTML=`
+            <header class="c3d-header"><div><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <div id="c3d-content-body">
+                <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
+                <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
+                <div class="c3d-toolbar"><button id="c3d-btn-scan" class="c3d-btn-primary">RUN QC NOW <kbd>Alt Shift L</kbd></button><div class="c3d-toggles"><label><input id="c3d-auto" type="checkbox" checked> Auto QC</label><label><input id="c3d-colors" type="checkbox" checked> 3D Error Colors</label></div>
+                    <div class="c3d-action-grid"><button id="c3d-btn-ground" class="c3d-btn-secondary" title="Alt+Shift+G">Ground Snap</button><button id="c3d-btn-freecam" class="c3d-btn-secondary" title="Alt+Shift+C">Free Cam</button></div>
+                    <button id="c3d-btn-autofit" class="c3d-btn-primary" title="Alt+Shift+A">AUTO-FIT BOX <kbd>Alt Shift A</kbd></button>
+                    <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="After Auto-Fit, adjust manually and export for reference">Export Auto-Fit Case (.json)</button>
+                    <div class="c3d-rot-grid"><button id="c3d-btn-rot-left" class="c3d-btn-mini" title="Alt+Shift+[">−90°</button><button id="c3d-btn-rot-right" class="c3d-btn-mini" title="Alt+Shift+]">+90°</button><button id="c3d-btn-flip" class="c3d-btn-mini" title="Alt+Shift+F">180°</button></div>
+                </div>
+                <div class="c3d-inspector-card"><div class="c3d-inspector-header"><span class="c3d-inspector-title">SELECTED BOX</span><button id="c3d-btn-focus" class="c3d-btn-mini">Focus</button></div>
+                    <select id="c3d-select-box" aria-label="Select CVAT box" class="c3d-inspector-selector"></select>
+                    <div class="c3d-class-row"><span>Class</span><select id="c3d-select-class" aria-label="Change box class" class="c3d-inspector-selector"></select></div>
+                    <div class="c3d-inspector-grid">
+                        <div class="c3d-prop-row"><span class="c3d-prop-label">Subtype</span><span class="c3d-prop-val" id="c3d-prop-subtype">—</span></div>
+                        <div class="c3d-prop-row"><span class="c3d-prop-label">Position</span><span class="c3d-prop-val" id="c3d-prop-pos">—</span></div>
+                        <div class="c3d-prop-row"><span class="c3d-prop-label">L × W × H</span><span class="c3d-prop-val" id="c3d-prop-size">—</span></div>
+                        <div class="c3d-prop-row"><span class="c3d-prop-label">Yaw</span><span class="c3d-prop-val" id="c3d-prop-yaw">—</span></div>
+                        <div class="c3d-prop-row"><span class="c3d-prop-label">Bottom Z</span><span class="c3d-prop-val" id="c3d-prop-zbot">—</span></div>
+                    </div>
+                    <div id="c3d-road-info" class="c3d-ground-info">Ground: LiDAR not loaded</div>
+                </div>
+                <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
+                <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
+                <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
+                <div class="c3d-footer"><span>v1.6.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+            </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
+        document.body.appendChild(root);
+        el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';});
+        el('c3d-btn-scan').addEventListener('click',()=>runQC(true));
+        el('c3d-btn-ground').addEventListener('click',()=>action('SNAP_GROUND'));
+        el('c3d-btn-autofit').addEventListener('click',()=>action('AUTO_FIT'));
+        el('c3d-btn-export-fit').addEventListener('click',async()=>{
+            try {
+                const data=await request('EXPORT_FIT_CASE',{ref:reference()});
+                const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'}));
+                const link=document.createElement('a');link.href=url;link.download=`autofit-job${data.jobId}-frame${data.frame}-box${data.clientId}.json`;
+                document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+                toast('Exported case: LiDAR points + seed/fitted boxes + current box');
+            }catch(error){toast(error.message,true);}
+        });
+        el('c3d-btn-freecam').addEventListener('click',()=>action('FREECAM',{enabled:!snapshot?.freeCam}));
+        el('c3d-btn-rot-left').addEventListener('click',()=>action('ROTATE',{degrees:-90}));
+        el('c3d-btn-rot-right').addEventListener('click',()=>action('ROTATE',{degrees:90}));
+        el('c3d-btn-flip').addEventListener('click',()=>action('ROTATE',{degrees:180}));
+        el('c3d-btn-focus').addEventListener('click',()=>selectBox(snapshot.activeBoxId,true));
+        el('c3d-select-box').addEventListener('change',event=>selectBox(Number(event.target.value)));
+        el('c3d-select-class').addEventListener('change',event=>action('SET_LABEL',{labelId:Number(event.target.value)}));
+        el('c3d-auto').addEventListener('change',event=>{autoQc=event.target.checked;if(autoQc)runQC(true);});
+        el('c3d-colors').addEventListener('change',event=>{qcColors=event.target.checked;applyColors();});
+        el('c3d-filter').addEventListener('change',event=>{filter=event.target.value;renderIssues();});
+        let drag=null;
+        root.querySelector('.c3d-header').addEventListener('pointerdown',event=>{
+            if(event.target.closest('button'))return;
+            const rect=root.getBoundingClientRect();drag={x:event.clientX,y:event.clientY,left:rect.left,top:rect.top};event.target.setPointerCapture?.(event.pointerId);
+        });
+        root.addEventListener('pointermove',event=>{if(!drag)return;root.style.right='auto';root.style.left=Math.max(0,Math.min(window.innerWidth-root.offsetWidth,drag.left+event.clientX-drag.x))+'px';root.style.top=Math.max(0,Math.min(window.innerHeight-60,drag.top+event.clientY-drag.y))+'px';});
+        root.addEventListener('pointerup',()=>{drag=null;});
+        renderInspector();
+    }
+    function options(select,values,placeholder) {
+        const key=JSON.stringify(values);if(select.dataset.options===key)return;
+        select.dataset.options=key;select.replaceChildren();
+        if(placeholder){const option=document.createElement('option');option.value='';option.textContent=placeholder;select.appendChild(option);}
+        for(const [value,label] of values){const option=document.createElement('option');option.value=String(value);option.textContent=label;select.appendChild(option);}
+    }
+    function renderInspector() {
+        if(!root)return;
+        const math=geometry(false);
+        const s=snapshot,box=s?.boxes.find(b=>b.id===s.activeBoxId),geom=box&&math?.parseCVAT16Points(box.points);
+        const cap=s?.capabilities || {};
+        text('c3d-badge-conn',s?.connected?(s.mode==='demo'?'OFFLINE DEMO':'LIVE EDITOR'):'WAITING CVAT');
+        el('c3d-badge-conn').classList.toggle('c3d-status-err',!s?.connected);
+        text('c3d-context-label',s?.connected?`Job ${s.jobId} · Frame ${s.frame} · clientID`:(s?.reason||'Finding CVAT editor…'));
+        const saveLabels={unsaved:'Unsaved · Save CVAT',saving:'CVAT saving…',saved:'CVAT: no unsaved changes',unknown:'Save via Save CVAT',local:'Offline demo · not sent to server'};
+        text('c3d-save-state',saveLabels[s?.saveState]||saveLabels.unknown);
+        text('c3d-val-count',s?.boxes.length||0);
+        options(el('c3d-select-box'),(s?.boxes||[]).map(b=>[b.id,`#${b.id} · ${b.label_name}${b.subType ? ` (${b.subType})` : ''}${b.locked?' · locked':''}`]),'Select box…');
+        el('c3d-select-box').value=box?String(box.id):'';
+        options(el('c3d-select-class'),(s?.labels||[]).map(l=>[l.id,l.name]),'—');el('c3d-select-class').value=box?String(box.labelId):'';
+        el('c3d-select-class').title=box?.label_name==='vehicles' ? (box.subType ? `Vehicle (${box.subType})` : 'Vehicle profile') : '';
+        const canEdit=!!box&&!box.locked&&!box.groundTruth&&cap.edit&&!busy;
+        for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
+        const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!math?.canManuallySnapGround(ground);
+        el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
+        el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
+        el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
+        el('c3d-btn-focus').disabled=!box||!cap.selection;el('c3d-btn-scan').disabled=!s?.connected;
+        text('c3d-prop-subtype',box?.subType ? box.subType.toUpperCase() : (box ? 'None' : '—'));
+        text('c3d-prop-pos',geom?geom.center.map(n=>n.toFixed(2)).join(' / ')+' m':'—');
+        text('c3d-prop-size',geom?geom.dimensions.map(n=>n.toFixed(2)).join(' × ')+' m':'—');
+        text('c3d-prop-yaw',geom?geom.yawDeg.toFixed(1)+'°':'—');text('c3d-prop-zbot',geom?geom.zBottom.toFixed(2)+' m':'—');
+        text('c3d-road-info',ground?.accepted?`LiDAR ground${ground.confidence<.65 ? ' estimated · verify after Snap' : ''} · ${(ground.confidence*100).toFixed(0)}% · ${ground.inlierCount} pts · RMSE ${(ground.rmse*100).toFixed(1)}cm`:ground?.reason?`Ground: ${ground.reason}`:'Ground: reading LiDAR points…');
+    }
+    async function loadGround() {
+        const s=snapshot;if(!s?.connected||!s.capabilities.ground||!s.boxes.length)return;
+        const scope=scopeKey(s), revision=s.revision, run=++groundRun;
+        try {
+            const data=await request('GET_GROUNDS',{ref:reference(s.boxes[0].id),ids:s.boxes.map(b=>b.id)});
+            if(run!==groundRun||scope!==scopeKey(snapshot)||revision!==snapshot.revision)return;
+            const math=geometry();
+            grounds=Object.fromEntries(Object.entries(data).map(([id,g])=>[id,g.accepted?math.makePlane(g.a,g.b,g.c,g):g]));
+            evaluateQC();renderInspector();
+        }catch(error){if(run===groundRun&&scope===scopeKey(snapshot)){status('Ground not ready');text('c3d-road-info',error.message);}}
+    }
+    function evaluateQC() {
+        if(!snapshot)return;
+        const math=geometry();
+        issues=math.auditFrame(snapshot.boxes,grounds);
+        text('c3d-val-issues',issues.filter(i=>i.severity!=='INFO').length);
+        text('c3d-val-affected',new Set(issues.filter(i=>i.severity!=='INFO').flatMap(i=>i.boxIds)).size);
+        renderIssues();applyColors();
+    }
+    async function runQC(withGround=false) {
+        if(!snapshot?.connected)return;
+        try {evaluateQC();status('QC updated');if(withGround)await loadGround();}
+        catch(error){status('QC not run');toast(error.message,true);}
+    }
+    function applyColors() {
+        if(!snapshot?.connected || !snapshot.capabilities.appearance)return;
+        const levels={INFO:0,WARNING:1,CRITICAL:2}, severity=new Map();
+        for(const issue of issues)for(const id of issue.boxIds)if((levels[severity.get(id)]??-1)<levels[issue.severity])severity.set(id,issue.severity);
+        const colors=Array.from(severity).map(([id,level])=>({id,color:{CRITICAL:'#f87171',WARNING:'#fbbf24',INFO:'#94a3b8'}[level]}));
+        request(qcColors?'SET_QC_APPEARANCE':'CLEAR_QC_APPEARANCE',qcColors?{colors}:{}).catch(error=>status(error.message));
+    }
+    function renderIssues() {
+        const container=el('c3d-issue-list');if(!container)return;
+        const scroll=container.scrollTop;container.replaceChildren();
+        const activeId=snapshot?.activeBoxId;
+        const filtered=issues.filter(i=>(activeId==null||i.boxIds.includes(activeId))&&(filter==='ALL'||i.severity===filter));
+        const heading=root.querySelector('.c3d-issue-header-bar');
+        if(heading)heading.querySelector('.c3d-config-label').textContent=activeId==null?'GEOMETRY ISSUES':`ISSUES: BOX #${activeId}`;
+        if(!filtered.length){const empty=document.createElement('div');empty.className='c3d-empty-state';empty.textContent=snapshot?.connected?(activeId==null?'No geometry issues under current rule set and filters. Ground is evaluated when sufficient points exist.':`Box #${activeId}: no geometry issues under current rules and filters.`):'Waiting for CVAT 3D connection';container.appendChild(empty);return;}
+        for(const issue of filtered) {
+            const row=document.createElement('div');row.className='c3d-issue-item';row.setAttribute('role','listitem');
+            row.classList.toggle('c3d-active-item',issue.boxIds.includes(snapshot?.activeBoxId));
+            const choose=document.createElement('button');choose.className='c3d-issue-select';choose.dataset.issueId=issue.id;
+            const heading=document.createElement('div');heading.className='c3d-issue-row';
+            const tag=document.createElement('span');tag.className='c3d-tag c3d-tag-'+issue.severity.toLowerCase();tag.textContent=issue.severity;
+            const target=document.createElement('span');target.className='c3d-issue-target';target.textContent='Box '+issue.boxIds.map(id=>'#'+id).join(' / ');
+            const message=document.createElement('div');message.className='c3d-issue-desc';message.textContent=issue.message;
+            const code=document.createElement('div');code.className='c3d-issue-code';code.textContent=issue.code;
+            heading.append(tag,target);choose.append(heading,message,code);choose.addEventListener('click',()=>selectBox(issue.boxId,true,issue.id));
+            const footer=document.createElement('div');footer.className='c3d-issue-actions';
+            const copy=document.createElement('button');copy.className='c3d-btn-mini';copy.textContent='Copy issue';copy.addEventListener('click',async()=>{
+                try{await navigator.clipboard.writeText(`[QC ${issue.severity}] Box ${issue.boxIds.map(id=>'#'+id).join('/')} | ${issue.code} | ${issue.message}`);toast('Issue copied to clipboard');}
+                catch(_){toast('Clipboard access failed; copy description manually',true);}
+            });footer.appendChild(copy);
+            if(issue.boxIds.length>1){const other=document.createElement('button');other.className='c3d-btn-mini';other.textContent='Select #'+issue.boxIds[1];other.addEventListener('click',()=>selectBox(issue.boxIds[1],true,issue.id));footer.appendChild(other);}
+            row.append(choose,footer);container.appendChild(row);
+        }
+        container.scrollTop=scroll;
+    }
+    function keydown(event) {
+        if(!event.altKey||!event.shiftKey||event.repeat||event.target?.closest?.('input,textarea,select,[contenteditable="true"],[role="dialog"]'))return;
+        const actions={KeyA:()=>action('AUTO_FIT'),KeyG:()=>action('SNAP_GROUND'),KeyF:()=>action('ROTATE',{degrees:180}),BracketLeft:()=>action('ROTATE',{degrees:-90}),BracketRight:()=>action('ROTATE',{degrees:90}),KeyL:()=>runQC(true),KeyC:()=>action('FREECAM',{enabled:!snapshot?.freeCam})};
+        if(actions[event.code]){event.preventDefault();event.stopPropagation();actions[event.code]();}
+    }
+    function shouldShow(){return /\/jobs\/\d+/.test(window.location.pathname)||document.documentElement.dataset.c3dDemo==='true';}
+    function routeCheck(){
+        if(disposed)return;
+        if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
+        else if(root){root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+    }
+    function dispose(){
+        disposed=true;clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
+        for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
+    }
+    window.__CVAT_COPILOT_PANEL={dispose};
+    window.addEventListener('c3d:response:v2',receive);window.addEventListener('c3d:snapshot:v2',receiveSnapshot);window.addEventListener('keydown',keydown,true);
+    function start(){routeCheck();request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not connected'));routeTimer=setInterval(routeCheck,1500);}
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
+})();
