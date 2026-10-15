@@ -217,15 +217,15 @@ test('Auto-Fit scans native scene ROI and uses the native save/history pipeline'
     h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
 
-test('Auto-Fit continues with XY only when native ground support is one-sided',async()=>{
+test('preset Auto-Fit refuses one-sided weak ground without native edits',async()=>{
     const h=harness(),scene=new THREE.Scene(),points=[];
     for(let x=1;x<=8;x+=.35)for(let y=1;y<=8;y+=.35)points.push(x,y,0);
     for(let x=-1.8;x<=1.8;x+=.15)for(let y=-.8;y<=.8;y+=.15)points.push(x,y,1.5);
     const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(points,3));
     const cloud=new THREE.Points(geometry,new THREE.PointsMaterial());scene.add(cloud);h.view.views.perspective={scene};
     const before=[...h.state.annotation.annotations.states[0].points];
-    const result=await h.adapter.command('AUTO_FIT',{ref:h.ref(1)});
-    assert.ok(result.applied);assert.equal(result.groundFallback,true);assert.equal(h.history.length,1);
+    await assert.rejects(h.adapter.command('AUTO_FIT',{ref:h.ref(1)}),/Reliable ground/);
+    assert.equal(h.history.length,0);
     const after=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;assert.equal(after[2],before[2]);assert.equal(after[8],before[8]);
     h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
@@ -249,7 +249,7 @@ test('real 1m seed case is fitted through native adapter with corrected ground a
     h.state.annotation.annotations.states[0].points=[...data.seedBox.points];h.notify();
     const result=await h.adapter.command('AUTO_FIT',{ref:h.ref(1)}),fitted=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;
     assert.ok(result.applied);assert.equal(result.groundFallback,false);assert.equal(h.history.length,1);
-    assert.ok(fitted[8]>1.75);assert.ok(math.orientedIoU(fitted,data.currentBox.points)>.75);
+    assert.deepEqual(fitted.slice(6,9),[4.5,1.8,1.5]);assert.ok(Math.hypot(fitted[0]-data.currentBox.points[0],fitted[1]-data.currentBox.points[1])<.8);
     h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
 test('real expanded-height regression saves only the vehicle through native adapter',async()=>{
@@ -260,7 +260,7 @@ test('real expanded-height regression saves only the vehicle through native adap
     h.state.annotation.annotations.states[0].points=[...data.seedBox.points];h.notify();
     const result=await h.adapter.command('AUTO_FIT',{ref:h.ref(1)}),fitted=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;
     assert.ok(result.applied);assert.equal(result.groundFallback,false);assert.equal(h.history.length,1);
-    assert.ok(fitted[8]>1.75);assert.ok(math.orientedIoU(fitted,data.currentBox.points)>.7);
+    assert.deepEqual(fitted.slice(6,9),[4.5,1.8,1.5]);assert.ok(Math.hypot(fitted[0]-data.currentBox.points[0],fitted[1]-data.currentBox.points[1])<.8);
     h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
 test('dense parking box32 fits only the seeded vehicle through native adapter',async()=>{
@@ -271,7 +271,7 @@ test('dense parking box32 fits only the seeded vehicle through native adapter',a
     h.state.annotation.annotations.states[0].points=[...data.seedBox.points];h.notify();
     const result=await h.adapter.command('AUTO_FIT',{ref:h.ref(1)}),fitted=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;
     assert.ok(result.applied);assert.equal(result.groundFallback,false);assert.equal(h.history.length,1);
-    assert.ok(fitted[8]>1.75);assert.ok(fitted[6]>4.3&&fitted[6]<4.9);assert.ok(fitted[7]<2);
+    assert.deepEqual(fitted.slice(6,9),[4.5,1.8,1.5]);assert.ok(Math.hypot(fitted[0]-3.115,fitted[1]+10.489)<.3);
     h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
 test('historical compact vehicle regression preserves manual ground snap',async()=>{
@@ -280,11 +280,11 @@ test('historical compact vehicle regression preserves manual ground snap',async(
     const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(points.flat(),3));
     const cloud=new THREE.Points(geometry,new THREE.PointsMaterial());scene.add(cloud);h.view.views.perspective={scene};
     h.state.annotation.annotations.states[0].points=[...data.seedBox.points];h.notify();
-    const result=await h.adapter.command('AUTO_FIT',{ref:h.ref(1)}),fitted=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;
-    assert.ok(result.applied);assert.equal(result.groundFallback,true);assert.equal(h.history.length,1);
-    assert.ok(fitted[8]>1.75);assert.ok(math.orientedIoU(fitted,data.currentBox.points)>.75);
-    const before=[...fitted],snapResult=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)});
-    assert.ok(snapResult.applied);assert.equal(h.history.length,2);
+    const before=[...h.state.annotation.annotations.states[0].points];
+    await assert.rejects(h.adapter.command('AUTO_FIT',{ref:h.ref(1)}),/Reliable ground/);
+    assert.equal(h.history.length,0);
+    const snapResult=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)});
+    assert.ok(snapResult.applied);assert.equal(h.history.length,1);
     const after=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;
     assert.deepEqual(after.slice(3),before.slice(3));
     const g=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];

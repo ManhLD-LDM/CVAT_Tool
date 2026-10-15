@@ -25,8 +25,8 @@ async function run(fn){
  try{await fn();}catch(e){status(e.message,true);}
  finally{working=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
-async function save(bytes,name){
- const url=URL.createObjectURL(new Blob([Uint8Array.from(bytes)]));
+async function save(bytes,name,type='application/zip'){
+ const url=URL.createObjectURL(new Blob([Uint8Array.from(bytes)],{type}));
  try{
   const id=await chrome.downloads.download({url,filename:name,saveAs:true});
   for(let i=0;i<600;i++){
@@ -80,9 +80,16 @@ el('formats').onclick=()=>run(async()=>{
   el(id).replaceChildren();
   for(const item of items||[])if(item.enabled!==false){const o=document.createElement('option');o.value=item.name;o.textContent=item.name;el(id).append(o);}
  }
- status('Đã đọc định dạng từ server.');
+ if(f.preferredExport)el('export-format').value=f.preferredExport;
+ status(f.exporters?.length?'Đã đọc định dạng 3D từ server. Datumaro 3D được ưu tiên nếu có.':'Server không cung cấp định dạng 3D; có thể thử JSON native nếu có quyền đọc annotation.');
 });
 el('export').onclick=()=>run(()=>exportFile());
+el('export-native').onclick=()=>run(async()=>{
+ status('Đang đọc annotation đã Save từ API…');
+ const data=await api('native-export');
+ await save(Array.from(new TextEncoder().encode(JSON.stringify(data,null,2))),'cvat-job'+context.jobId+'-native-'+Date.now()+'.json','application/json');
+ status('Đã tải JSON native của annotation đã Save (tracks/keyframes). Đây không phải ZIP dataset để Upload annotations trực tiếp trong CVAT.');
+});
 el('import').onclick=()=>run(async()=>{
  await refresh();
  if(importComplete)throw new Error('Nạp lại tab CVAT trước khi tiếp tục.');
@@ -99,28 +106,30 @@ el('import').onclick=()=>run(async()=>{
  status('Import hoàn tất trên server. Nạp lại tab CVAT trước khi chỉnh sửa tiếp; không Save dữ liệu editor cũ.');
 });
 el('reload').onclick=()=>run(async()=>{await refresh();await chrome.tabs.reload(tabId);status('Đã nạp lại tab CVAT.');});
-el('script').onclick=()=>run(async()=>{
+async function pythonCommand(command){
  await refresh();
- const script=[
- 'import os, requests',
- 'base = '+JSON.stringify(context.origin),
- 'job_id = '+context.jobId,
- 's = requests.Session()',
- 's.cookies.set("sessionid", os.environ["CVAT_SESSIONID"], domain=base.split("://", 1)[1].split(":")[0])',
- 'csrf = os.environ.get("CVAT_CSRFTOKEN")',
- 'if csrf:',
- '    s.cookies.set("csrftoken", csrf)',
- '    s.headers["X-CSRFToken"] = csrf',
- 's.headers["Referer"] = base + "/"',
- 'r = s.get(base + "/api/users/self", timeout=30)',
- 'r.raise_for_status()',
- 'print(r.json().get("username"))',
- '# Export: POST /api/jobs/{job_id}/dataset/export?format=...&save_images=false',
- '# Import: POST /api/jobs/{job_id}/annotations/?format=... (multipart annotation_file)',
- '# Both return rq_id; poll GET /api/requests/{rq_id}. Back up before import.'
- ].join(String.fromCharCode(10));
- await navigator.clipboard.writeText(script);status('Đã copy mẫu Python, không chứa cookie thật.');
+ if(!Number.isSafeInteger(context.jobId)||context.jobId<1)throw new Error('Invalid job');
+ const quote=value=>"'"+String(value).replaceAll("'","''")+"'";
+ const prefix='python .\\cvat_annotations.py --server '+quote(context.origin)+' --job '+context.jobId+' --prompt-auth ';
+ const format=el('export-format').value||'Datumaro 3D 1.0',importFormat=el('import-format').value||format;
+ const actions={
+  export:prefix+'export --format '+quote(format)+' --output '+quote('job'+context.jobId+'-annotations.zip'),
+  'export-native':prefix+'export-native --output '+quote('job'+context.jobId+'-native.json'),
+  import:prefix+'import --format '+quote(importFormat)+' --file '+quote('annotations.zip')+' --confirm-job '+context.jobId+' --editor-closed',
+  'import-native':prefix+'import-native --file '+quote('job'+context.jobId+'-native.json')+' --confirm-job '+context.jobId+' --editor-closed'
+ };
+ const intro='# PowerShell. Python 3.10+. No pip install required.\n# Hidden prompts; alternatively set CVAT_SESSIONID / CVAT_CSRFTOKEN and remove --prompt-auth.\n';
+ const warning=command.startsWith('import')?'# REPLACES saved annotations. Save and CLOSE CVAT editor first. Verified native JSON backup required; reload after import.\n':'';
+ await navigator.clipboard.writeText(intro+warning+actions[command]);status('Đã copy lệnh Python cho server/job này; không chứa cookie.');
+}
+el('python-download').onclick=()=>run(async()=>{
+ const response=await fetch(chrome.runtime.getURL('cvat_annotations.py'));
+ if(!response.ok)throw new Error('Không tải được Python CLI; cập nhật extension rồi thử lại.');
+ const bytes=Array.from(new Uint8Array(await response.arrayBuffer()));
+ await save(bytes,'cvat_annotations.py','text/x-python');status('Đã tải cvat_annotations.py. Chạy thủ công trong terminal; cookie không được nhúng trong file.');
 });
+for(const [id,command] of [['python-export','export'],['script','export-native'],['python-import','import'],['python-restore','import-native']])el(id).onclick=()=>run(()=>pythonCommand(command));
+
 document.addEventListener('visibilitychange',()=>{if(document.hidden)clear();});
 window.addEventListener('pagehide',clear);
 refresh().then(()=>status('Sẵn sàng. Chưa đọc cookie.')).catch(e=>status(e.message,true));

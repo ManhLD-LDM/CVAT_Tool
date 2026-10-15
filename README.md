@@ -1,4 +1,4 @@
-# CVAT 3D TOOL 1.10.0
+# CVAT 3D TOOL 1.12.0
 
 Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
@@ -7,7 +7,7 @@ Repository còn giữ bộ script Python và cấu hình `config/` từ phiên b
 
 ## Cài đặt và sử dụng
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.10.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.12.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
 Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
@@ -33,20 +33,25 @@ Chỉ cache hai cloud trong bộ xử lý batch; mỗi PCD tối đa 128 MiB. RO
 Pilot cho job601: giữ anchors0/7/14, xem #1/#2/#5 ở các frame3/4/10/11, chỉ chấp nhận sau kiểm tra Top/Side/Front. Chưa chạy apply batch trên job thật trong đợt phát triển này.
 [Thiết kế và phần còn lại](docs/BATCH_TRACK_REFINEMENT_PROPOSAL.md) · [Bằng chứng kiểm thử](docs/verification/batch-1.8.0.md).
 
+## Python Import/Export — 1.12.0
+
+Trang **Phiên CVAT & Import/Export** có nút tải CLI Python và copy lệnh đúng server/job. Python 3.10+, không cần pip, chạy thủ công trong terminal. Export ZIP 3D hoặc JSON native; import ZIP và restore JSON native cùng server/job. Mọi import CLI yêu cầu xác nhận job/đóng editor và tạo, kiểm tra bản native JSON dự phòng trước khi ghi. Không tự nhúng cookie vào script/lệnh, không thay đổi quyền tài khoản. [Hướng dẫn đầy đủ](docs/PYTHON_ANNOTATIONS_CLI.md).
+
 ## Phiên CVAT và Import/Export — 1.7.0
 
 Bấm **Phiên CVAT & Import/Export** trên HUD để mở trang riêng của extension. Không hoạt động trong demo. Extension cần thêm quyền cookies và downloads; trình duyệt có thể yêu cầu chấp nhận quyền mới khi cập nhật.
 
 - **Lấy thông tin phiên:** kiểm tra người dùng bằng API users/self, chỉ đọc cookie sessionid/CSRF khi bấm nút. Giá trị mặc định che; có nút hiện/copy/xóa. Cookie HttpOnly được đọc bằng service worker, chỉ trả về trang extension, không chuyển qua bridge CustomEvent hay DOM của CVAT. Rời tab sẽ xóa giá trị hiển thị; không lưu vào storage/log/file chẩn đoán. Cookie đã copy vẫn có thể còn trong clipboard.
 - **Copy mẫu Python:** dùng biến môi trường CVAT_SESSIONID/CVAT_CSRFTOKEN, URL server và job hiện tại; không nhúng cookie thật. Mẫu kiểm tra đăng nhập và ghi chú endpoint import/export, chưa là CLI import/export đầy đủ.
-- **Export:** đọc định dạng từ server, export annotation đã Save của job hiện tại, theo dõi rq_id rồi tải file. Không cần đọc sessionID trước.
+- **Export ZIP 3D:** đọc và lọc định dạng 3D được bật trên server, ưu tiên Datumaro 3D 1.0. POST dataset/export với save_images=false → theo dõi rq_id → tải result_url. Không kèm PCD/ảnh. Không cần đọc sessionID trước. Kiểm tra signature ZIP và báo lỗi quyền rõ ràng. Trên tài khoản kiểm thử job601, native export bị từ chối quyền; owner/admin cần kiểm tra quyền nếu muốn ZIP dataset.
+- **Export JSON native (API đọc) — 1.11.1:** đọc annotation đã Save từ API, giữ nguyên tracks và các mốc frame/keyframe mà API trả về, thêm server/job và bảng label cơ bản. Dùng quyền đọc annotation hiện có; không phải full task backup, không kèm PCD hay toàn bộ schema attributes và không Upload annotations trực tiếp như ZIP dataset. Không tự thay thế bản ZIP dự phòng trước import.
 - **Import:** chọn file/định dạng, nhập job ID và xác nhận tác động. Tool export bản dự phòng theo định dạng export đã chọn và chờ download hoàn tất trước khi upload. Import có thể thay thế annotation server, không có Undo native. File và download tối đa **8 MiB**; dữ liệu lớn hơn dùng giao diện native CVAT. Save editor trước khi bắt đầu.
 - Sau import, bấm **Nạp lại tab CVAT** trước khi tiếp tục sửa. Không Save editor cũ. Bản này dùng reload có chủ đích để đồng bộ dữ liệu import; Auto-Fit/QC và các thao tác box vẫn cập nhật realtime.
 - Khi đã gửi import, transport chặn import/export mới đến khi tab CVAT reload. Nếu timeout/đóng trang, tác vụ server có thể vẫn chạy: kiểm tra Requests trước khi thử lại.
 - Chỉ làm việc với tab/job đã mở; đổi server/job sẽ chặn thao tác. Phiên adapter nội bộ không phải sessionid đăng nhập. SSO/token-only hoặc cookie có tên tùy biến chưa có chức năng copy tương ứng; API vẫn dùng cookie phiên trình duyệt nếu server hỗ trợ.
 - API chỉ gọi các endpoint giới hạn qua runtime message trong isolated world, cùng origin CVAT, credentials include và CSRF cookie. Không dùng cookie đọc ra để gắn Cookie header thủ công.
 
-Đối chiếu API: [mã nguồn CVAT 2.76](https://github.com/cvat-ai/cvat/blob/v2.76.0/cvat/apps/engine/views.py), [Jobs API](https://docs.cvat.ai/docs/api_sdk/sdk/reference/apis/jobs-api/). Import/export dùng POST và theo dõi GET /api/requests/{rq_id}. Mới kiểm thử bằng mock server/extension API, chưa chạy import ghi dữ liệu trên CVAT thật. Chưa chứng nhận compatibility cho mọi deployment/SSO/cấu hình CSRF.
+Đối chiếu API: [mã nguồn CVAT 2.76](https://github.com/cvat-ai/cvat/blob/v2.76.0/cvat/apps/engine/views.py), [Jobs API](https://docs.cvat.ai/docs/api_sdk/sdk/reference/apis/jobs-api/). Import/export dùng POST và theo dõi GET /api/requests/{rq_id}. Luồng extension đã kiểm thử bằng mock server/Chrome API. Trên server thật job601, đọc native annotation thành công nhưng ZIP export bị từ chối quyền; chưa xác nhận click-to-file trong extension và chưa chạy import ghi dữ liệu thật. [Audit export 1.11.1](docs/verification/export-1.11.1.md). Chưa chứng nhận compatibility cho mọi deployment/SSO/cấu hình CSRF.
 
 ## Class và subtype hiện tại
 
@@ -54,7 +59,7 @@ Theo cấu hình công việc thực tế, **vehicles hiện hỗ trợ nhiều 
 
 Adapter đọc attributes từ ObjectState, ánh xạ ID attribute sang tên của label. Subtype ưu tiên từ `type`, `vehicle_type`, `subtype`, `sub_type`, `category`; nếu không có, thử tìm giá trị subtype đã biết trong các attributes khác. Giá trị được trim và chuyển chữ thường.
 
-QC và Auto-Fit giải quyết profile theo class + subtype. Nếu vehicles thiếu subtype hoặc subtype không được nhận biết, dùng profile xe gia đình mặc định (car). Tool **không tự suy subtype từ LiDAR**. Chọn đúng attribute trong CVAT trước khi Auto-Fit; panel chỉ hiển thị subtype, chưa có bộ chọn subtype riêng.
+QC giải quyết khoảng min/max theo class + subtype; Auto-Fit 1.11.0 dùng bộ kích thước preset riêng. QC dùng profile xe gia đình nếu thiếu subtype hoặc subtype không nhận biết. Auto-Fit dùng preset car khi không có subtype; subtype lạ hoặc other phải được cấu hình preset trước. Tool **không tự suy subtype từ LiDAR**. Chọn đúng attribute trong CVAT trước khi Auto-Fit; panel chỉ hiển thị subtype, chưa có bộ chọn subtype riêng.
 
 Các khoảng dưới đây là cấu hình tham khảo của tool, đơn vị mét; không phải tiêu chuẩn được chứng nhận:
 
@@ -112,18 +117,37 @@ The 1.9.1 center-refinement update is covered separately in [mouse refinement ve
 
 The optional long-axis direction correction is covered in [1.9.2 verification](docs/verification/mouse-direction-1.9.2.md).
 
-Chọn hoặc tạo box sơ bộ quanh vật thể → **AUTO-FIT BOX** hoặc **Alt+Shift+A**.
+### Preset Auto-Fit — 1.11.0
 
-1. Đọc trực tiếp buffer THREE.Points với world transform. Index không gian của frame được cache; đổi frame/cloud transform sẽ làm mất hiệu lực cache.
-2. Ước lượng ground cục bộ; mở vùng tìm theo kích thước profile class/subtype, thêm biên ROI 0,4 m. Không chỉ tìm trong box sơ bộ nhỏ.
-3. Lọc điểm thấp và tách cụm bằng khoảng cách XYZ trên voxel 0,12 m. Điểm sâu trong annotation lân cận (co 0,15 m) bị loại nếu không thuộc vùng box sơ bộ mở rộng 0,4 m.
-4. Thử radius 0,55 m trước. Nếu fit bị từ chối do cụm quá lớn/thiếu điểm/phân bố XY, thử 0,4 / 0,3 / 0,25 / 0,2 m. Kết quả sau tách nhỏ phải ổn định qua hai radius liên tiếp (IoU ≥0,9).
-5. Tìm hướng qua mặt đứng và minimum-area rectangle/PCA; tính kích thước theo profile. Cụm vượt max quá biên cho phép 0,1 m bị từ chối trước khi ghi. Giữ hướng yaw gần hướng hiện tại vì không nhận biết đầu/đuôi xe.
-6. Ground đủ tin cậy (confidence ≥0,65) thì đặt đáy theo điểm ground cao nhất dưới footprint và tính H. Nếu chưa đủ, cho phép fit XY/yaw và giữ Z/H; box có chiều cao vượt profile vẫn có thể bị từ chối.
+Chọn/tạo box sơ bộ → kiểm tra class và subtype → chỉnh **Auto-Fit preset (metres)** nếu cần → **Save preset** → **Alt+Shift+A**. Kích thước L × W × H đầu ra đúng bằng preset, không suy ra từ độ lớn cụm LiDAR và không bị ép bởi khoảng QC. Preset được lưu theo class/subtype trong chrome.storage.local (demo dùng localStorage), áp dụng giữa các job trên trình duyệt này. Chỉnh input chưa Save không thay đổi preset; Reset chỉ khôi phục preset của class/subtype đang chọn.
 
-Cần ít nhất 10 điểm vật thể. Kết quả vẫn cần annotator kiểm tra khi điểm thưa, che khuất, nối cụm hoặc annotation lân cận sai. Việc tách hai radius ổn định không chứng minh cụm thuộc đúng vật thể.
+Các giá trị khởi điểm sau chỉ để thử và cần team duyệt. Một preset car không thể ôm khít đồng thời mọi sedan/SUV/MPV. Các subtype quá đa dạng như other không có preset mặc định; nhập và lưu kích thước trước khi dùng.
 
-Auto-Fit ghi một lần qua `ObjectState.save()` và Redux/history native, hỗ trợ Undo/Redo. Không REST PATCH annotation.
+| Preset | L × W × H (m) |
+|---|---|
+| `vehicles:car` | 4.5 × 1.8 × 1.5 |
+| `vehicles:truck` | 8 × 2.5 × 3.2 |
+| `vehicles:bus` | 10 × 2.6 × 3.2 |
+| `vehicles:van` | 5 × 2 × 2.2 |
+| `vehicles:pickup` | 5.3 × 1.9 × 1.8 |
+| `vehicles:construction` | 6 × 2.5 × 3 |
+| `vehicles:trailer` | 10 × 2.5 × 3 |
+| `vehicles:tricycle` | 2.5 × 1.2 × 1.6 |
+| `vehicles:stroller` | 1 × 0.6 × 1 |
+| `vehicles:wheelchair` | 1.1 × 0.7 × 1.2 |
+| `two-wheels` | 2 × 0.7 × 1.6 |
+| `pedestrian` | 0.6 × 0.6 × 1.7 |
+| `Animal` | 1.2 × 0.6 × 0.8 |
+| `Obstacle` | 1 × 1 × 1 |
+
+1. Đọc THREE.Points của frame và ground cục bộ độc lập với đáy box hiện tại. Box nhỏ/bay cao vẫn dùng kích thước preset để tìm vùng hỗ trợ.
+2. LiDAR chỉ phục vụ căn tâm XY và trục dọc/ngang. Lọc ground, loại vùng sâu trong box lân cận (giữ điểm thuộc seed), tách cụm 3D trên voxel 0,12 m. Thử radius 0,45 / 0,3 / 0,25 / 0,2 m; sau khi giảm radius, yêu cầu hai kết quả liên tiếp có IoU ≥0,9.
+3. Dùng trục dài trên occupancy XY cân bằng mật độ, kết hợp mặt đứng cho xe ô tô nếu hai hướng đồng thuận. Xe máy dùng trục dài XY để hạn chế ảnh hưởng mật độ điểm người lái. Không nhận diện đầu/đuôi: chọn hướng trước/sau gần yaw hiện tại. Keep direction giữ yaw chính xác; hướng không rõ cũng giữ yaw và báo cảnh báo.
+4. Nếu thiếu một phần vật thể, không dùng trung bình điểm làm tâm xe: giữ tâm sơ bộ khi nó vẫn bao phủ phần quan sát được, chỉ dịch khi cần. Báo cảnh báo tâm chưa chắc chắn. Cụm lẫn vật thể, vượt footprint preset, mơ hồ hoặc không đủ điểm bị từ chối.
+5. L/W/H không thay đổi theo điểm. Ground phải hợp lệ, confidence ≥0,65; kiểm tra lại ground dưới footprint cuối rồi đặt đáy tại điểm cao nhất của mặt phẳng dưới bốn góc. Hai ground lệch trên 0,35 m hoặc ground cuối không đủ tin cậy thì giữ nguyên box, không fallback fit XY với box lơ lửng.
+6. Ghi một native ObjectState.save, hỗ trợ Undo/Redo, realtime; Save CVAT để lưu server. Không REST PATCH annotation. Auto Adjust vẫn là thao tác riêng và có thể thay đổi kích thước sau Auto-Fit.
+
+Điểm thưa/che khuất vẫn có thể làm sai tâm hoặc hướng. Preset giải quyết sự nhất quán kích thước, không xác nhận đúng vật thể hay thay thế kiểm tra Top/Side/Front. Hàm fit theo extents cũ vẫn giữ cho regression nội bộ; nút Auto-Fit trong live/demo đã chuyển sang preset.
 
 ### Xuất ca thực tế
 
@@ -136,7 +160,7 @@ Chỉ giữ ca fit gần nhất trong frame hiện tại; refresh làm mất d�
 ## Ground Snap, quay và Free Cam
 
 - **Ground Snap — Alt+Shift+G:** dịch Z để box chạm mặt phẳng ground; giữ kích thước và góc xoay. Mặt phẳng phải hợp lệ, slope ≤0,25; confidence ≥0,65 hoặc confidence ≥0,45 kèm RMSE ≤0,04 m và ít nhất 60 inliers. UI ghi ground ước lượng khi confidence thấp. Điều kiện thủ công này khác ngưỡng Auto-Fit tự snap.
-- Nếu footprint sau fit vẫn nằm trong bán kính ground đã khảo sát, giữ mặt phẳng vừa dùng để Snap không mất kết quả khi tính lại với footprint lớn. Cache mất hiệu lực khi đổi frame/cloud. Live Snap mặc định chặn |ΔZ| >1,5 m.
+- Sau preset Auto-Fit, cache mặt phẳng đã được kiểm tra dưới footprint cuối để Ground Snap tiếp tục sử dụng. Cache mất hiệu lực khi đổi frame/cloud. Live Snap mặc định chặn |ΔZ| >1,5 m.
 - **Quay:** Alt+Shift+[ / ] cho −90° / +90°; Alt+Shift+F cho 180°. Sửa yaw qua native save/history.
 - **Free Cam — Alt+Shift+C:** WASD/QE, Shift tăng tốc, chuột phải để nhìn; Esc trả orbit. Focus box kết thúc Free Cam.
 
@@ -167,7 +191,13 @@ node node_modules/@playwright/test/cli.js test
 
 Chạy demo bằng `node scripts/demo-server.cjs`. Đóng gói bằng `scripts/package-extension.ps1` trong PowerShell có quyền chạy script. Build extension tạo bundle MAIN và ISOLATED riêng, mỗi bundle chứa geometry để tránh lỗi dependency nạp thiếu. Build demo tạo HTML standalone, bundle Three.js và license trong dist.
 
-**Kiểm tra bản 1.8.0:** 64 unit test và17 browser test khác nhau pass (full suite16 và kiểm tra lại5 batch tests sau bổ sung test phím tắt). Bằng chứng tại docs/verification/batch-1.8.0-tests.json. Chưa chạy batch trên CVAT thật.
+**Kiểm tra bản 1.12.0:** 105 Node unit test, 11 Python test với HTTP server local, 29 browser test pass. Chưa chạy import bằng CLI lên CVAT thật. [Bằng chứng CLI](docs/verification/python-cli-1.12.0.md).
+
+**Kiểm tra bản 1.11.1 (lịch sử):** 105/105 unit test và 28/28 browser test pass (mock runtime/downloads). [Giới hạn kiểm chứng live export](docs/verification/export-1.11.1.md).
+
+**Kiểm tra bản 1.11.0 (lịch sử):** 101/101 unit test và 26/26 browser test pass trên bản đã build cuối; ZIP 19 file khớp source. Chưa nghiệm thu Auto-Fit trên CVAT thật. [Báo cáo preset Auto-Fit](docs/verification/preset-fit-1.11.0.md).
+
+**Kiểm tra bản 1.8.0 (lịch sử):** 64 unit test và17 browser test khác nhau pass (full suite16 và kiểm tra lại5 batch tests sau bổ sung test phím tắt). Bằng chứng tại docs/verification/batch-1.8.0-tests.json. Chưa chạy batch trên CVAT thật.
 
 **Kiểm tra bản 1.6.0 ngày 15/10/2026 (lịch sử):** 49/49 unit test, 8/8 browser test pass; ZIP 1.6.0 khớp source, standalone chứa đúng source hiện tại. Có test subtype từ attributes và fit profile bus/truck, native selection/history mock, Ground Snap sau fit, camera framing, danh sách nhiều lỗi và ROI thật. Chưa nghiệm thu thao tác chọn/sửa/Save/reload trên tab CVAT thật; pass test không bảo đảm Auto-Fit đúng với mọi point cloud.
 

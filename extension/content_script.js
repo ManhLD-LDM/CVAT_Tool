@@ -115,16 +115,20 @@
     async function action(type,payload={}) {
         if(busy||!settingsReady)return;
         // Capture settings and reference before asynchronous work begins.
-        if(type==='AUTO_FIT')payload={...payload,keepDirection:settings.keepDirection};
+        if(type==='AUTO_FIT'){
+            const box=snapshot?.boxes.find(b=>b.id===snapshot.activeBoxId),preset=box&&geometry().resolveFitPreset(box.label_name,box.subType,settings.presetOverrides);
+            if(!preset?.dimensions){toast('Set and save L/W/H preset for this class/subtype first',true);return;}
+            payload={...payload,keepDirection:settings.keepDirection,presetDimensions:preset.dimensions};
+        }
         if(type==='MOVE_TO_MOUSE')payload={...payload,adjustDirection:settings.adjustMoveDirection};
         let ref;try{if(type!=='FREECAM')ref=reference();}catch(error){toast(error.message,true);return;}
         busy=true;renderInspector();status('Processing…');
         try {
-            if(type==='AUTO_FIT'){toast(payload.keepDirection?'Auto-Fitting: keeping direction…':'Auto-Fitting: reading cluster points and estimating heading…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
+            if(type==='AUTO_FIT'){toast(payload.keepDirection?'Auto-Fitting: keeping direction…':'Auto-Fitting: applying fixed preset, aligning position/direction and checking ground…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
             const result=await request(type,type==='FREECAM'?payload:{ref,...payload});
             if(type==='AUTO_FIT'){
                 const timing=Number.isFinite(result.elapsedMs)?` · ${(result.elapsedMs/1000).toFixed(2)}s`:'';
-                toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.groundFallback?' · low ground confidence, preserved Z/height':''} · review box and Save CVAT`)+timing);
+                toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.preset?' · '+result.preset.dimensions.join(' × ')+' m · grounded':''}${result.warning?' · '+result.warning:''} · review box and Save CVAT`)+timing);
                 if(result.timingsMs)console.info('[CVAT 3D TOOL] Auto-Fit timings (ms)',result.timingsMs);
             }
             else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${result.warning?' · '+result.warning:' · snapped to ground'} · Save CVAT`);
@@ -169,6 +173,7 @@
                 <div class="c3d-toolbar"><button id="c3d-btn-scan" class="c3d-btn-primary">RUN QC NOW <kbd>Alt Shift L</kbd></button><div class="c3d-toggles"><label><input id="c3d-auto" type="checkbox" checked> Auto QC</label><label><input id="c3d-colors" type="checkbox" checked> 3D Error Colors</label></div>
                     <div class="c3d-action-grid"><button id="c3d-btn-ground" class="c3d-btn-secondary" title="Alt+Shift+G">Ground Snap</button><button id="c3d-btn-freecam" class="c3d-btn-secondary" title="Alt+Shift+C">Free Cam</button></div>
                     <div class="c3d-fit-row"><button id="c3d-btn-autofit" class="c3d-btn-primary">AUTO-FIT BOX <kbd></kbd></button><label><input id="c3d-keep-direction" type="checkbox"> Keep direction</label></div>
+                    <fieldset class="c3d-preset"><legend>Auto-Fit preset (metres)</legend><div id="c3d-preset-summary">Select a box</div><div class="c3d-preset-fields"><label>L <input id="c3d-preset-l" aria-label="Preset length" type="number" min="0.1" max="30" step="0.05"></label><label>W <input id="c3d-preset-w" aria-label="Preset width" type="number" min="0.1" max="8" step="0.05"></label><label>H <input id="c3d-preset-h" aria-label="Preset height" type="number" min="0.1" max="8" step="0.05"></label></div><div class="c3d-action-grid"><button id="c3d-preset-save" class="c3d-btn-mini">Save preset</button><button id="c3d-preset-reset" class="c3d-btn-mini">Reset preset</button></div></fieldset>
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
                     <button id="c3d-btn-settings" class="c3d-btn-secondary">Keyboard shortcuts</button>
@@ -190,12 +195,21 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.10.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.12.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
         el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
         el('c3d-btn-settings').addEventListener('click',openSettings);
+        function editPreset(reset=false){
+            const box=snapshot?.boxes.find(b=>b.id===snapshot.activeBoxId),math=geometry(),preset=box&&math.resolveFitPreset(box.label_name,box.subType);
+            if(!preset||busy||!settingsReady)return;
+            const values=['l','w','h'].map(axis=>Number(el('c3d-preset-'+axis).value));
+            if(reset)delete settings.presetOverrides[preset.key];
+            else {if(!math.validFitPreset(values)){toast('Use positive dimensions: L 0.1–30m, W/H 0.1–8m',true);return;}settings.presetOverrides[preset.key]=values;}
+            saveSettings();el('c3d-preset-summary').dataset.signature='';renderInspector();toast('Preset '+(reset?'reset':'saved')+' for '+preset.key+' · applies when you next run Auto-Fit');
+        }
+        el('c3d-preset-save').onclick=()=>editPreset();el('c3d-preset-reset').onclick=()=>editPreset(true);
         // Placement requires hovering the canvas; the button explains its shortcut.
         el('c3d-btn-move').addEventListener('click',()=>toast(`Hover over the object in the top view, then press ${shortcuts.format(settings.bindings.MOVE_TO_MOUSE)}${settings.bindings.MOVE_TO_MOUSE?'':' (assign a shortcut in settings)'}`));
         batchUI=window.__C3D_BATCH_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
@@ -251,6 +265,14 @@
         const math=geometry(false);
         const s=snapshot,box=s?.boxes.find(b=>b.id===s.activeBoxId),geom=box&&math?.parseCVAT16Points(box.points);
         const cap=s?.capabilities || {};
+        const preset=box&&math?.resolveFitPreset(box.label_name,box.subType,settings.presetOverrides),signature=JSON.stringify(preset);
+        const summary=el('c3d-preset-summary');
+        if(summary.dataset.signature!==signature){
+            summary.dataset.signature=signature;
+            summary.textContent=preset?preset.key+' · '+(preset.custom?'custom':preset.dimensions?'starting preset — review':'configure dimensions'):'Select a supported class';
+            ['l','w','h'].forEach((axis,i)=>{el('c3d-preset-'+axis).value=preset?.dimensions?.[i]??'';});
+        }
+        for(const id of ['c3d-preset-l','c3d-preset-w','c3d-preset-h','c3d-preset-save','c3d-preset-reset'])el(id).disabled=!preset||!settingsReady||busy;
         text('c3d-badge-conn',s?.connected?(s.mode==='demo'?'OFFLINE DEMO':'LIVE EDITOR'):'WAITING CVAT');
         el('c3d-badge-conn').classList.toggle('c3d-status-err',!s?.connected);
         text('c3d-context-label',s?.connected?`Job ${s.jobId} · Frame ${s.frame} · clientID`:(s?.reason||'Finding CVAT editor…'));

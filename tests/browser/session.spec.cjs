@@ -2,15 +2,15 @@ const {test,expect}=require('@playwright/test');
 test.beforeEach(async({page})=>{
  await page.addInitScript(()=>{
   window.cookieReads=0;window.apiCalls=[];window.downloads=0;
-  window.chrome={downloads:{download:async()=>{window.downloads++;return 1;},search:async()=>[{state:'complete'}]},runtime:{sendMessage:async message=>{
+  window.chrome={downloads:{download:async()=>{window.downloads++;return 1;},search:async()=>[{state:'complete'}]},runtime:{getURL:path=>location.origin+'/extension/'+path,sendMessage:async message=>{
    if(message.type==='C3D_CONTEXT')return {ok:true,result:{tabId:2,origin:'https://app.cvat.ai',jobId:17}};
    window.cookieReads++;return {ok:true,result:{session:{value:'fake-session',httpOnly:true,expires:null},csrf:'fake-csrf'}};
   }},tabs:{reload:async()=>{},sendMessage:async(id,q)=>{
    window.apiCalls.push(q);
-   const responses={formats:{exporters:[{name:'CVAT 3D',enabled:true}],importers:[{name:'CVAT 3D',enabled:true}]},
+   const responses={formats:{exporters:[{name:'Datumaro 3D 1.0',dimension:'3d',enabled:true}],importers:[{name:'CVAT 3D',enabled:true}]},
    user:{username:'test-annotator'},export:{rq_id:'export-test'},import:{rq_id:'import-test'},
    status:{status:'finished',result_url:'https://app.cvat.ai/api/jobs/17/dataset/export?download=true'},
-   download:{bytes:[80,75]}};
+   'native-export':{schema:'cvat-3d-tool-native-annotations/v1',jobId:17,annotations:{tags:[],shapes:[],tracks:[{id:1,shapes:[{frame:0},{frame:7},{frame:14}]}]}},download:{bytes:[80,75,3,4]}};
    return {ok:true,result:responses[q.operation]};
   }}};
   Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>window.clipboardText=text},configurable:true});
@@ -61,4 +61,31 @@ test('cancelled backup download prevents any import upload',async({page})=>{
  page.once('dialog',d=>d.accept());await page.locator('#import').click();
  await expect(page.locator('#status')).toContainText('Download bị hủy');
  expect(await page.evaluate(()=>window.apiCalls.some(q=>q.operation==='import'))).toBe(false);
+});
+
+test('native JSON export uses annotation-read operation and never requests raw cookies or ZIP export',async({page})=>{
+ await page.locator('#export-native').click();
+ await expect(page.locator('#status')).toContainText('Đã tải JSON native');
+ expect(await page.evaluate(()=>window.apiCalls.map(q=>q.operation))).toEqual(['native-export']);
+ expect(await page.evaluate(()=>window.cookieReads)).toBe(0);expect(await page.evaluate(()=>window.downloads)).toBe(1);
+});
+
+test('dataset export refusal reports permission error; backup failure never uploads annotations',async({page})=>{
+ await page.locator('#formats').click();
+ await page.evaluate(()=>{const original=chrome.tabs.sendMessage;chrome.tabs.sendMessage=async(id,q)=>q.operation==='export'?{ok:false,error:'CVAT refuses dataset export (403). Ask the owner/admin.'}:original(id,q);});
+ await page.locator('#export').click();await expect(page.locator('#status')).toContainText('403');
+ expect(await page.evaluate(()=>window.downloads)).toBe(0);
+});
+
+test('bundled Python CLI downloads and generated commands bind server/job without cookie values',async({page})=>{
+ await page.locator('#python-download').click();await expect(page.locator('#status')).toContainText('Đã tải cvat_annotations.py');
+ expect(await page.evaluate(()=>window.downloads)).toBe(1);
+ await page.locator('#script').click();
+ let command=await page.evaluate(()=>window.clipboardText);
+ expect(command).toContain("--server 'https://app.cvat.ai' --job 17 --prompt-auth export-native");
+ expect(command).toContain('CVAT_SESSIONID');expect(command).not.toContain('fake-session');
+ await page.locator('#python-restore').click();command=await page.evaluate(()=>window.clipboardText);
+ expect(command).toContain('import-native');expect(command).toContain('--confirm-job 17 --editor-closed');expect(command).toContain('CLOSE CVAT editor');
+ expect(await page.evaluate(()=>window.apiCalls)).toEqual([]);expect(await page.evaluate(()=>window.cookieReads)).toBe(0);
+ await page.screenshot({path:'docs/verification/python-cli-1.12.0.png',fullPage:true});
 });

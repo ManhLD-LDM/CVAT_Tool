@@ -511,6 +511,102 @@
         return {accepted:true,yaw,deltaDegrees,reason:null,objectAxis:fine.yaw,anisotropy:fine.anisotropy,supportCount:fine.supportCount};
     }
 
+    // Starting presets, not certified labeling standards. Users can override per key.
+    const FIT_PRESETS = {
+        'vehicles:car':[4.5,1.8,1.5], 'vehicles:truck':[8,2.5,3.2], 'vehicles:bus':[10,2.6,3.2],
+        'vehicles:van':[5,2,2.2], 'vehicles:pickup':[5.3,1.9,1.8], 'vehicles:construction':[6,2.5,3],
+        'vehicles:trailer':[10,2.5,3], 'vehicles:tricycle':[2.5,1.2,1.6],
+        'vehicles:stroller':[1,.6,1], 'vehicles:wheelchair':[1.1,.7,1.2],
+        'two-wheels':[2,.7,1.6], pedestrian:[.6,.6,1.7], Animal:[1.2,.6,.8], Obstacle:[1,1,1],
+    };
+    function validFitPreset(value) {
+        return Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]);
+    }
+    function resolveFitPreset(label,subType=null,overrides={}) {
+        const spec=resolveDimensionSpec(label,subType);
+        if(!spec)return null;
+        let key=spec.resolvedKey;
+        if(key==='vehicles')key=`vehicles:${String(subType||'car').trim().toLowerCase()}`;
+        key=key.replace(/contruction$/i,'construction');
+        if(key.toLowerCase().startsWith('vehicles:'))key=key.toLowerCase();
+        const value=overrides[key]??FIT_PRESETS[key];
+        return {key,dimensions:validFitPreset(value)?value.slice():null,custom:Object.hasOwn(overrides,key)};
+    }
+    function fitPresetBox(points,classLabel,currentBox,neighborBoxes=[],presetOverride=null) {
+        const original=Array.from(currentBox.points||currentBox),ground=currentBox.ground;
+        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto-Fit supports upright boxes only');
+        if(!canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for preset Auto-Fit; box unchanged');
+        const preset=resolveFitPreset(classLabel,currentBox.subType||currentBox.attributes?.type);
+        const dimensions=presetOverride??preset?.dimensions;
+        if(!preset||!validFitPreset(dimensions))throw new Error('Configure valid L/W/H preset for this class/subtype first');
+        const seed=original.slice();seed.splice(6,3,...dimensions);
+        // Grounded preset-size seed also recovers an initially floating/tiny box.
+        seed[2]=ground.a*seed[0]+ground.b*seed[1]+ground.c+seed[8]/2;
+        const owned=new Set(),seedEvidence=new Set(extractBoxROI(points,{points:original},.05));
+        for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(points,box,-.1))if(!seedEvidence.has(p))owned.add(p);
+        const available=points.filter(p=>!owned.has(p));
+        const angleDiff=(a,b)=>.5*Math.atan2(Math.sin(2*(a-b)),Math.cos(2*(a-b)));
+        const bounds=a=>{a.sort((x,y)=>x-y);return [a[Math.floor((a.length-1)*.01)],a[Math.ceil((a.length-1)*.99)]];};
+        const attempts=[];let lastError=null,previous=null;
+        for(const radius of [.45,.3,.25,.2]){
+            try{
+                const candidates=seededClusters(available,{points:seed},ground,radius);
+                if(!candidates.length)throw new Error('Không đủ điểm LiDAR để Auto-Fit (cần ít nhất 10 điểm)');
+                const rank=candidates.map(item=>({...item,cells:new Set(extractBoxROI(item.cluster,{points:seed},.4).map(p=>p.map(v=>Math.floor(v/.12)).join(','))).size})).filter(item=>item.cells>=10).sort((a,b)=>b.cells-a.cells);
+                if(!rank.length)throw new Error('Không đủ điểm LiDAR để Auto-Fit (cần ít nhất 10 điểm)');
+                const xyCenter=item=>{
+                    const x=bounds(item.cluster.map(p=>p[0])),y=bounds(item.cluster.map(p=>p[1]));
+                    return [(x[0]+x[1])/2,(y[0]+y[1])/2];
+                };
+                // Disconnected roof/lower returns at the same XY footprint are
+                // not a second vehicle. Ambiguity requires a different XY center.
+                if(rank[1]&&rank[1].cells>=rank[0].cells*.8&&Math.hypot(...xyCenter(rank[1]).map((v,i)=>v-xyCenter(rank[0])[i]))>.25)
+                    throw new Error('Ambiguous nearby objects; move the preliminary box closer to the intended object');
+                const cluster=rank[0].cluster,cells=new Map();
+                for(const p of cluster){const k=p.map(v=>Math.floor(v/.12)).join(',');if(!cells.has(k))cells.set(k,p);}
+                const support=[...cells.values()],warnings=[];let yaw=original[5],aligned=false;
+                if(!currentBox.keepDirection){
+                    // Measure the long XY axis with equal occupancy weights; no rider/roof density bias.
+                    const heading=estimateFootprintHeading(support,{points:seed});
+                    let axis=heading.objectAxis;
+                    if(Number.isFinite(axis)){
+                        const c=Math.cos(axis),s=Math.sin(axis),u=bounds(support.map(p=>c*p[0]+s*p[1]));
+                        // A visible bumper is a long line too, but is much shorter
+                        // than the preset body. Do not mistake it for the car's side.
+                        if(u[1]-u[0]<Math.max(...dimensions.slice(0,2))*.5)axis=null;
+                    }
+                    if(Number.isFinite(axis)){
+                        const vehicle=preset.key.startsWith('vehicles:');
+                        const surface=vehicle?estimateVerticalHeading(support,yaw):null;
+                        if(surface?.accepted&&Math.abs(angleDiff(surface.yaw,axis))<20*Math.PI/180)axis=surface.yaw;
+                        yaw=original[5]+angleDiff(axis,original[5]);yaw=Math.atan2(Math.sin(yaw),Math.cos(yaw));aligned=true;
+                    }else warnings.push('Uncertain long axis; kept original direction');
+                }
+                const c=Math.cos(yaw),s=Math.sin(yaw),xs=[],ys=[];
+                for(const p of support){const dx=p[0]-seed[0],dy=p[1]-seed[1];xs.push(c*dx+s*dy);ys.push(-s*dx+c*dy);}
+                const bx=bounds(xs),by=bounds(ys),spans=[bx[1]-bx[0],by[1]-by[0]];
+                if(spans.some((v,i)=>v>dimensions[i]*1.25))throw new Error('Cluster exceeds preset footprint; possible neighboring object or wrong preset');
+                const center=(b,size)=>{
+                    if(b[1]-b[0]>=size*.65)return (b[0]+b[1])/2;
+                    warnings.push('Partially observed object; center constrained by preliminary box');
+                    // Preserve the initial center when it already encloses incomplete evidence.
+                    return Math.max(b[1]-size/2,Math.min(b[0]+size/2,0));
+                };
+                const dx=center(bx,dimensions[0]),dy=center(by,dimensions[1]);
+                if(Math.hypot(dx,dy)>Math.max(dimensions[0],dimensions[1])*.6)throw new Error('Object center too far from preliminary box');
+                const result=original.slice();result[0]+=c*dx-s*dy;result[1]+=s*dx+c*dy;result[5]=yaw;result.splice(6,3,...dimensions);
+                const fitted=snapGroundPoints(result,makePlane(ground.a,ground.b,ground.c)).newPoints;
+                attempts.push({radius,pointCount:cluster.length,status:'valid'});
+                const selection={fitted,cluster,preset:{key:preset.key,dimensions:dimensions.slice()},radius,aligned,warnings:[...new Set(warnings)],attempts,excludedNeighborPoints:owned.size};
+                if(radius===.45)return selection;
+                if(previous&&orientedIoU(previous.fitted,fitted)>=.9)return {...previous,attempts};
+                previous=selection;
+            }catch(error){lastError=error;previous=null;attempts.push({radius,status:'rejected',reason:error.message});}
+        }
+        throw lastError||new Error('Unable to isolate a stable object for preset alignment; box unchanged');
+    }
+
     function fitSeededBox(points, classLabel, currentBox, neighborBoxes = []) {
         // Respect only the interior of existing neighboring annotations.
         // Seed points are always retained, including overlapping annotations.
@@ -681,7 +777,7 @@
     }
 
     const api = {
-        VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec,
+        VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec, FIT_PRESETS, validFitPreset, resolveFitPreset, fitPresetBox,
         fitSeededBox, autoAdjustBox, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
         SpatialPointIndex, minimumRectangleYaw, selectSeedCluster, extractBoxROI, fitBoxToCluster,
         DIMENSION_SPECS, idOf, parseCVAT16Points, cuboidVertices, rotateYawPoints, makePlane, fitPlane,
@@ -882,7 +978,8 @@ root.__C3D_BATCH_UI={mount};
 /* Isolated content world: same-origin requests retain CVAT's session/CSRF.
  * Runtime-only messages; no API operation or credentials use CustomEvent. */
 function createSessionTransport(env) {
- let importSubmitted=false;
+ let importSubmitted=false,formats=null;
+ const supported3D=item=>item?.enabled!==false&&(item?.dimension==='3d'||(!item?.dimension&&/3d|point.?cloud|kitti raw/i.test(item?.name||'')));
  const context=()=>{
   const s=env.snapshot(),match=new URL(env.url()).pathname.match(/\/jobs\/(\d+)(?:\/|$)/);
   if(!s?.connected||!match||Number(match[1])!==s.jobId)throw new Error('CVAT editor is not ready');
@@ -892,21 +989,25 @@ function createSessionTransport(env) {
   const s=context(),origin=new URL(env.url()).origin;
   if(request.origin!==origin||request.jobId!==s.jobId)throw new Error('CVAT job changed');
   const root='/api/jobs/'+s.jobId;
-  const mutable=['export','import'].includes(request.operation);
+  const mutable=['export','import','native-export'].includes(request.operation);
   if(mutable&&importSubmitted)throw new Error('Import already submitted; reload CVAT before further operations');
   if(mutable&& !['saved','local'].includes(s.saveState))throw new Error('Save CVAT changes before Import/Export');
   let path,method='GET',body;
   switch(request.operation){
-   case 'context':return {jobId:s.jobId,saveState:s.saveState};
+   case 'context':return {jobId:s.jobId,saveState:s.saveState,dimension:'3d'};
    case 'user':path='/api/users/self';break;
    case 'formats':path='/api/server/annotation/formats';break;
    case 'status':path='/api/requests/'+encodeURIComponent(request.requestId);break;
-   case 'export':path=root+'/dataset/export?'+new URLSearchParams({format:request.format,save_images:'false',location:'local'});method='POST';break;
+   case 'export':
+    if(!formats?.exporters.some(f=>f.name===request.format))throw new Error('Load and select a supported 3D export format first');
+    path=root+'/dataset/export?'+new URLSearchParams({format:request.format,save_images:'false',location:'local'});method='POST';break;
+   case 'native-export':path=root+'/annotations';break;
    case 'import':
     if(request.confirmJob!==s.jobId||!s.capabilities?.edit)throw new Error('Confirm the editable destination job');
+    if(!formats?.importers.some(f=>f.name===request.format))throw new Error('Load and select a supported 3D import format first');
     if(!request.file||request.file.bytes.length>8*1024*1024)throw new Error('File exceeds 8 MiB transfer limit');
     body=new FormData();body.append('annotation_file',new Blob([Uint8Array.from(request.file.bytes)]),request.file.name);
-    path=root+'/annotations/?'+new URLSearchParams({format:request.format,location:'local'});method='POST';break;
+    path=root+'/annotations/?'+new URLSearchParams({format:request.format,location:'local',use_default_location:'false'});method='POST';break;
    case 'download':{
     const url=new URL(request.url,origin);
     if(url.origin!==origin||!(url.pathname.startsWith(root+'/dataset/')||url.pathname.startsWith('/api/requests/')))throw new Error('Unsafe download URL');
@@ -915,16 +1016,32 @@ function createSessionTransport(env) {
    default:throw new Error('Unsupported session operation');
   }
   const csrf=env.cookie().split(';').map(x=>x.trim()).find(x=>x.startsWith('csrftoken='))?.slice(10);
-  const headers={};if(method!=='GET'&&csrf)headers['X-CSRFToken']=decodeURIComponent(csrf);
+  const headers={Accept:'application/vnd.cvat+json'};if(method!=='GET'&&csrf)headers['X-CSRFToken']=decodeURIComponent(csrf);
   if(request.operation==='import')importSubmitted=true;
   const response=await env.fetch(origin+path,{method,body,headers,credentials:'include',redirect:'error'});
-  if(!response.ok)throw new Error(response.status===401||response.status===403?'Session expired, CSRF rejected, or permission denied ('+response.status+')':'CVAT API error '+response.status);
+  if(!response.ok)throw new Error(request.operation==='export'&&response.status===403?'CVAT refuses dataset export (403). Ask the owner/admin, or use native JSON export if annotation reading is permitted.':response.status===401||response.status===403?'Session expired, CSRF rejected, or permission denied ('+response.status+')':'CVAT API error '+response.status);
   if(context().jobId!==s.jobId)throw new Error('Job changed; check server Requests before retrying');
   if(request.operation==='download'){
+   if(Number(response.headers?.get('content-length'))>8*1024*1024)throw new Error('Download exceeds 8 MiB; use CVAT native export');
    const buffer=await response.arrayBuffer();if(buffer.byteLength>8*1024*1024)throw new Error('Download exceeds 8 MiB; use CVAT native export');
-   return {bytes:Array.from(new Uint8Array(buffer))};
+   if(context().jobId!==s.jobId)throw new Error('Job changed; download discarded');
+   const bytes=new Uint8Array(buffer);
+   if(bytes.length<4||bytes[0]!==80||bytes[1]!==75||![[3,4],[5,6],[7,8]].some(([a,b])=>bytes[2]===a&&bytes[3]===b))throw new Error('CVAT did not return a ZIP archive; no file saved');
+   return {bytes:Array.from(bytes)};
   }
-  return response.status===204?{}:await response.json();
+  const data=response.status===204?{}:await response.json();
+  if(context().jobId!==s.jobId)throw new Error('Job changed; response discarded');
+  if(request.operation==='formats'){
+   formats={exporters:(data.exporters||[]).filter(supported3D),importers:(data.importers||[]).filter(supported3D)};
+   return {...formats,dimension:'3d',preferredExport:formats.exporters.find(f=>f.name==='Datumaro 3D 1.0')?.name||formats.exporters[0]?.name||null};
+  }
+  if(request.operation==='native-export'){
+   if(!['tags','shapes','tracks'].every(key=>Array.isArray(data[key])))throw new Error('Invalid native annotation response; no file saved');
+   const result={schema:'cvat-3d-tool-native-annotations/v1',origin,jobId:s.jobId,exportedAt:new Date().toISOString(),source:'saved-server-annotations',labels:s.labels||[],annotations:data};
+   if(new TextEncoder().encode(JSON.stringify(result)).length>8*1024*1024)throw new Error('JSON exceeds 8 MiB transfer limit');
+   return result;
+  }
+  return data;
  };
 }
 if(typeof module!=='undefined')module.exports={createSessionTransport};
@@ -957,12 +1074,15 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
         return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
     }
-    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,presetOverrides:{},bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
     function normalize(raw){
         const result=defaults();
         if(!raw||raw.version!==1)return result;
         result.keepDirection=raw.keepDirection===true;
         result.adjustMoveDirection=raw.adjustMoveDirection===true;
+        if(raw.presetOverrides&&typeof raw.presetOverrides==='object')for(const [key,value] of Object.entries(raw.presetOverrides)){
+            if(/^(vehicles:[a-z-]+|two-wheels|pedestrian|Animal|Obstacle)$/.test(key)&&Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]))result.presetOverrides[key]=value.slice();
+        }
         // Load valid custom bindings first so a default cannot steal a saved key.
         const seen=new Set(),missing=[];
         for(const d of definitions){
@@ -1105,16 +1225,20 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     async function action(type,payload={}) {
         if(busy||!settingsReady)return;
         // Capture settings and reference before asynchronous work begins.
-        if(type==='AUTO_FIT')payload={...payload,keepDirection:settings.keepDirection};
+        if(type==='AUTO_FIT'){
+            const box=snapshot?.boxes.find(b=>b.id===snapshot.activeBoxId),preset=box&&geometry().resolveFitPreset(box.label_name,box.subType,settings.presetOverrides);
+            if(!preset?.dimensions){toast('Set and save L/W/H preset for this class/subtype first',true);return;}
+            payload={...payload,keepDirection:settings.keepDirection,presetDimensions:preset.dimensions};
+        }
         if(type==='MOVE_TO_MOUSE')payload={...payload,adjustDirection:settings.adjustMoveDirection};
         let ref;try{if(type!=='FREECAM')ref=reference();}catch(error){toast(error.message,true);return;}
         busy=true;renderInspector();status('Processing…');
         try {
-            if(type==='AUTO_FIT'){toast(payload.keepDirection?'Auto-Fitting: keeping direction…':'Auto-Fitting: reading cluster points and estimating heading…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
+            if(type==='AUTO_FIT'){toast(payload.keepDirection?'Auto-Fitting: keeping direction…':'Auto-Fitting: applying fixed preset, aligning position/direction and checking ground…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
             const result=await request(type,type==='FREECAM'?payload:{ref,...payload});
             if(type==='AUTO_FIT'){
                 const timing=Number.isFinite(result.elapsedMs)?` · ${(result.elapsedMs/1000).toFixed(2)}s`:'';
-                toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.groundFallback?' · low ground confidence, preserved Z/height':''} · review box and Save CVAT`)+timing);
+                toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.preset?' · '+result.preset.dimensions.join(' × ')+' m · grounded':''}${result.warning?' · '+result.warning:''} · review box and Save CVAT`)+timing);
                 if(result.timingsMs)console.info('[CVAT 3D TOOL] Auto-Fit timings (ms)',result.timingsMs);
             }
             else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${result.warning?' · '+result.warning:' · snapped to ground'} · Save CVAT`);
@@ -1159,6 +1283,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 <div class="c3d-toolbar"><button id="c3d-btn-scan" class="c3d-btn-primary">RUN QC NOW <kbd>Alt Shift L</kbd></button><div class="c3d-toggles"><label><input id="c3d-auto" type="checkbox" checked> Auto QC</label><label><input id="c3d-colors" type="checkbox" checked> 3D Error Colors</label></div>
                     <div class="c3d-action-grid"><button id="c3d-btn-ground" class="c3d-btn-secondary" title="Alt+Shift+G">Ground Snap</button><button id="c3d-btn-freecam" class="c3d-btn-secondary" title="Alt+Shift+C">Free Cam</button></div>
                     <div class="c3d-fit-row"><button id="c3d-btn-autofit" class="c3d-btn-primary">AUTO-FIT BOX <kbd></kbd></button><label><input id="c3d-keep-direction" type="checkbox"> Keep direction</label></div>
+                    <fieldset class="c3d-preset"><legend>Auto-Fit preset (metres)</legend><div id="c3d-preset-summary">Select a box</div><div class="c3d-preset-fields"><label>L <input id="c3d-preset-l" aria-label="Preset length" type="number" min="0.1" max="30" step="0.05"></label><label>W <input id="c3d-preset-w" aria-label="Preset width" type="number" min="0.1" max="8" step="0.05"></label><label>H <input id="c3d-preset-h" aria-label="Preset height" type="number" min="0.1" max="8" step="0.05"></label></div><div class="c3d-action-grid"><button id="c3d-preset-save" class="c3d-btn-mini">Save preset</button><button id="c3d-preset-reset" class="c3d-btn-mini">Reset preset</button></div></fieldset>
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
                     <button id="c3d-btn-settings" class="c3d-btn-secondary">Keyboard shortcuts</button>
@@ -1180,12 +1305,21 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.10.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.12.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
         el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
         el('c3d-btn-settings').addEventListener('click',openSettings);
+        function editPreset(reset=false){
+            const box=snapshot?.boxes.find(b=>b.id===snapshot.activeBoxId),math=geometry(),preset=box&&math.resolveFitPreset(box.label_name,box.subType);
+            if(!preset||busy||!settingsReady)return;
+            const values=['l','w','h'].map(axis=>Number(el('c3d-preset-'+axis).value));
+            if(reset)delete settings.presetOverrides[preset.key];
+            else {if(!math.validFitPreset(values)){toast('Use positive dimensions: L 0.1–30m, W/H 0.1–8m',true);return;}settings.presetOverrides[preset.key]=values;}
+            saveSettings();el('c3d-preset-summary').dataset.signature='';renderInspector();toast('Preset '+(reset?'reset':'saved')+' for '+preset.key+' · applies when you next run Auto-Fit');
+        }
+        el('c3d-preset-save').onclick=()=>editPreset();el('c3d-preset-reset').onclick=()=>editPreset(true);
         // Placement requires hovering the canvas; the button explains its shortcut.
         el('c3d-btn-move').addEventListener('click',()=>toast(`Hover over the object in the top view, then press ${shortcuts.format(settings.bindings.MOVE_TO_MOUSE)}${settings.bindings.MOVE_TO_MOUSE?'':' (assign a shortcut in settings)'}`));
         batchUI=window.__C3D_BATCH_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
@@ -1241,6 +1375,14 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         const math=geometry(false);
         const s=snapshot,box=s?.boxes.find(b=>b.id===s.activeBoxId),geom=box&&math?.parseCVAT16Points(box.points);
         const cap=s?.capabilities || {};
+        const preset=box&&math?.resolveFitPreset(box.label_name,box.subType,settings.presetOverrides),signature=JSON.stringify(preset);
+        const summary=el('c3d-preset-summary');
+        if(summary.dataset.signature!==signature){
+            summary.dataset.signature=signature;
+            summary.textContent=preset?preset.key+' · '+(preset.custom?'custom':preset.dimensions?'starting preset — review':'configure dimensions'):'Select a supported class';
+            ['l','w','h'].forEach((axis,i)=>{el('c3d-preset-'+axis).value=preset?.dimensions?.[i]??'';});
+        }
+        for(const id of ['c3d-preset-l','c3d-preset-w','c3d-preset-h','c3d-preset-save','c3d-preset-reset'])el(id).disabled=!preset||!settingsReady||busy;
         text('c3d-badge-conn',s?.connected?(s.mode==='demo'?'OFFLINE DEMO':'LIVE EDITOR'):'WAITING CVAT');
         el('c3d-badge-conn').classList.toggle('c3d-status-err',!s?.connected);
         text('c3d-context-label',s?.connected?`Job ${s.jobId} · Frame ${s.frame} · clientID`:(s?.reason||'Finding CVAT editor…'));

@@ -451,33 +451,42 @@
                     const subType = resolveSubType(target, attrs);
                     const spec = math.resolveDimensionSpec ? math.resolveDimensionSpec(target.label.name, subType) : math.DIMENSION_SPECS[target.label.name];
                     if(!spec)throw new Error(`No dimension rule configured for class: ${target.label.name}${subType ? ` (${subType})` : ''}`);
-                    const ground=grounds[target.clientID],trusted=ground?.accepted&&ground.confidence>=.65;
-                    const searchBox=math.autoFitSearchBox(target,target.label.name,ground,subType),search=searchBox.points;
+                    const ground=grounds[target.clientID];
+                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for preset Auto-Fit; box unchanged');
+                    const preset=math.resolveFitPreset(target.label.name,subType);
+                    const dimensions=payload.presetDimensions??preset?.dimensions;
+                    if(!math.validFitPreset(dimensions))throw new Error('Configure valid L/W/H preset for this class/subtype first');
+                    const search=Array.from(target.points),diameter=Math.hypot(dimensions[0],dimensions[1]);
+                    search[3]=search[4]=search[5]=0;search[6]=search[7]=diameter*1.6;
+                    search[2]=ground.a*search[0]+ground.b*search[1]+ground.c+dimensions[2]/2;search[8]=dimensions[2]+.8;
+                    const searchBox={points:search};
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
-                        parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
+                        parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
                     const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
                     lastFitCase.neighborBoxes=neighbors.map(b=>({id:b.id,points:b.points,label:b.label_name,subType:b.subType}));
-                    const selection=math.fitSeededBox(points,target.label.name,{points:target.points,ground,allowGroundFallback:true,subType,attributes:attrs,keepDirection:payload.keepDirection===true},neighbors);
-                    const {cluster,fitted}=selection,clusterDone=now();
+                    const selection=math.fitPresetBox(points,target.label.name,{points:target.points,ground,subType,attributes:attrs,keepDirection:payload.keepDirection===true},neighbors,dimensions);
+                    const {cluster}=selection,clusterDone=now();
+                    let fitted=selection.fitted;
+                    const finalGround=cloudIndex.estimate({points:fitted});
+                    if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under final preset footprint; box unchanged');
+                    const seedZ=ground.a*fitted[0]+ground.b*fitted[1]+ground.c;
+                    const finalZ=finalGround.a*fitted[0]+finalGround.b*fitted[1]+finalGround.c;
+                    if(Math.abs(seedZ-finalZ)>.35)throw new Error('Conflicting ground estimates; box unchanged');
+                    fitted=math.snapGroundPoints(fitted,math.makePlane(finalGround.a,finalGround.b,finalGround.c)).newPoints;
+                    validate(payload.ref,true);
                     lastFitCase.parameters.selectedClusterRadius=selection.radius;
                     lastFitCase.selection={excludedNeighborPoints:selection.excludedNeighborPoints,attempts:selection.attempts};
                     lastFitCase.clusterPoints=cluster;lastFitCase.fittedBox={points:fitted.slice(),label:target.label.name,subType};
-                    // Preserve the measured local plane when the fitted footprint remains
-                    // inside its surveyed region. Re-estimating with a larger exclusion
-                    // footprint can otherwise lose the same road evidence.
-                    if(math.canManuallySnapGround(ground) && Number.isFinite(ground.radius) &&
-                       math.cuboidVertices(fitted).every(v=>Math.hypot(v[0]-target.points[0],v[1]-target.points[1])<=ground.radius)){
-                        const fittedKey=JSON.stringify([scope,target.clientID,fitted[0],fitted[1],...fitted.slice(3,8)]);
-                        groundCache.set(fittedKey,{...ground,reusedFromAutoFit:true});
-                    }
+                    const fittedKey=JSON.stringify([scope,target.clientID,fitted[0],fitted[1],...fitted.slice(3,8)]);
+                    groundCache.set(fittedKey,{...finalGround,reusedFromAutoFit:true});
                     const fitDone=now(),updated=await updateObject(payload.ref,{points:fitted}),done=now();
                     if(lastFitCase){lastFitCase.status='applied';lastFitCase.elapsedMs=done-started;}
-                    return {...updated,keepDirection:payload.keepDirection===true,pointCount:cluster.length,groundFallback:!trusted,groundReason:ground?.reason,elapsedMs:done-started,
+                    return {...updated,keepDirection:payload.keepDirection===true,preset:selection.preset,warning:selection.warnings.join(' · ')||null,aligned:selection.aligned,pointCount:cluster.length,groundFallback:false,elapsedMs:done-started,
                         timingsMs:{groundAndIndex:groundDone-started,roi:roiDone-groundDone,cluster:clusterDone-roiDone,fit:fitDone-clusterDone,nativeSave:done-fitDone}};
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);

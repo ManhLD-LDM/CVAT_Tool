@@ -35,6 +35,10 @@ env/
 credentials.json
 *.key
 
+# Default outputs of the bundled annotation CLI.
+/cvat-backups/
+/job*-native.json
+
 # Editor and OS junk
 .vscode/
 .idea/

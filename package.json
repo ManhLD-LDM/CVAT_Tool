@@ -1,6 +1,6 @@
 {
   "name": "cvat-3d-copilot",
-  "version": "1.10.0",
+  "version": "1.12.0",
   "private": true,
   "description": "CVAT editor adapter and offline 3D demo",
   "scripts": {
@@ -8,7 +8,8 @@
     "demo": "node scripts/demo-server.cjs",
     "test:e2e": "playwright test",
     "build:demo": "node scripts/build-demo.cjs",
-    "build:extension": "node scripts/build-extension.cjs"
+    "build:extension": "node scripts/build-extension.cjs",
+    "test:python": "python -m unittest discover -s tests -p test_annotation_cli.py"
   },
   "dependencies": {
     "three": "0.170.0"

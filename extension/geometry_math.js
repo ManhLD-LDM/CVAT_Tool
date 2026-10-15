@@ -510,6 +510,102 @@
         return {accepted:true,yaw,deltaDegrees,reason:null,objectAxis:fine.yaw,anisotropy:fine.anisotropy,supportCount:fine.supportCount};
     }
 
+    // Starting presets, not certified labeling standards. Users can override per key.
+    const FIT_PRESETS = {
+        'vehicles:car':[4.5,1.8,1.5], 'vehicles:truck':[8,2.5,3.2], 'vehicles:bus':[10,2.6,3.2],
+        'vehicles:van':[5,2,2.2], 'vehicles:pickup':[5.3,1.9,1.8], 'vehicles:construction':[6,2.5,3],
+        'vehicles:trailer':[10,2.5,3], 'vehicles:tricycle':[2.5,1.2,1.6],
+        'vehicles:stroller':[1,.6,1], 'vehicles:wheelchair':[1.1,.7,1.2],
+        'two-wheels':[2,.7,1.6], pedestrian:[.6,.6,1.7], Animal:[1.2,.6,.8], Obstacle:[1,1,1],
+    };
+    function validFitPreset(value) {
+        return Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]);
+    }
+    function resolveFitPreset(label,subType=null,overrides={}) {
+        const spec=resolveDimensionSpec(label,subType);
+        if(!spec)return null;
+        let key=spec.resolvedKey;
+        if(key==='vehicles')key=`vehicles:${String(subType||'car').trim().toLowerCase()}`;
+        key=key.replace(/contruction$/i,'construction');
+        if(key.toLowerCase().startsWith('vehicles:'))key=key.toLowerCase();
+        const value=overrides[key]??FIT_PRESETS[key];
+        return {key,dimensions:validFitPreset(value)?value.slice():null,custom:Object.hasOwn(overrides,key)};
+    }
+    function fitPresetBox(points,classLabel,currentBox,neighborBoxes=[],presetOverride=null) {
+        const original=Array.from(currentBox.points||currentBox),ground=currentBox.ground;
+        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto-Fit supports upright boxes only');
+        if(!canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for preset Auto-Fit; box unchanged');
+        const preset=resolveFitPreset(classLabel,currentBox.subType||currentBox.attributes?.type);
+        const dimensions=presetOverride??preset?.dimensions;
+        if(!preset||!validFitPreset(dimensions))throw new Error('Configure valid L/W/H preset for this class/subtype first');
+        const seed=original.slice();seed.splice(6,3,...dimensions);
+        // Grounded preset-size seed also recovers an initially floating/tiny box.
+        seed[2]=ground.a*seed[0]+ground.b*seed[1]+ground.c+seed[8]/2;
+        const owned=new Set(),seedEvidence=new Set(extractBoxROI(points,{points:original},.05));
+        for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(points,box,-.1))if(!seedEvidence.has(p))owned.add(p);
+        const available=points.filter(p=>!owned.has(p));
+        const angleDiff=(a,b)=>.5*Math.atan2(Math.sin(2*(a-b)),Math.cos(2*(a-b)));
+        const bounds=a=>{a.sort((x,y)=>x-y);return [a[Math.floor((a.length-1)*.01)],a[Math.ceil((a.length-1)*.99)]];};
+        const attempts=[];let lastError=null,previous=null;
+        for(const radius of [.45,.3,.25,.2]){
+            try{
+                const candidates=seededClusters(available,{points:seed},ground,radius);
+                if(!candidates.length)throw new Error('Không đủ điểm LiDAR để Auto-Fit (cần ít nhất 10 điểm)');
+                const rank=candidates.map(item=>({...item,cells:new Set(extractBoxROI(item.cluster,{points:seed},.4).map(p=>p.map(v=>Math.floor(v/.12)).join(','))).size})).filter(item=>item.cells>=10).sort((a,b)=>b.cells-a.cells);
+                if(!rank.length)throw new Error('Không đủ điểm LiDAR để Auto-Fit (cần ít nhất 10 điểm)');
+                const xyCenter=item=>{
+                    const x=bounds(item.cluster.map(p=>p[0])),y=bounds(item.cluster.map(p=>p[1]));
+                    return [(x[0]+x[1])/2,(y[0]+y[1])/2];
+                };
+                // Disconnected roof/lower returns at the same XY footprint are
+                // not a second vehicle. Ambiguity requires a different XY center.
+                if(rank[1]&&rank[1].cells>=rank[0].cells*.8&&Math.hypot(...xyCenter(rank[1]).map((v,i)=>v-xyCenter(rank[0])[i]))>.25)
+                    throw new Error('Ambiguous nearby objects; move the preliminary box closer to the intended object');
+                const cluster=rank[0].cluster,cells=new Map();
+                for(const p of cluster){const k=p.map(v=>Math.floor(v/.12)).join(',');if(!cells.has(k))cells.set(k,p);}
+                const support=[...cells.values()],warnings=[];let yaw=original[5],aligned=false;
+                if(!currentBox.keepDirection){
+                    // Measure the long XY axis with equal occupancy weights; no rider/roof density bias.
+                    const heading=estimateFootprintHeading(support,{points:seed});
+                    let axis=heading.objectAxis;
+                    if(Number.isFinite(axis)){
+                        const c=Math.cos(axis),s=Math.sin(axis),u=bounds(support.map(p=>c*p[0]+s*p[1]));
+                        // A visible bumper is a long line too, but is much shorter
+                        // than the preset body. Do not mistake it for the car's side.
+                        if(u[1]-u[0]<Math.max(...dimensions.slice(0,2))*.5)axis=null;
+                    }
+                    if(Number.isFinite(axis)){
+                        const vehicle=preset.key.startsWith('vehicles:');
+                        const surface=vehicle?estimateVerticalHeading(support,yaw):null;
+                        if(surface?.accepted&&Math.abs(angleDiff(surface.yaw,axis))<20*Math.PI/180)axis=surface.yaw;
+                        yaw=original[5]+angleDiff(axis,original[5]);yaw=Math.atan2(Math.sin(yaw),Math.cos(yaw));aligned=true;
+                    }else warnings.push('Uncertain long axis; kept original direction');
+                }
+                const c=Math.cos(yaw),s=Math.sin(yaw),xs=[],ys=[];
+                for(const p of support){const dx=p[0]-seed[0],dy=p[1]-seed[1];xs.push(c*dx+s*dy);ys.push(-s*dx+c*dy);}
+                const bx=bounds(xs),by=bounds(ys),spans=[bx[1]-bx[0],by[1]-by[0]];
+                if(spans.some((v,i)=>v>dimensions[i]*1.25))throw new Error('Cluster exceeds preset footprint; possible neighboring object or wrong preset');
+                const center=(b,size)=>{
+                    if(b[1]-b[0]>=size*.65)return (b[0]+b[1])/2;
+                    warnings.push('Partially observed object; center constrained by preliminary box');
+                    // Preserve the initial center when it already encloses incomplete evidence.
+                    return Math.max(b[1]-size/2,Math.min(b[0]+size/2,0));
+                };
+                const dx=center(bx,dimensions[0]),dy=center(by,dimensions[1]);
+                if(Math.hypot(dx,dy)>Math.max(dimensions[0],dimensions[1])*.6)throw new Error('Object center too far from preliminary box');
+                const result=original.slice();result[0]+=c*dx-s*dy;result[1]+=s*dx+c*dy;result[5]=yaw;result.splice(6,3,...dimensions);
+                const fitted=snapGroundPoints(result,makePlane(ground.a,ground.b,ground.c)).newPoints;
+                attempts.push({radius,pointCount:cluster.length,status:'valid'});
+                const selection={fitted,cluster,preset:{key:preset.key,dimensions:dimensions.slice()},radius,aligned,warnings:[...new Set(warnings)],attempts,excludedNeighborPoints:owned.size};
+                if(radius===.45)return selection;
+                if(previous&&orientedIoU(previous.fitted,fitted)>=.9)return {...previous,attempts};
+                previous=selection;
+            }catch(error){lastError=error;previous=null;attempts.push({radius,status:'rejected',reason:error.message});}
+        }
+        throw lastError||new Error('Unable to isolate a stable object for preset alignment; box unchanged');
+    }
+
     function fitSeededBox(points, classLabel, currentBox, neighborBoxes = []) {
         // Respect only the interior of existing neighboring annotations.
         // Seed points are always retained, including overlapping annotations.
@@ -680,7 +776,7 @@
     }
 
     const api = {
-        VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec,
+        VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec, FIT_PRESETS, validFitPreset, resolveFitPreset, fitPresetBox,
         fitSeededBox, autoAdjustBox, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
         SpatialPointIndex, minimumRectangleYaw, selectSeedCluster, extractBoxROI, fitBoxToCluster,
         DIMENSION_SPECS, idOf, parseCVAT16Points, cuboidVertices, rotateYawPoints, makePlane, fitPlane,

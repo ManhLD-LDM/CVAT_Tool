@@ -8,7 +8,7 @@ $nodeBin = if ($nodeCmd) { 'node' } elseif (Test-Path "C:\Users\LeManh\AppData\L
 & $nodeBin (Join-Path $PSScriptRoot 'build-extension.cjs')
 if ($LASTEXITCODE -ne 0) { throw 'Extension build failed' }
 $manifestVersion = (Get-Content -LiteralPath (Join-Path $projectDirectory 'extension/manifest.json') -Raw | ConvertFrom-Json).version
-$packageFiles = @('manifest.json','copilot_main.js','copilot_panel.js','geometry_math.js','cvat_adapter.js','main_world_bridge.js','content_script.js','shortcut_settings.js','styles.css','session_transport.js','session_worker.js','session.html','session.css','session.js','batch_math.js','batch_cloud.js','batch_controller.js','batch_ui.js','THIRD_PARTY_LICENSES.txt')
+$packageFiles = @('manifest.json','copilot_main.js','copilot_panel.js','geometry_math.js','cvat_adapter.js','main_world_bridge.js','content_script.js','shortcut_settings.js','styles.css','session_transport.js','session_worker.js','session.html','session.css','session.js','batch_math.js','batch_cloud.js','batch_controller.js','batch_ui.js','THIRD_PARTY_LICENSES.txt','cvat_annotations.py')
 foreach ($packageFile in $packageFiles) {
     Copy-Item -LiteralPath (Join-Path $projectDirectory ('extension/' + $packageFile)) -Destination (Join-Path $packageDirectory $packageFile) -Force
 }
