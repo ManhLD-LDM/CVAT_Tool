@@ -362,7 +362,13 @@
 
     // Local cleanup of five faces. Ground fixes the bottom; heading is immutable.
     // Unlike Auto-Fit, this does not impose class dimensions or search for a heading.
-    function autoAdjustBox(points, currentBox, ground, neighborBoxes = []) {
+    function autoAdjustOptions(options = {}) {
+        const {maxShrinkDistance = .1,maxShrinkPercent = 5}=options;
+        if(!Number.isFinite(maxShrinkDistance)||maxShrinkDistance<0||maxShrinkDistance>.4||!Number.isFinite(maxShrinkPercent)||maxShrinkPercent<0||maxShrinkPercent>50)throw new Error('Shrink limits must be 0–40 cm and 0–50%');
+        return {maxShrinkDistance,maxShrinkPercent};
+    }
+    function autoAdjustBox(points, currentBox, ground, neighborBoxes = [], options = {}) {
+        const {maxShrinkDistance,maxShrinkPercent}=autoAdjustOptions(options);
         const original=Array.from(currentBox.points||currentBox);
         if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
         if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
@@ -370,13 +376,20 @@
         const plane=makePlane(ground.a,ground.b,ground.c),snap=snapGroundPoints(original,plane);
         if(Math.abs(snap.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
         const base=snap.newPoints,c=Math.cos(base[5]),s=Math.sin(base[5]),owned=new Set();
-        const local=extractBoxROI(points,{points:base},.4);
+        const roi=extractBoxROI(points,{points:base},.4);
+        const rmse=Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0;
+        const groundClearance=Math.max(.2,3*rmse);
+        // Remove the entire near-ground band before clustering. Otherwise road
+        // returns can bridge into the object and supply false face evidence.
+        // Use each point's local plane height so slopes are handled correctly.
+        const local=roi.filter(p=>p[2]-plane.getTargetZ(p[0],p[1])>groundClearance+1e-6);
+        const excludedNearGroundPoints=roi.length-local.length;
         for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(local,box,.02))owned.add(p);
         const clusters=seededClusters(local.filter(p=>!owned.has(p)),{points:base},ground,.45).map(({cluster})=>{
             const interior=extractBoxROI(cluster,{points:base},0),cells=new Set(interior.map(p=>p.map(v=>Math.floor(v/.08)).join(',')));
             return {cluster,inside:cells.size};
         }).filter(item=>item.inside>=10&&item.cluster.length>=20).sort((a,b)=>b.inside-a.inside);
-        if(!clusters.length)throw new Error('Insufficient object points inside this box; Auto Adjust left it unchanged');
+        if(!clusters.length)throw new Error(`Insufficient object points above the ${(groundClearance*100).toFixed(0)}cm ground exclusion band; box unchanged`);
         if(clusters[1]&&clusters[1].inside>=clusters[0].inside*.8)throw new Error('Ambiguous object clusters inside this box; Auto Adjust left it unchanged');
         const cluster=clusters[0].cluster,cells=new Map();
         for(const p of cluster){const key=p.map(v=>Math.floor(v/.08)).join(',');if(!cells.has(key))cells.set(key,[c*(p[0]-base[0])+s*(p[1]-base[1]),-s*(p[0]-base[0])+c*(p[1]-base[1]),p[2]]);}
@@ -401,7 +414,7 @@
             const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
             // Never walk a face across an occluded region, even on repeated
             // presses: distant evidence means preserve, not clamp-and-shrink.
-            const shrinkLimit=Math.min(.1,base[6+axis]*.05);
+            const shrinkLimit=Math.min(maxShrinkDistance,base[6+axis]*maxShrinkPercent/100);
             if(shrinking&&sign*(e.value-old[face])>shrinkLimit+1e-8){retainedFaces.push(names[face]);continue;}
             // Empty space alone is not evidence of a hidden surface. Side
             // shrinking needs vertical surface support; top needs an XY patch.
@@ -415,9 +428,9 @@
         const bottom=Math.max(...[[-1,-1],[-1,1],[1,-1],[1,1]].map(([x,y])=>plane.getTargetZ(result[0]+c*x*result[6]/2-s*y*result[7]/2,result[1]+s*x*result[6]/2+c*y*result[7]/2)));
         result[8]=next[4]-bottom;result[2]=bottom+result[8]/2;
         if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
-        if(result[8]<base[8]-Math.min(.1,base[8]*.05)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
+        if(result[8]<base[8]-Math.min(maxShrinkDistance,base[8]*maxShrinkPercent/100)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
         return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
-            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces};
+            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints};
     }
 
     // Mouse placement is a position correction, not a dimension or heading fit.
@@ -778,7 +791,7 @@
 
     const api = {
         VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec, FIT_PRESETS, validFitPreset, resolveFitPreset, fitPresetBox,
-        fitSeededBox, autoAdjustBox, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
+        fitSeededBox, autoAdjustBox, autoAdjustOptions, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
         SpatialPointIndex, minimumRectangleYaw, selectSeedCluster, extractBoxROI, fitBoxToCluster,
         DIMENSION_SPECS, idOf, parseCVAT16Points, cuboidVertices, rotateYawPoints, makePlane, fitPlane,
         estimateRoadPlane, snapGroundPoints, footprint, polygonArea, polygonIntersection, orientedIoU,
@@ -1074,7 +1087,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
         return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
     }
-    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,presetOverrides:{},bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,presetOverrides:{},followSelected:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
     function normalize(raw){
         const result=defaults();
         if(!raw||raw.version!==1)return result;
@@ -1083,6 +1096,8 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         if(raw.presetOverrides&&typeof raw.presetOverrides==='object')for(const [key,value] of Object.entries(raw.presetOverrides)){
             if(/^(vehicles:[a-z-]+|two-wheels|pedestrian|Animal|Obstacle)$/.test(key)&&Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]))result.presetOverrides[key]=value.slice();
         }
+        result.followSelected=raw.followSelected===true;
+        for(const [key,max] of [['maxShrinkDistance',.4],['maxShrinkPercent',50]])if(Number.isFinite(raw[key])&&raw[key]>=0&&raw[key]<=max)result[key]=raw[key];
         // Load valid custom bindings first so a default cannot steal a saved key.
         const seen=new Set(),missing=[];
         for(const d of definitions){
@@ -1118,12 +1133,20 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     const shortcuts=window.__C3D_SHORTCUTS,settingsKey='c3d.settings.v1';
     let settings=shortcuts.defaults(),settingsReady=false,recording=null,settingsPanel=null;
     let saveQueue=Promise.resolve();
+    let followSyncKey='';
+    function syncFollowCamera(){
+        if(!settingsReady||!snapshot?.connected||!snapshot.capabilities?.followCamera)return;
+        const key=`${snapshot.sessionId}:${settings.followSelected}`;
+        if(followSyncKey===key||!!snapshot.followCameraEnabled===settings.followSelected)return;
+        followSyncKey=key;
+        request('FOLLOW_CAMERA',{enabled:settings.followSelected}).catch(error=>toast(error.message,true));
+    }
     async function loadSettings(){
         try{
             const stored=globalThis.chrome?.storage?.local ? (await chrome.storage.local.get(settingsKey))[settingsKey] : JSON.parse(localStorage.getItem(settingsKey)||'null');
             settings=shortcuts.normalize(stored);
         }catch(error){console.warn('[CVAT 3D TOOL] Settings unavailable:',error.message);}
-        settingsReady=true;refreshShortcutHints();renderInspector();
+        settingsReady=true;refreshShortcutHints();renderInspector();syncFollowCamera();
     }
     function saveSettings(){
         const value=JSON.parse(JSON.stringify(settings));
@@ -1139,17 +1162,36 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
             const node=el(d.button);if(!node)continue;
             const hint=shortcuts.format(settings.bindings[d.id]);
             node.title=d.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse?'Move to mouse unavailable: top-view camera or canvas API missing':`${d.label} · ${hint}`;
-            if(d.id==='AUTO_ADJUST')node.title+=' · Expand nearby missed points; shrink only toward a nearby supported face, within 10cm or 5% of its dimension';
+            if(d.id==='AUTO_ADJUST')node.title+=` · Shrink toward nearby supported faces within ${+(settings.maxShrinkDistance*100).toFixed(2)} cm or ${settings.maxShrinkPercent}% of the dimension, whichever is smaller`;
             const kbd=node.querySelector('kbd');if(kbd)kbd.textContent=hint;
         }
         if(el('c3d-keep-direction')){el('c3d-keep-direction').checked=settings.keepDirection;el('c3d-keep-direction').disabled=!settingsReady||busy;}
         if(el('c3d-adjust-direction')){el('c3d-adjust-direction').checked=settings.adjustMoveDirection;el('c3d-adjust-direction').disabled=!settingsReady||busy;}
+        if(el('c3d-follow-selected')){
+            const input=el('c3d-follow-selected');input.checked=settings.followSelected;input.disabled=!settingsReady||!snapshot?.capabilities?.followCamera;
+            input.parentElement.title=snapshot?.capabilities?.followCamera?'Follow the last selected track between frames; preserve orbit angle and zoom. Pauses when the track is absent or hidden.':'Follow unavailable: perspective camera or orbit controls missing';
+            text('c3d-follow-status',settings.followSelected?(snapshot?.followCameraStatus||'Waiting for camera'):'');
+        }
         if(el('c3d-btn-settings'))el('c3d-btn-settings').disabled=!settingsReady;
     }
     function closeSettings(){recording=null;settingsPanel?.remove();settingsPanel=null;el('c3d-btn-settings')?.focus();}
     function openSettings(){
         if(settingsPanel||!settingsReady)return;
         settingsPanel=document.createElement('div');settingsPanel.className='c3d-shortcut-settings';settingsPanel.setAttribute('role','dialog');settingsPanel.setAttribute('aria-label','Keyboard shortcuts');
+        const shrinkHeading=document.createElement('strong');shrinkHeading.textContent='Auto Adjust Box — shrink limits';
+        const shrinkNote=document.createElement('p');shrinkNote.textContent='Use the smaller of these limits per face. Only nearby supported points permit shrinking. Zero disables shrinking; expansion and ground contact remain active.';
+        const shrinkFields=document.createElement('div');
+        const inputs={};
+        for(const [key,label,max,scale] of [['maxShrinkDistance','Maximum shrink distance (cm)',40,100],['maxShrinkPercent','Maximum shrink (%)',50,1]]){
+            const row=document.createElement('label');row.className='c3d-shrink-field';row.textContent=label;
+            const input=document.createElement('input');input.type='number';input.min='0';input.max=String(max);input.step='any';input.value=String(+(settings[key]*scale).toFixed(4));input.setAttribute('aria-label',label);inputs[key]=input;
+            input.onchange=()=>{
+                if(!input.value.trim()||!input.checkValidity()){input.setAttribute('aria-invalid','true');message.textContent=`Enter a value from 0 to ${max}`;return;}
+                input.removeAttribute('aria-invalid');settings[key]=input.valueAsNumber/scale;saveSettings();message.textContent='Shrink limits saved';
+            };
+            row.append(input);shrinkFields.append(row);
+        }
+        const resetShrink=document.createElement('button');resetShrink.className='c3d-btn-secondary';resetShrink.textContent='Reset shrink limits';resetShrink.onclick=()=>{const defaults=shortcuts.defaults();for(const key of Object.keys(inputs)){settings[key]=defaults[key];inputs[key].value=String(defaults[key]*(key==='maxShrinkDistance'?100:1));inputs[key].removeAttribute('aria-invalid');}saveSettings();message.textContent='Shrink defaults restored';};
         const heading=document.createElement('strong');heading.textContent='Keyboard shortcuts';
         const note=document.createElement('p');note.textContent='Click a shortcut, then press a key combination. Escape cancels recording. Browser-reserved keys may be unavailable; CVAT shortcuts may conflict.';
         const list=document.createElement('div');
@@ -1178,7 +1220,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
             if(!value){message.textContent='Press a supported key, with optional modifiers';return;}
             try{shortcuts.assign(settings,recording,value);recording=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}
         },true);
-        settingsPanel.append(heading,note,list,message,resetAll,close);root.append(settingsPanel);render();close.focus();
+        settingsPanel.append(shrinkHeading,shrinkNote,shrinkFields,resetShrink,heading,note,list,message,resetAll,close);root.append(settingsPanel);render();close.focus();settingsPanel.scrollTop=0;
     }
     function geometry(required=true) {
         const api=window.__CVAT_COPILOT_MATH;
@@ -1230,6 +1272,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
             if(!preset?.dimensions){toast('Set and save L/W/H preset for this class/subtype first',true);return;}
             payload={...payload,keepDirection:settings.keepDirection,presetDimensions:preset.dimensions};
         }
+        if(type==='AUTO_ADJUST')payload={...payload,maxShrinkDistance:settings.maxShrinkDistance,maxShrinkPercent:settings.maxShrinkPercent};
         if(type==='MOVE_TO_MOUSE')payload={...payload,adjustDirection:settings.adjustMoveDirection};
         let ref;try{if(type!=='FREECAM')ref=reference();}catch(error){toast(error.message,true);return;}
         busy=true;renderInspector();status('Processing…');
@@ -1262,6 +1305,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         const previousScope=scopeKey(snapshot), nextScope=scopeKey(next);
         if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
         snapshot=next;
+        syncFollowCamera();
         if(!root && shouldShow())createHUD();
         if(!root)return;
         renderInspector();
@@ -1286,11 +1330,12 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                     <fieldset class="c3d-preset"><legend>Auto-Fit preset (metres)</legend><div id="c3d-preset-summary">Select a box</div><div class="c3d-preset-fields"><label>L <input id="c3d-preset-l" aria-label="Preset length" type="number" min="0.1" max="30" step="0.05"></label><label>W <input id="c3d-preset-w" aria-label="Preset width" type="number" min="0.1" max="8" step="0.05"></label><label>H <input id="c3d-preset-h" aria-label="Preset height" type="number" min="0.1" max="8" step="0.05"></label></div><div class="c3d-action-grid"><button id="c3d-preset-save" class="c3d-btn-mini">Save preset</button><button id="c3d-preset-reset" class="c3d-btn-mini">Reset preset</button></div></fieldset>
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
-                    <button id="c3d-btn-settings" class="c3d-btn-secondary">Keyboard shortcuts</button>
+                    <button id="c3d-btn-settings" class="c3d-btn-secondary">Settings &amp; shortcuts</button>
                     <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="After Auto-Fit, adjust manually and export for reference">Export Auto-Fit Case (.json)</button>
                     <div class="c3d-rot-grid"><button id="c3d-btn-rot-left" class="c3d-btn-mini" title="Alt+Shift+[">−90°</button><button id="c3d-btn-rot-right" class="c3d-btn-mini" title="Alt+Shift+]">+90°</button><button id="c3d-btn-flip" class="c3d-btn-mini" title="Alt+Shift+F">180°</button></div>
                 </div>
                 <div class="c3d-inspector-card"><div class="c3d-inspector-header"><span class="c3d-inspector-title">SELECTED BOX</span><button id="c3d-btn-focus" class="c3d-btn-mini">Focus</button></div>
+                    <label class="c3d-follow-option"><input id="c3d-follow-selected" type="checkbox"> Follow selected object</label><div id="c3d-follow-status" class="c3d-follow-status" role="status"></div>
                     <select id="c3d-select-box" aria-label="Select CVAT box" class="c3d-inspector-selector"></select>
                     <div class="c3d-class-row"><span>Class</span><select id="c3d-select-class" aria-label="Change box class" class="c3d-inspector-selector"></select></div>
                     <div class="c3d-inspector-grid">
@@ -1305,11 +1350,12 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.12.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.13.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
         el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
+        el('c3d-follow-selected').addEventListener('change',event=>{settings.followSelected=event.target.checked;followSyncKey='';saveSettings();syncFollowCamera();});
         el('c3d-btn-settings').addEventListener('click',openSettings);
         function editPreset(reset=false){
             const box=snapshot?.boxes.find(b=>b.id===snapshot.activeBoxId),math=geometry(),preset=box&&math.resolveFitPreset(box.label_name,box.subType);

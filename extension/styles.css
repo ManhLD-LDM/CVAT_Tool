@@ -530,3 +530,8 @@
 .c3d-batch-dialog footer{background:#18181d;border-top:1px solid #3f3f46;padding-top:8px}
 
 .c3d-preset{border:1px solid #34383e;border-radius:4px;margin:0;padding:8px;font-size:11px;color:#aeb5c0}.c3d-preset legend{padding:0 4px}.c3d-preset-fields{display:flex;gap:6px;margin:7px 0}.c3d-preset-fields label{display:flex;align-items:center;gap:4px;flex:1;min-width:0}.c3d-preset-fields input{width:100%;min-width:0;box-sizing:border-box;background:#191c21;color:#eee;border:1px solid #414650;border-radius:3px;padding:5px}
+#cvat-3d-copilot-root .c3d-shrink-field { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; font-size:12px; }
+#cvat-3d-copilot-root .c3d-shrink-field input { width:75px; color:#eee; background:#27272a; border:1px solid #62626c; border-radius:4px; padding:5px; }
+#cvat-3d-copilot-root .c3d-shrink-field input[aria-invalid="true"] { border-color:#f87171; }
+#cvat-3d-copilot-root .c3d-follow-option { display:flex; align-items:center; gap:6px; font-size:12px; margin:8px 0; }
+#cvat-3d-copilot-root .c3d-follow-status { color:#a1a1aa; font-size:11px; margin-bottom:6px; }

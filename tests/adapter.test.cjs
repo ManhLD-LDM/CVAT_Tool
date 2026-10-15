@@ -34,11 +34,11 @@ function topHarness(options={}){
     return {...h,camera,rect,element,hover};
 }
 
-function adjustmentHarness({occluded=false,weakGround=false}={}){
+function adjustmentHarness({occluded=false,weakGround=false,bodyTop}={}){
     const h=harness(),scene=new THREE.Scene(),coordinates=[];
     h.state.annotation.annotations.states[1].points[0]=30;
     if(!weakGround)for(let x=-9;x<=9;x+=.3)for(let y=-9;y<=9;y+=.3)coordinates.push(x,y,0);
-    const xmin=occluded?-.8:-1.93,xmax=occluded?.8:2.2,ymin=occluded?-.4:-.95,ymax=occluded?.4:1.1,top=occluded?1.3:1.94;
+    const xmin=occluded?-.8:-1.93,xmax=occluded?.8:2.2,ymin=occluded?-.4:-.95,ymax=occluded?.4:1.1,top=bodyTop??(occluded?1.3:1.94);
     for(let i=0;i<=40;i++)for(let j=0;j<=20;j++){
         const x=xmin+(xmax-xmin)*i/40,y=ymin+(ymax-ymin)*j/20;coordinates.push(x,y,top);
         if(i===0||i===40||j===0||j===20)for(let z=.15;z<top;z+=.15)coordinates.push(x,y,z);
@@ -60,6 +60,16 @@ test('Auto Adjust preserves distant unsupported faces without creating a keyfram
     const h=adjustmentHarness({occluded:true}),before=h.adapter.getSnapshot().boxes[0].points.slice();
     const result=await h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)});
     assert.equal(result.unchanged,true);assert.match(result.warning,/nearby surface/);assert.equal(h.history.length,0);assert.deepEqual(h.adapter.getSnapshot().boxes[0].points,before);h.adapter.dispose();
+});
+
+test('Auto Adjust native adapter applies configured height limit through final ground correction',async()=>{
+    for(const [options,expectedHeight] of [[{},2],[{maxShrinkDistance:.3,maxShrinkPercent:20},1.83],[{maxShrinkDistance:0,maxShrinkPercent:20},2]]){
+        const h=adjustmentHarness({bodyTop:1.8});
+        await h.adapter.command('AUTO_ADJUST',{ref:h.ref(1),...options});
+        const after=h.adapter.getSnapshot().boxes[0].points;
+        assert.ok(Math.abs(after[8]-expectedHeight)<1e-5);assert.equal(h.history.length,1);h.adapter.dispose();
+    }
+    const h=adjustmentHarness();await assert.rejects(h.adapter.command('AUTO_ADJUST',{ref:h.ref(1),maxShrinkDistance:4}),/Shrink limits/);assert.equal(h.history.length,0);h.adapter.dispose();
 });
 
 test('Auto Adjust refuses weak ground, locked boxes and review mode without a native save',async()=>{

@@ -17,6 +17,76 @@
         const keys = new Set();
         let flightFrame = null, lastFlightTime = 0, looking = false;
         let topPointer = null;
+        let followEnabled=false,followTarget=null,followFrame=null,followReady=null,followStatus='Off';
+        function followView(){
+            const view=canvas?.view?.views?.perspective,camera=view?.camera,controls=view?.controls;
+            return camera?.position?.clone && ((typeof controls?.setLookAt==='function'&&typeof controls.getTarget==='function')||controls?.target?.copy) && typeof win.requestAnimationFrame==='function' ? view : null;
+        }
+        function followMessage(message){if(followStatus!==message){followStatus=message;publish();}}
+        function stopFollowing(){
+            win.cancelAnimationFrame?.(followFrame);followFrame=null;followTarget=null;followReady=null;
+        }
+        function followTick(){
+            followFrame=null;
+            if(disposed||!followEnabled)return;
+            try{updateFollowCamera();}catch(_){followMessage('Paused: camera or object view unavailable');}
+            if(!disposed&&followEnabled)followFrame=win.requestAnimationFrame(followTick);
+        }
+        function updateFollowCamera(){
+            const ann=editor(),jobId=ann?.job?.instance?.id,frame=ann?.player?.frame?.number;
+            canvas=ann?.canvas?.instance||null;
+            if(followTarget&&followTarget.jobId!==jobId){followTarget=null;followReady=null;}
+            const view=followView();
+            if(!view){followMessage('Unavailable: perspective camera controls missing');return;}
+            if(cameraRestore){followReady=null;followMessage('Paused during Free Cam');return;}
+            if(typeof canvas.mode==='function'&&canvas.mode()!=='idle'){followReady=null;followMessage('Paused during canvas interaction');return;}
+            // Redux can advance before the point cloud and cuboids finish loading.
+            // Never read a rendered center until it agrees with current-frame state.
+            if(ann.player?.fetching||ann.canvas?.ready===false||
+                (canvas.view.model?.data?.imageID!=null&&canvas.view.model.data.imageID!==frame)){
+                followReady=null;followMessage('Waiting for frame canvas');return;
+            }
+            const states=ann.annotations?.states||[],active=ann.annotations?.activatedStateID;
+            const selected=states.find(s=>s.clientID===active&&(s.frame==null||s.frame===frame));
+            if(selected&&selected.objectType!=='track'){followTarget=null;followReady=null;followMessage('Select a track to follow across frames');return;}
+            const id=selected?.clientID??followTarget?.clientId;
+            const target=states.find(s=>s.clientID===id&&s.objectType==='track'&&s.shapeType==='cuboid'&&(s.frame==null||s.frame===frame));
+            if(!target||target.outside||target.hidden){followReady=null;followMessage(followTarget?'Paused: track absent or hidden in this frame':'Select a track to follow across frames');return;}
+            if(followTarget&&followTarget.clientId===id&&followTarget.serverId!==target.serverID){followTarget=null;followReady=null;followMessage('Track identity changed; reselect the track');return;}
+            const drawn=canvas.view.drawnObjects?.[id],mesh=drawn?.cuboid?.perspective;
+            if(!mesh?.getWorldPosition||!drawn.data?.points||drawn.data.points.length!==target.points.length||drawn.data.points.some((v,i)=>Math.abs(v-target.points[i])>1e-6)){
+                followReady=null;followMessage('Waiting for current track geometry');return;
+            }
+            mesh.updateWorldMatrix?.(true,false);
+            const center=mesh.getWorldPosition(view.camera.position.clone());
+            if(![center.x,center.y,center.z].every(Number.isFinite))return;
+            const key=`${jobId}:${frame}:${id}`;
+            // Let native setup finish before applying the preserved orbit pose.
+            if(followReady!==key){followReady=key;return;}
+            const controls=view.controls,camera=view.camera;
+            const orbitTarget=typeof controls.getTarget==='function'?controls.getTarget(camera.position.clone(),false):controls.target.clone();
+            const offset=camera.position.clone().sub(orbitTarget);
+            if(![offset.x,offset.y,offset.z].every(Number.isFinite)||offset.lengthSq()<1e-10)return;
+            const previous=followTarget;
+            if(!previous||previous.clientId!==id||previous.frame!==frame){
+                const position=center.clone().add(previous?.clientId===id?previous.offset:offset);
+                if(typeof controls.setLookAt==='function'){
+                    controls.setLookAt(position.x,position.y,position.z,center.x,center.y,center.z,false);controls.update?.(0);
+                }else{camera.position.copy(position);controls.target.copy(center);camera.lookAt(center);controls.update?.();}
+                camera.updateMatrixWorld?.();canvas.render?.();
+                followTarget={jobId,clientId:id,serverId:target.serverID,frame,offset:position.clone().sub(center)};
+            }else{
+                // Capture manual orbit/zoom without pulling the camera every tick.
+                followTarget.offset=offset;
+            }
+            followMessage(`Following track ${id}`);
+        }
+        function setFollowCamera(enabled){
+            if(enabled&&!followView())throw new Error('Follow selected object unavailable: perspective camera controls missing');
+            followEnabled=enabled;stopFollowing();followStatus=enabled?'Select a track to follow across frames':'Off';
+            if(enabled)followFrame=win.requestAnimationFrame(followTick);
+            publish();return {enabled};
+        }
 
         function topView() {
             const view=canvas?.view?.views?.top;
@@ -122,7 +192,9 @@
             if (nextScope !== scope) {
                 clearPointer();
                 scope = nextScope; lastFitCase=null; cloudIndex = null; spatialIndex = null; cloudKey = ''; cloudLoading = null; groundCache.clear();
-                clearAppearance(); stopCamera();
+                clearAppearance();
+                if(cameraRestore&&cameraRestore.jobId!==jobId)stopCamera();
+                else if(cameraRestore){clearKeys();lastFlightTime=0;}
             }
             const states = (ann?.annotations?.states || []).filter(s => s.shapeType === 'cuboid' && !s.outside &&
                 (s.frame == null || s.frame === frame));
@@ -148,12 +220,12 @@
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
                 activeBoxId: ann?.annotations?.activatedStateID ?? null, boxes,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
-                freeCam: !!cameraRestore, pointCount: cloudIndex?.count || 0,
+                freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0,
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
                     batch: !!(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get&&!!job?.frames?.get,
-                    moveToMouse: !!topView(),
+                    moveToMouse: !!topView(), followCamera:!!followView(),
                     ground: !!views?.perspective?.scene, freeCam: !!views?.perspective?.camera && !!views?.perspective?.controls },
                 reason: ann ? (!is3D ? 'Only 3D jobs are supported' : canvas ? '' : 'Waiting for 3D canvas') : 'Compatible CVAT editor not found' };
         }
@@ -170,6 +242,7 @@
             return { target, snap };
         }
         function focusObject(target) {
+            if(cameraRestore)return false;
             const view=canvas?.view?.views?.perspective,cam=view?.camera,controls=view?.controls;
             if(!cam?.getWorldDirection || !controls){
                 if(typeof canvas.focus==='function'){canvas.focus(target.clientID);return true;}
@@ -200,7 +273,7 @@
             const focused=focus?focusObject(target):false;
             const row = doc?.getElementById(`cvat-objects-sidebar-state-item-${target.clientID}`);
             row?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-            publish(); return { selected: target.clientID,focused,...(focus&&!focused?{message:'Box selected; unable to access 3D camera to focus'}:{}) };
+            publish(); return { selected: target.clientID,focused,...(focus&&!focused?{message:cameraRestore?'Box selected; turn off Free Cam to focus or resume following':'Box selected; unable to access 3D camera to focus'}:{}) };
         }
         async function updateObject(ref, changes) {
             const { target, snap } = validate(ref, true), job = editor().job.instance;
@@ -338,14 +411,16 @@
         const editable = target => !!target?.closest?.('input,textarea,select,[contenteditable="true"],[role="dialog"]');
         function keyDown(event) {
             if (!cameraRestore || editable(event.target) || event.altKey || event.ctrlKey || event.metaKey) return;
-            if (event.code === 'Escape') { stopCamera(); publish(); return; }
-            if (['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','ShiftLeft','ShiftRight'].includes(event.code)) {
-                keys.add(event.code); event.preventDefault(); event.stopImmediatePropagation();
-            }
+            if (event.code === 'Escape') { event.preventDefault();event.stopImmediatePropagation();stopCamera(); publish(); return; }
+            if (!['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','ShiftLeft','ShiftRight'].includes(event.code))return;
+            event.preventDefault();event.stopImmediatePropagation();
+            if(event.repeat||!syncFreeCamera())return;
+            keys.add(event.code);
         }
         function keyUp(event) { keys.delete(event.code); }
         function clearKeys() { keys.clear(); looking = false; clearPointer(); }
         function pointerDown(event) {
+            if(cameraRestore&&!syncFreeCamera())return;
             if (cameraRestore && event.target === cameraRestore.view.renderer.domElement && event.button === 2) {
                 looking = true; event.preventDefault(); event.stopImmediatePropagation();
             }
@@ -360,21 +435,54 @@
             }
             topPointer=element&&event.target===element&&Number.isFinite(event.clientX)&&Number.isFinite(event.clientY)?{element,x:event.clientX,y:event.clientY,scope}:null;
             if (!cameraRestore || !looking) return;
+            if(!syncFreeCamera()||!looking)return;
             const camera = cameraRestore.view.camera, up = camera.position.clone().set(0,0,1);
+            camera.quaternion.copy(cameraRestore.quaternion);
             const yaw = camera.quaternion.clone().setFromAxisAngle(up, -(event.movementX || 0) * 0.003);
             camera.quaternion.premultiply(yaw);
             const right = camera.position.clone().set(1,0,0).applyQuaternion(camera.quaternion);
             const pitch = camera.quaternion.clone().setFromAxisAngle(right, -(event.movementY || 0) * 0.003);
             const candidate = camera.quaternion.clone().premultiply(pitch), forward = camera.position.clone().set(0,0,-1).applyQuaternion(candidate);
             if (Math.abs(forward.z) < 0.99) camera.quaternion.copy(candidate);
+            cameraRestore.quaternion.copy(camera.quaternion);
             event.preventDefault(); event.stopImmediatePropagation();
         }
         function contextMenu(event) { if (cameraRestore && event.target === cameraRestore.view.renderer.domElement) { event.preventDefault(); event.stopImmediatePropagation(); } }
+        function syncFreeCamera(){
+            if(!cameraRestore)return false;
+            const ann=editor(),jobId=Number(ann?.job?.instance?.id)||null,frame=ann?.player?.frame?.number;
+            if(jobId!==cameraRestore.jobId){stopCamera();publish();return false;}
+            if(frame!==cameraRestore.frame){cameraRestore.frame=frame;clearKeys();lastFlightTime=0;}
+            canvas=ann?.canvas?.instance||null;
+            const view=canvas?.view?.views?.perspective;
+            if(!view?.camera?.position?.copy||!view.camera.quaternion?.copy||!view.controls)return false;
+            if(view.controls!==cameraRestore.controls){
+                cameraRestore.controls.enabled=cameraRestore.enabled;
+                cameraRestore.controls=view.controls;cameraRestore.enabled=view.controls.enabled;
+            }
+            cameraRestore.view=view;view.controls.enabled=false;
+            return !ann.player?.fetching&&ann.canvas?.ready!==false&&
+                (canvas.view.model?.data?.imageID==null||canvas.view.model.data.imageID===frame);
+        }
+        function applyFreeCameraPose(){
+            const {view,position,quaternion,zoom}=cameraRestore,camera=view.camera,controls=view.controls;
+            // Keep native orbit transitions (including a native focus/double-click)
+            // from overwriting flight. Reapply the exact quaternion afterward.
+            const target=position.clone().add(position.clone().set(0,0,-1).applyQuaternion(quaternion).multiplyScalar(10));
+            if(typeof controls.setLookAt==='function'){controls.setLookAt(position.x,position.y,position.z,target.x,target.y,target.z,false);controls.update?.(0);}
+            else controls.target?.copy?.(target);
+            camera.position.copy(position);camera.quaternion.copy(quaternion);
+            if(camera.zoom!==zoom){camera.zoom=zoom;camera.updateProjectionMatrix?.();}
+            camera.updateMatrixWorld?.();
+        }
         function flight(time) {
             if (!cameraRestore || disposed) return;
+            const ready=syncFreeCamera();
+            if(!cameraRestore)return;
+            applyFreeCameraPose();
             const dt = lastFlightTime ? Math.min(0.05, (time-lastFlightTime)/1000) : 0; lastFlightTime = time;
             const camera = cameraRestore.view.camera, speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 18 : 6) * dt;
-            if (!doc?.hidden && !editable(doc?.activeElement)) {
+            if (ready && !doc?.hidden && !editable(doc?.activeElement)) {
                 const forward = camera.position.clone().set(0,0,-1).applyQuaternion(camera.quaternion);
                 const right = camera.position.clone().set(1,0,0).applyQuaternion(camera.quaternion);
                 const direction = camera.position.clone().set(0,0,0);
@@ -384,14 +492,21 @@
                 if (direction.lengthSq()) camera.position.addScaledVector(direction.normalize(), speed);
                 camera.updateMatrixWorld?.();
             }
+            cameraRestore.position.copy(camera.position);cameraRestore.quaternion.copy(camera.quaternion);cameraRestore.zoom=camera.zoom;
+            applyFreeCameraPose();
             flightFrame = win.requestAnimationFrame(flight);
         }
         function stopCamera() {
             if (!cameraRestore) return;
-            const { view, enabled } = cameraRestore, cam = view.camera;
-            const target = cam.position.clone().add(cam.position.clone().set(0,0,-1).applyQuaternion(cam.quaternion).multiplyScalar(10));
-            view.controls.setLookAt?.(cam.position.x,cam.position.y,cam.position.z,target.x,target.y,target.z,false);
-            view.controls.enabled = enabled;
+            const { view, controls, enabled,position,quaternion,zoom } = cameraRestore, cam = view.camera;
+            const distance=followTarget?Math.max(.1,followTarget.offset.length()):10;
+            const target = position.clone().add(position.clone().set(0,0,-1).applyQuaternion(quaternion).multiplyScalar(distance));
+            controls.setLookAt?.(position.x,position.y,position.z,target.x,target.y,target.z,false);
+            controls.target?.copy?.(target);cam.position.copy(position);cam.quaternion.copy(quaternion);
+            if(cam.zoom!==zoom){cam.zoom=zoom;cam.updateProjectionMatrix?.();}cam.updateMatrixWorld?.();
+            controls.enabled = enabled;
+            // Resume following from the flight heading, never a stale pre-flight pose.
+            if(followTarget){followTarget.frame=null;followTarget.offset=position.clone().sub(target);followReady=null;}
             win.cancelAnimationFrame?.(flightFrame); cameraRestore = null; lastFlightTime = 0; clearKeys();
         }
         function setFreeCamera(enabled) {
@@ -399,7 +514,8 @@
             if (cameraRestore) return { enabled: true };
             const view = canvas?.view?.views?.perspective;
             if (!view?.camera || !view?.controls || !win.requestAnimationFrame) throw new Error('Cannot access perspective camera');
-            cameraRestore = { view, enabled: view.controls.enabled };
+            cameraRestore = { view, controls:view.controls, enabled: view.controls.enabled,jobId:Number(editor()?.job?.instance?.id)||null,frame:editor()?.player?.frame?.number,
+                position:view.camera.position.clone(),quaternion:view.camera.quaternion.clone(),zoom:view.camera.zoom };
             view.controls.enabled = false; flightFrame = win.requestAnimationFrame(flight); publish(); return { enabled: true };
         }
         const batchController=(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)?.({
@@ -463,7 +579,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.13.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -491,6 +607,7 @@
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
                 case 'AUTO_ADJUST': {
+                    const options=math.autoAdjustOptions(payload);
                     const initial=validate(payload.ref,true).target;
                     if(pendingObjects.size)throw new Error('Previous operation in progress');
                     if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
@@ -501,7 +618,7 @@
                     if(Math.abs(base.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
                     const nearby=await extractLocalPoints(payload.ref,.4,{points:base.newPoints});
                     const {target}=validate(payload.ref,true),neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors),points=adjustment.points;
+                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors,options),points=adjustment.points;
                     const finalGround=cloudIndex.estimate({points});
                     if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under adjusted box; box unchanged');
                     // Preserve the fitted world-space top while the final footprint's
@@ -509,13 +626,14 @@
                     const snap=math.snapGroundPoints(points,math.makePlane(finalGround.a,finalGround.b,finalGround.c));
                     if(Math.abs(snap.deltaZ)>1.5||points[8]-snap.deltaZ<.1)throw new Error('Final ground adjustment is unsuitable; box unchanged');
                     points[2]+=snap.deltaZ/2;points[8]-=snap.deltaZ;
-                    if(points[8]<target.points[8]-Math.min(.1,target.points[8]*.05)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
+                    if(points[8]<target.points[8]-Math.min(options.maxShrinkDistance,target.points[8]*options.maxShrinkPercent/100)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
                     validate(payload.ref,true);
                     const notes=[];
                     if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
                     if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
-                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,warning:notes.join(' · ')||null};
-                    return {...await updateObject(payload.ref,{points}),pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                    const evidence={groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints};
+                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
+                    return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
                 }
                 case 'MOVE_TO_MOUSE': {
                     const {target}=validate(payload.ref,true);
@@ -569,6 +687,7 @@
                 case 'SET_QC_APPEARANCE': return setAppearance(payload.colors || []);
                 case 'CLEAR_QC_APPEARANCE': clearAppearance(); return {cleared:true};
                 case 'FREECAM': return setFreeCamera(!!payload.enabled);
+                case 'FOLLOW_CAMERA': return setFollowCamera(payload.enabled===true);
                 default: throw new Error('Unsupported command');
             }
         }
@@ -577,7 +696,7 @@
             for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
-            if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopCamera(); clearAppearance(); listeners.clear();
+            if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
             for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};

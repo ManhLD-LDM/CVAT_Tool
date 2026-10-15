@@ -1,4 +1,4 @@
-# CVAT 3D TOOL 1.12.0
+# CVAT 3D TOOL 1.13.0
 
 Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
@@ -7,7 +7,7 @@ Repository còn giữ bộ script Python và cấu hình `config/` từ phiên b
 
 ## Cài đặt và sử dụng
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.12.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.13.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
 Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
@@ -93,7 +93,8 @@ Alias được nhận biết: bicycle/motorcycle/cyclist/two_wheels → two-whee
 Select a box and click **Auto Adjust Box**, or press **Alt+Shift+B** (remappable in Keyboard shortcuts). This cleans up nearby sides and the top while preserving direction and ground contact.
 
 - Expand supported faces to catch nearby missed object points, within a 0.4 m local search/correction range and with 3 cm padding.
-- Shrink only when a supported surface is already within the smaller of **10 cm or 5% of that dimension** from the current face. Keep distant faces unchanged; do not take small steps toward faraway returns. Repeated actions therefore preserve an occluded rear rather than progressively cutting it off.
+- **Near-ground exclusion (1.10.1):** ignore points at or below 20 cm above the local ground plane before clustering or measuring faces. The clearance increases to three times the plane RMSE when larger. It follows the slope at each point; raw ground points remain available for ground estimation and bottom contact. If only low returns remain, leave the box unchanged. See [ground exclusion verification](docs/verification/ground-exclusion-1.10.1.md).
+- Configure inward shrink limits under **Settings & shortcuts → Auto Adjust Box**. Defaults are **10 cm and 5% of that dimension**; the smaller limit applies to each face. Distance accepts 0–40 cm and percentage accepts 0–50%. Either value at zero disables shrinking. Settings persist across jobs and restarts; **Reset shrink limits** restores defaults. Shrink only when a supported surface is already within this limit from the current face. Keep distant faces unchanged; do not take small steps toward faraway returns. Repeated actions therefore preserve an occluded rear rather than progressively cutting it off.
 - Side shrinking also requires vertical surface support; top shrinking requires a supported XY patch. Roof-only evidence does not justify bringing in side faces. Ground, isolated noise, and neighboring annotation points are excluded.
 - Keep heading fixed, including when Move to mouse's Adjust direction is enabled. Keep the bottom on reliable ground. Weak ground, empty/ambiguous object evidence, tilted boxes, or unsuitable final ground leave the box unchanged.
 - Apply at most one native edit to the current frame, with normal Undo/Redo. A no-op does not create a keyframe/history entry. Save through CVAT as usual.
@@ -214,3 +215,17 @@ Các báo cáo cũ mô tả thuật toán/profile tại thời điểm tạo, kh
 - [Kiểm chứng README cũ](docs/README_VERIFICATION.md), [README gốc](docs/verification/README.before-verification.md).
 
 Demo dùng dữ liệu mô phỏng; cache Job 9426 có 61 box trong khi lần kiểm tra API/UI lịch sử có 62. Số issue của engine cũ không đại diện cho kết quả QC hiện tại.
+
+## Follow selected object (1.12.0)
+
+Enable **Follow selected object** beside the selected-box controls to keep the perspective orbit centered on the last selected **track** when navigating forward, backward, or jumping frames. Your current orbit angle and distance are preserved; manual rotation and zoom are remembered for the next frame. The checkbox starts unchecked and persists across jobs and browser restarts.
+
+Follow waits for the new frame canvas and rendered track geometry. It pauses for hidden/outside/missing tracks, Free Cam, and canvas interactions; the status beneath the checkbox explains why. Select another track to change the target; selecting a frame-local shape releases it. A job change drops the previous target. Hidden or absent tracks resume when available again. This changes only the perspective camera, creates no annotation edit or keyframe, and requires accessible orbit APIs. The fixed-frame offline demo does not expose this option.
+
+### Free Cam across frames (1.12.1)
+
+Free Cam stays enabled on next/previous/jumped frames within the same job and keeps its world position, viewing direction, and camera zoom through native scene resets or replacement cameras. Frame changes clear held movement/look input; press a movement key again to fly. Escape or the Free Cam toggle exits; changing jobs or disposing the extension also exits and restores native controls.
+
+While Free Cam is active, **Follow selected object** pauses without losing its checkbox preference. Focus selects the box but asks you to exit Free Cam before moving the camera. Native orbit/focus transitions cannot override flight. When flight ends, following resumes on the current track using the flight viewing direction and the previous orbit distance. No annotations or keyframes are changed.
+
+Bản gộp **1.13.0** giữ Auto-Fit preset/Python CLI cùng các cập nhật Auto Adjust, Follow Camera và Free Cam từ nhánh làm việc chung. Kiểm thử sau merge: **121 Node unit + 11 Python + 35 browser test pass**. [Bằng chứng bản gộp](docs/verification/merge-1.13.0.md).
