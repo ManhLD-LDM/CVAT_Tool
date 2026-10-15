@@ -98,7 +98,7 @@
                 const attrs = resolveAttributes(s);
                 const subType = resolveSubType(s, attrs);
                 return { id: s.clientID, clientId: s.clientID, serverId: s.serverID ?? null,
-                    objectType: s.objectType, frame, points: Array.from(s.points || []), labelId: s.label?.id ?? null,
+                    objectType: s.objectType, keyframe:!!s.keyframe, keyframes:s.keyframes, frame, points: Array.from(s.points || []), labelId: s.label?.id ?? null,
                     label_name: s.label?.name || 'Unknown', labelColor: s.label?.color || '#94a3b8',
                     attributes: attrs, subType,
                     locked: !!s.lock, hidden: !!s.hidden, groundTruth: !!s.isGroundTruth };
@@ -120,6 +120,7 @@
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
+                    batch: !!(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get&&!!job?.frames?.get,
                     ground: !!views?.perspective?.scene, freeCam: !!views?.perspective?.camera && !!views?.perspective?.controls },
                 reason: ann ? (!is3D ? 'Only 3D jobs are supported' : canvas ? '' : 'Waiting for 3D canvas') : 'Compatible CVAT editor not found' };
         }
@@ -361,10 +362,35 @@
             cameraRestore = { view, enabled: view.controls.enabled };
             view.controls.enabled = false; flightFrame = win.requestAnimationFrame(flight); publish(); return { enabled: true };
         }
+        const batchController=(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)?.({
+            math,batchMath:env.batchMath||win.__C3D_BATCH_MATH,
+            parsePCD:env.parsePCD||win.__C3D_PARSE_PCD,
+            job:()=>editor()?.job?.instance,snapshot:()=>{if(disposed)throw new Error('Adapter stopped');return getSnapshot();},
+            assertEditable:()=>{
+                const snap=getSnapshot();
+                if(!snap.connected||!snap.capabilities.edit||String(editor().workspace).toLowerCase()==='review'||canvas.mode?.()!=='idle')
+                    throw new Error('Batch edit requires editable idle workspace');
+                if([...pendingObjects].some(id=>id!=='batch'))throw new Error('Another native edit is pending');
+            },
+            lock:value=>value?pendingObjects.add('batch'):pendingObjects.delete('batch'),
+            refresh:async(job)=>{
+                const s=getSnapshot();if(disposed||editor()?.job?.instance!==job)return;
+                const states=await job.annotations.get(s.frame,true,[]),history=await job.actions.get();
+                const now=getSnapshot();
+                if(editor()?.job?.instance===job&&now.frame===s.frame)
+                    store.dispatch({type:'UPDATE_ANNOTATIONS_SUCCESS',payload:{states,history}});
+                publish();
+            }
+        });
         async function command(type, payload = {}) {
             if (disposed) throw new Error('Adapter is stopped');
             switch (type) {
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
+                case 'BATCH_OPEN': {validate(payload.ref);if(!batchController)throw new Error('Batch module unavailable');return batchController.open(payload.ref.clientId);}
+                case 'BATCH_FRAME': if(!batchController)throw new Error('Batch module unavailable');return batchController.read(payload);
+                case 'BATCH_PROTECT': if(!batchController)throw new Error('Batch module unavailable');return batchController.protect(payload);
+                case 'BATCH_APPLY': if(!batchController)throw new Error('Batch module unavailable');return batchController.apply(payload);
+                case 'BATCH_CANCEL': return batchController?.cancel()||{cancelled:true};
                 case 'SELECT_OBJECT': return selectObject(payload.ref, !!payload.focus);
                 case 'ROTATE': { const { target } = validate(payload.ref,true); if (![-90,90,180].includes(payload.degrees)) throw new Error('Unsupported rotation angle'); return updateObject(payload.ref,{points:math.rotateYawPoints(target.points,payload.degrees)}); }
                 case 'SET_LABEL': return updateObject(payload.ref,{labelId:payload.labelId});
@@ -389,7 +415,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.6.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.8.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08},status:'fit-started'};

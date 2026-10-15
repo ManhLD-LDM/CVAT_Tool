@@ -536,6 +536,244 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 ;
+/* Own implementation: position-only proposals, no SUSTechPOINTS code copied. */
+(function(root){
+'use strict';
+function refinePosition(math,points,current,ground,neighbors=[]){
+ const seed=new Set(math.extractBoxROI(points,{points:current},.4)),other=new Set();
+ for(const box of neighbors)for(const q of math.extractBoxROI(points,box,-.15))if(!seed.has(q))other.add(q);
+ if(other.size)points=points.filter(q=>!other.has(q));
+ if(Math.abs(Math.sin(current[3]))>1e-3||Math.abs(Math.sin(current[4]))>1e-3)return {status:'review',flags:['Tilted box: position refinement not supported'],beforeCount:0,afterCount:0};
+ const original=current.slice(),usable=math.canManuallySnapGround(ground);
+ const object=points.filter(p=>p.every(Number.isFinite)&&p[2]>(usable?ground.a*p[0]+ground.b*p[1]+ground.c:original[2]-original[8]/2)+.1);
+ const insideBefore=math.extractBoxROI(object,{points:original},0).length;
+ const flags=[];if(object.length<20)return {status:'review',flags:['Too few object points'],beforeCount:insideBefore,afterCount:insideBefore};
+ const cluster=math.selectSeedCluster(object,{points:original},usable?ground:null,.3);
+ if(cluster.length<20)return {status:'review',flags:['Unable to isolate target points'],beforeCount:insideBefore,afterCount:insideBefore};
+ const c=Math.cos(original[5]),s=Math.sin(original[5]),xs=[],ys=[];
+ for(const p of cluster){const x=p[0]-original[0],y=p[1]-original[1];xs.push(c*x+s*y);ys.push(-s*x+c*y);}
+ xs.sort((a,b)=>a-b);ys.sort((a,b)=>a-b);
+ const bounds=a=>[a[Math.floor((a.length-1)*.01)],a[Math.ceil((a.length-1)*.99)]];
+ const [x0,x1]=bounds(xs),[y0,y1]=bounds(ys);
+ if(x1-x0>original[6]*1.5||y1-y0>original[7]*1.5)
+  return {status:'review',flags:['Cluster may contain another object'],beforeCount:insideBefore,afterCount:insideBefore};
+ const dx=(x0+x1)/2,dy=(y0+y1)/2,proposed=original.slice();
+ proposed[0]+=c*dx-s*dy;proposed[1]+=s*dx+c*dy;
+ if(usable&&ground?.accepted&&ground.confidence>=.65){
+  const plane=math.makePlane(ground.a,ground.b,ground.c);
+  proposed[2]=math.snapGroundPoints(proposed,plane).newPoints[2];
+ }else flags.push('Ground uncertain: Z preserved');
+ const shift=Math.hypot(proposed[0]-original[0],proposed[1]-original[1]);
+ if(shift>1.2||Math.abs(proposed[2]-original[2])>.5)
+  return {status:'review',flags:['Correction too large; add a reviewed keyframe'],beforeCount:insideBefore,afterCount:insideBefore};
+ const insideAfter=math.extractBoxROI(object,{points:proposed},0).length;
+ if(insideAfter<insideBefore*.9)return {status:'review',flags:['Proposal loses point support'],beforeCount:insideBefore,afterCount:insideAfter};
+ if(insideAfter<20)flags.push('Sparse support: inspect occlusion/range');
+ const delta=proposed.slice(0,3).map((x,i)=>x-original[i]);
+ const moved=Math.hypot(...delta)>.025;
+ return {status:moved?'proposal':'unchanged',proposed:moved?proposed:null,delta,beforeCount:insideBefore,afterCount:insideAfter,
+  flags:[...flags,'Geometry proposal, not verified tracking'],clusterCount:cluster.length};
+}
+function sampleROI(points,box,limit=4000){
+ const sampled=[],step=Math.max(1,Math.ceil(points.length/limit));
+ for(let i=0;i<points.length;i+=step)sampled.push(points[i]);
+ return sampled;
+}
+const api={refinePosition,sampleROI};root.__C3D_BATCH_MATH=api;
+if(typeof module!=='undefined')module.exports=api;
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+(function(root){
+'use strict';
+function mount(env){
+ const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false;
+ const request=env.request,getSnapshot=env.snapshot;
+ async function open(){
+  try{
+   const s=getSnapshot();model=await request('BATCH_OPEN',{ref:env.reference(s.activeBoxId)});
+   if(dialog)dialog.remove();
+   dialog=document.createElement('dialog');dialog.className='c3d-batch-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label','Batch Track Review');
+   dialog.addEventListener('keydown',event=>event.stopPropagation());
+   dialog.innerHTML='<header><h2>Batch Track Review</h2><button data-action="close">Close</button></header>'+
+    '<p data-info></p><p>Native keyframes are protected. Orange = current box; green = proposal. Position only: dimensions and yaw stay fixed. Proposals require human review; sensor motion compensation is not implemented yet.</p>'+
+    '<div class="c3d-batch-controls"><label>From <input data-from type="number"></label><label>To <input data-to type="number"></label><button data-action="load">Load / Recompute</button><button data-action="prev">Previous 7</button><button data-action="next">Next 7</button></div>'+
+    '<p data-progress role="status"></p><div class="c3d-batch-cards"></div>'+
+    '<footer><button data-action="export">Export preview (.json)</button><button data-action="apply">Apply selected position proposals</button><span>Up to 20 frames. Native Undo per frame; Save CVAT to persist.</span></footer>';
+   document.body.append(dialog);dialog.showModal();
+   dialog.querySelector('[data-info]').textContent='Job '+model.jobId+' · clientID #'+model.clientId+' · keyframes: '+model.keyframes.join(', ')+' · range '+model.start+'–'+model.stop;
+   for(const selector of ['[data-from]','[data-to]']){
+    const input=dialog.querySelector(selector);input.min=model.start;input.max=model.stop;
+   }
+   dialog.querySelector('[data-from]').value=model.defaultStart;dialog.querySelector('[data-to]').value=model.defaultStop;
+   model.page=model.defaultStart;model.cards=new Map();
+   dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
+   dialog.querySelector('[data-action="close"]').onclick=close;
+   dialog.querySelector('[data-action="load"]').onclick=()=>{model.page=Number(dialog.querySelector('[data-from]').value);load();};
+   dialog.querySelector('[data-action="prev"]').onclick=()=>{model.page=Math.max(Number(dialog.querySelector('[data-from]').value),model.page-7);load();};
+   dialog.querySelector('[data-action="next"]').onclick=()=>{model.page+=7;load();};
+   dialog.querySelector('[data-action="apply"]').onclick=apply;
+   dialog.querySelector('[data-action="export"]').onclick=()=>{
+    const data={schema:'cvat-batch-preview/v1',version:'1.8.0',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
+     keyframes:model.keyframes,baseline:model.baseline,frames:[...model.cards.values()],note:'Diagnostic preview; sampled ROI only, not a full point-cloud sequence or certified ground truth'};
+    const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'})),link=document.createElement('a');
+    link.href=url;link.download='batch-job'+model.jobId+'-track'+model.clientId+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
+   };
+   await load();
+  }catch(e){env.toast(e.message,true);}
+ }
+ function progress(text){if(dialog)dialog.querySelector('[data-progress]').textContent=text;}
+ function disable(value){
+  working=value;if(!dialog)return;
+  for(const b of dialog.querySelectorAll('button'))b.disabled=(value&&b.dataset.action!=='close')||b.dataset.permanent==='true'||(b.dataset.action==='apply'&&model?.consumed);
+  for(const input of dialog.querySelectorAll('input'))input.disabled=value;
+  if(applying)dialog.querySelector('[data-action="close"]').disabled=true;
+ }
+ async function load(){
+  if(working||!dialog)return;
+  const from=Number(dialog.querySelector('[data-from]').value),to=Number(dialog.querySelector('[data-to]').value);
+  if(!Number.isInteger(from)||!Number.isInteger(to)||from<model.start||to>model.stop||from>to){progress('Invalid frame range');return;}
+  model.page=Math.min(Math.max(model.page,from),Math.max(from,to-6));
+  const run=++generation,container=dialog.querySelector('.c3d-batch-cards');container.replaceChildren();model.cards.clear();disable(true);
+  try{
+   for(let frame=model.page;frame<=Math.min(to,model.page+6);frame++){
+    progress('Loading frame '+frame+'…');
+    const card=await request('BATCH_FRAME',{token:model.token,frame});
+    if(run!==generation||!dialog)return;
+    model.cards.set(frame,card);renderCard(card,container);
+   }
+   progress('Preview only. Select reviewed proposals to apply; native keyframes cannot be overwritten.');
+  }catch(e){progress(e.message);}finally{if(run===generation)disable(false);}
+ }
+ function renderCard(card,container){
+  const article=document.createElement('article');article.className='c3d-batch-card';article.dataset.frame=card.frame;
+  const title=document.createElement('h3');title.textContent='Frame '+card.frame+' · '+card.status;article.append(title);
+  if(card.original){
+   for(const view of ['Top','Side','Front']){
+    const label=document.createElement('span');label.textContent=view;article.append(label);
+    const canvas=document.createElement('canvas');canvas.width=300;canvas.height=110;canvas.setAttribute('aria-label',view+' frame '+card.frame);article.append(canvas);draw(canvas,view,card);
+   }
+  }
+  const flags=document.createElement('p');flags.textContent=(card.flags||[]).join(' · ');article.append(flags);
+  const details=document.createElement('p');details.textContent='Support '+(card.beforeCount??0)+' → '+(card.afterCount??card.beforeCount??0)+(card.delta?' · ΔXYZ '+card.delta.map(n=>n.toFixed(2)).join('/')+' m':'');article.append(details);
+  if(card.status==='proposal'&&!card.protected){
+   const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.dataset.accept=card.frame;
+   label.append(check,document.createTextNode(' Accept this proposal'));article.append(label);
+  }
+  const lock=document.createElement('button');lock.textContent=card.protected?'Protected anchor':'Protect this frame';lock.disabled=card.protected;if(card.protected)lock.dataset.permanent='true';
+  lock.onclick=async()=>{
+   try{await request('BATCH_PROTECT',{token:model.token,frame:card.frame});card.protected=true;card.proposed=null;card.status='anchor';article.querySelector('[data-accept]')?.closest('label')?.remove();lock.disabled=true;lock.textContent='Protected for this batch';lock.dataset.permanent='true';}
+   catch(e){progress(e.message);}
+  };article.append(lock);
+  const jump=document.createElement('button');jump.textContent='Open in CVAT';
+  jump.onclick=()=>jumpTo(card.frame);article.append(jump);container.append(article);
+ }
+ function draw(canvas,view,card){
+  const ctx=canvas.getContext('2d'),p=card.original,c=Math.cos(p[5]),s=Math.sin(p[5]);
+  const project=q=>{const dx=q[0]-p[0],dy=q[1]-p[1],z=q[2]-p[2],x=c*dx+s*dy,y=-s*dx+c*dy;return view==='Top'?[x,y]:view==='Side'?[x,z]:[y,z];};
+  const dims=view==='Top'?[p[6],p[7]]:view==='Side'?[p[6],p[8]]:[p[7],p[8]];
+  const scale=Math.min(270/(dims[0]+2.8),85/(dims[1]+2));
+  ctx.fillStyle='#09090b';ctx.fillRect(0,0,300,110);ctx.fillStyle='#b4b4bd';
+  for(const q of card.points||[]){const [x,y]=project(q);ctx.fillRect(150+x*scale,55-y*scale,1,1);}
+  for(const [box,color] of [[p,'#fbbf24'],[card.proposed,'#34d399']]){
+   if(!box)continue;const [x,y]=project(box);ctx.strokeStyle=color;ctx.lineWidth=2;ctx.strokeRect(150+(x-dims[0]/2)*scale,55-(y+dims[1]/2)*scale,dims[0]*scale,dims[1]*scale);
+  }
+ }
+ async function jumpTo(frame){
+  if(working)return;
+  const fields=[...document.querySelectorAll('input[role="spinbutton"][aria-valuemin][aria-valuemax]')].filter(n=>!env.root.contains(n)&&!dialog.contains(n)&&Number(n.getAttribute('aria-valuemax'))===model.stop);
+  if(fields.length!==1){progress('Cannot identify native frame control; navigate to frame '+frame+' in CVAT.');return;}
+  const field=fields[0];field.focus();Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,String(frame));
+  field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));field.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true}));
+  for(let i=0;i<30;i++){
+   await new Promise(resolve=>setTimeout(resolve,100));
+   const s=await request('GET_SNAPSHOT');
+   if(s.frame===frame&&s.jobId===model.jobId){
+    await request('SELECT_OBJECT',{ref:{sessionId:s.sessionId,jobId:s.jobId,frame:s.frame,revision:s.revision,clientId:model.clientId},focus:true});
+    await close();env.toast('CVAT frame '+frame+' selected. Adjust the box, then reopen Batch Track Review.');return;
+   }
+  }
+  progress('Frame navigation was not confirmed; use CVAT frame control manually.');
+ }
+ async function apply(){
+  if(working||!dialog||model.consumed)return;
+  const frames=[...dialog.querySelectorAll('[data-accept]:checked')].map(x=>Number(x.dataset.accept));
+  if(!frames.length){progress('Select at least one reviewed proposal');return;}
+  if(!window.confirm('Apply position proposals to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Existing keyframes stay protected. Each frame has a separate Undo entry.'))return;
+  applying=true;disable(true);
+  try{
+   const result=await request('BATCH_APPLY',{token:model.token,frames});
+   if(!dialog||!model)return;
+   progress('Applied: '+result.appliedFrames.join(', ')+(result.error?' · '+result.error:'')+' · '+result.undo);
+   dialog.querySelectorAll('[data-accept]').forEach(n=>{n.checked=false;n.disabled=true;});
+   model.consumed=true;
+  }catch(e){progress(e.message+' · Verify native history before retrying.');}
+  finally{applying=false;disable(false);if(dialog)dialog.querySelector('[data-action="apply"]').disabled=true;}
+ }
+ async function close(){
+  if(applying)return;
+  ++generation;const old=dialog;dialog=null;working=false;model=null;old?.remove();
+  try{await request('BATCH_CANCEL');}catch(_){}
+ }
+ button.addEventListener('click',open);
+ return {dispose:()=>{button.removeEventListener('click',open);if(applying){++generation;dialog?.remove();dialog=null;model=null;}else close();}};
+}
+root.__C3D_BATCH_UI={mount};
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+/* Isolated content world: same-origin requests retain CVAT's session/CSRF.
+ * Runtime-only messages; no API operation or credentials use CustomEvent. */
+function createSessionTransport(env) {
+ let importSubmitted=false;
+ const context=()=>{
+  const s=env.snapshot(),match=new URL(env.url()).pathname.match(/\/jobs\/(\d+)(?:\/|$)/);
+  if(!s?.connected||!match||Number(match[1])!==s.jobId)throw new Error('CVAT editor is not ready');
+  return s;
+ };
+ return async request=>{
+  const s=context(),origin=new URL(env.url()).origin;
+  if(request.origin!==origin||request.jobId!==s.jobId)throw new Error('CVAT job changed');
+  const root='/api/jobs/'+s.jobId;
+  const mutable=['export','import'].includes(request.operation);
+  if(mutable&&importSubmitted)throw new Error('Import already submitted; reload CVAT before further operations');
+  if(mutable&& !['saved','local'].includes(s.saveState))throw new Error('Save CVAT changes before Import/Export');
+  let path,method='GET',body;
+  switch(request.operation){
+   case 'context':return {jobId:s.jobId,saveState:s.saveState};
+   case 'user':path='/api/users/self';break;
+   case 'formats':path='/api/server/annotation/formats';break;
+   case 'status':path='/api/requests/'+encodeURIComponent(request.requestId);break;
+   case 'export':path=root+'/dataset/export?'+new URLSearchParams({format:request.format,save_images:'false',location:'local'});method='POST';break;
+   case 'import':
+    if(request.confirmJob!==s.jobId||!s.capabilities?.edit)throw new Error('Confirm the editable destination job');
+    if(!request.file||request.file.bytes.length>8*1024*1024)throw new Error('File exceeds 8 MiB transfer limit');
+    body=new FormData();body.append('annotation_file',new Blob([Uint8Array.from(request.file.bytes)]),request.file.name);
+    path=root+'/annotations/?'+new URLSearchParams({format:request.format,location:'local'});method='POST';break;
+   case 'download':{
+    const url=new URL(request.url,origin);
+    if(url.origin!==origin||!(url.pathname.startsWith(root+'/dataset/')||url.pathname.startsWith('/api/requests/')))throw new Error('Unsafe download URL');
+    path=url.pathname+url.search;break;
+   }
+   default:throw new Error('Unsupported session operation');
+  }
+  const csrf=env.cookie().split(';').map(x=>x.trim()).find(x=>x.startsWith('csrftoken='))?.slice(10);
+  const headers={};if(method!=='GET'&&csrf)headers['X-CSRFToken']=decodeURIComponent(csrf);
+  if(request.operation==='import')importSubmitted=true;
+  const response=await env.fetch(origin+path,{method,body,headers,credentials:'include',redirect:'error'});
+  if(!response.ok)throw new Error(response.status===401||response.status===403?'Session expired, CSRF rejected, or permission denied ('+response.status+')':'CVAT API error '+response.status);
+  if(context().jobId!==s.jobId)throw new Error('Job changed; check server Requests before retrying');
+  if(request.operation==='download'){
+   const buffer=await response.arrayBuffer();if(buffer.byteLength>8*1024*1024)throw new Error('Download exceeds 8 MiB; use CVAT native export');
+   return {bytes:Array.from(new Uint8Array(buffer))};
+  }
+  return response.status===204?{}:await response.json();
+ };
+}
+if(typeof module!=='undefined')module.exports={createSessionTransport};
+if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessionTransport;
+
+;
 /* Isolated-world HUD. Reads unsaved CVAT editor snapshots via the bridge.
  * No credentials, cached-job fallback or direct annotation REST writes.
  */
@@ -549,6 +787,7 @@
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
+    let batchUI=null;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -558,7 +797,7 @@
     function request(type, payload = {}) {
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
-            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},20000);
+            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},type.startsWith('BATCH_')?120000:20000);
             pending.set(requestId,{resolve,reject,timeout});
             window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
         });
@@ -631,7 +870,7 @@
             <header class="c3d-header"><div><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
+                <button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button><div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
                 <div class="c3d-toolbar"><button id="c3d-btn-scan" class="c3d-btn-primary">RUN QC NOW <kbd>Alt Shift L</kbd></button><div class="c3d-toggles"><label><input id="c3d-auto" type="checkbox" checked> Auto QC</label><label><input id="c3d-colors" type="checkbox" checked> 3D Error Colors</label></div>
                     <div class="c3d-action-grid"><button id="c3d-btn-ground" class="c3d-btn-secondary" title="Alt+Shift+G">Ground Snap</button><button id="c3d-btn-freecam" class="c3d-btn-secondary" title="Alt+Shift+C">Free Cam</button></div>
                     <button id="c3d-btn-autofit" class="c3d-btn-primary" title="Alt+Shift+A">AUTO-FIT BOX <kbd>Alt Shift A</kbd></button>
@@ -653,9 +892,18 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.6.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.8.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
+        batchUI=window.__C3D_BATCH_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
+
+        el('c3d-session').disabled=!globalThis.chrome?.runtime?.id;
+        el('c3d-session').addEventListener('click',async()=>{
+            try{
+                const response=await chrome.runtime.sendMessage({type:'C3D_OPEN_SESSION'});
+                if(!response?.ok)throw new Error(response?.error||'Extension unavailable');
+            }catch(error){toast(error.message,true);}
+        });
         el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';});
         el('c3d-btn-scan').addEventListener('click',()=>runQC(true));
         el('c3d-btn-ground').addEventListener('click',()=>action('SNAP_GROUND'));
@@ -713,6 +961,8 @@
         for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
         const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!math?.canManuallySnapGround(ground);
         el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
+        el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
+        el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
         el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
         el('c3d-btn-focus').disabled=!box||!cap.selection;el('c3d-btn-scan').disabled=!s?.connected;
@@ -790,13 +1040,21 @@
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){batchUI?.dispose();batchUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
+    const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args)});
+    function sessionMessage(message,sender,reply){
+        if(message?.type!=='C3D_SESSION_API')return;
+        if(sender.id!==globalThis.chrome?.runtime?.id||sender.url?.split('?')[0]!==chrome.runtime.getURL('session.html'))return;
+        sessionTransport(message).then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));
+        return true;
+    }
+    if(sessionTransport&&globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.addListener(sessionMessage);
     window.__CVAT_COPILOT_PANEL={dispose};
     window.addEventListener('c3d:response:v2',receive);window.addEventListener('c3d:snapshot:v2',receiveSnapshot);window.addEventListener('keydown',keydown,true);
     function start(){routeCheck();request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not connected'));routeTimer=setInterval(routeCheck,1500);}

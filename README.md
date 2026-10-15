@@ -1,180 +1,159 @@
-# CVAT 3D Tool & Copilot Suite (v1.6.0)
+# CVAT 3D TOOL 1.8.0
 
-Bộ công cụ toàn diện hỗ trợ gán nhãn 3D LiDAR Bounding Box trên nền tảng **CVAT (Computer Vision Annotation Tool)** dành cho xe tự hành (Autonomous Vehicles / ADAS).
+Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
-Dự án tích hợp 2 hệ thống phối hợp đồng bộ:
-1. **Chrome/Edge Browser Extension (`extension/`)**: Copilot trực tiếp trên WebGL 3D canvas của CVAT (Auto-Fit Box, Ground Snap, Quick Yaw 90°/180°, Auto QC, Focus Camera, Overlap Detector).
-2. **Python Automation & Tracking Suite (`scripts/`)**: Pipeline xử lý đám mây điểm LiDAR (.pcd), tracking 3D bounding box theo vận tốc/quán tính, chuẩn hóa keyframe và đồng bộ REST API với CVAT Server.
 
----
+Repository còn giữ bộ script Python và cấu hình `config/` từ phiên bản trước. Tài liệu được lưu tại [Python tracking suite (lịch sử)](docs/PYTHON_TRACKING_SUITE_LEGACY.md); các tuyên bố tracking của bộ script đó chưa được kiểm chứng lại trong đợt extension 1.8.0. Dùng biến môi trường theo `config/.env.example`, không commit cookie/token hay dữ liệu job cục bộ.
 
-## 📌 Hướng dẫn cho Codex / AI Coding Agents
+## Cài đặt và sử dụng
 
-> [!IMPORTANT]
-> **Dành cho Codex / AI Agents khi đọc và phát triển codebase này:**
-> Đọc kỹ mục [Kiến trúc & Những thay đổi then chốt so với phiên bản trước](#-kiến-trúc--những-thay-đổi-then-chốt-so-với-phiên-bản-trước) trước khi viết hoặc sửa bất kỳ mã nguồn nào. Việc vi phạm các quy tắc về **Keyframe locking** hoặc **Z-ground clamp** sẽ phá hủy hoàn toàn chuyển động nội suy 3D của CVAT.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.8.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
----
+Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
-## 🚀 Kiến trúc & Những thay đổi then chốt so với phiên bản trước
+Demo: mở `dist/CVAT-3D-Copilot-Demo.html` bằng Edge/Chrome, không cần mạng hoặc đăng nhập. Demo dùng 61 cuboid từ cache Job 9426 với Z đặt lại theo ground mô phỏng, point cloud và ca lỗi được tạo chủ động; demo không thay thế kiểm chứng trên CVAT thật. UI hiện dùng tiếng Anh và hiển thị subtype của box.
 
-### 1. Sự cố Khóa cứng Keyframe (Keyframe Over-Saturation Bug) & Cách khắc phục
-* **Hiện tượng trước đây**:
-  - Khi chạy pipeline prelabeling hoặc tracker tự động trên đoạn frame 20–29, các script cũ đã ghi shape lên **tất cả** các frame liên tiếp (frame 20, 21, 22, ..., 29).
-  - Khi annotator chỉnh sửa thủ công tại frame 23 và frame 29, các frame trung gian (24, 25, 26, 27, 28) **hoàn toàn không tự nội suy**. Bounding box bị giật cục dữ dội, nhảy loạn xạ giữa các vị trí cũ và mới.
-* **Nguyên nhân cốt lõi trong Data Model của CVAT 3D**:
-  - Trong cấu trúc JSON của CVAT, **mọi shape nằm trong mảng `track["shapes"]` đều được CVAT coi là một hard keyframe (mốc cố định)**.
-  - CVAT có bộ nội suy tuyến tính 3D (Linear Interpolator) tự động tính toán vị trí giữa 2 keyframe. Nếu một frame trung gian đã có shape sẵn, CVAT sẽ ưu tiên hiển thị shape đó thay vì nội suy!
-* **Giải pháp chuẩn hóa (Clean Keyframes Cadence)**:
-  - Loại bỏ toàn bộ các shape trung gian tự sinh trên các frame không phải mốc chính.
-  - Chỉ lưu giữ các keyframe thực sự (ví dụ: `[0, 5, 8, 9, 10, 15, 16, 19, 23, 29]`).
-  - Khi đó, CVAT tự động nội suy mượt mà 100% cho các frame 20–22 và 24–28.
-  - Mã nguồn thực thi: [`scripts/clean_keyframes_pipeline.py`](file:///D:/Project/VinPrj/CVAT_Tool/scripts/clean_keyframes_pipeline.py).
+## Batch Track Review — 1.8.0
 
----
+Bản đầu của quy trình chỉnh cùng một vật thể qua nhiều frame, lấy cảm hứng workflow SUSTechPOINTS và tự triển khai tích hợp CVAT. Chưa phải tracker có bù chuyển động cảm biến.
 
-### 2. Khóa cao độ mặt đường (Ground Z-Elevation Clamp / Chống văng Box)
-* **Hiện tượng trước đây**:
-  - Khi fit cụm điểm LiDAR hoặc ngoại suy vận tốc, các điểm phản xạ từ nóc xe, giá chở đồ hoặc nhiễu tầm xa kéo tâm Z lên cao dần. Xe bị văng lên không trung (từng ghi nhận xe bay lên Z = 12.5m).
-* **Giải pháp chuẩn hóa**:
-  - **Z-Ground Invariant**: Cao độ tâm Z của xe chỉ được phép dao động tối đa $\pm 0.15\text{ m}$ so với cao độ ban đầu tại mặt đất:
-    ```python
-    curr_center[2] = np.clip(curr_center[2], z_start - 0.15, z_start + 0.15)
-    curr_vel[2] = 0.0  # Vận tốc thẳng đứng bị triệt tiêu
-    ```
-  - Lọc bỏ điểm mặt đường trước khi tính offset: chỉ lấy các điểm LiDAR cao hơn đáy box $+0.12\text{ m}$.
-  - Mã nguồn thực thi: [`scripts/tracker_3d_pipeline.py`](file:///D:/Project/VinPrj/CVAT_Tool/scripts/tracker_3d_pipeline.py).
+1. Chọn một **CUBOID TRACK** trong CVAT → **Batch Track Review**. Shape độc lập và demo 61 box hiện tại không hỗ trợ batch.
+2. Tool đọc track từ native editor (gồm cả chỉnh sửa chưa Save), đọc PCD của các frame bằng job.frames.get().data(), hiển thị 7 frame/lượt với Top/Side/Front đồng nhất tỷ lệ trong từng card.
+3. Box cam là geometry hiện tại, xanh là đề xuất vị trí. Tool giữ nguyên kích thước, yaw, roll/pitch; tinh chỉnh chỉ hỗ trợ upright box. Nếu ground đủ tin cậy có thể điều chỉnh Z, nếu không thì giữ Z.
+4. Keyframe native hiện có (ví dụ 0,7,14) luôn được bảo vệ. **Protect this frame** chỉ bảo vệ thêm trong phiên batch hiện tại; đóng/mở lại sẽ không giữ bảo vệ tạm này.
+5. Chỉ đề xuất frame nằm giữa hai keyframe có vật thể hiện diện. Không tự suy ra tracking từ sau keyframe cuối hoặc qua outside/che khuất. Point support, mức dịch chuyển và độ lớn cụm được kiểm tra để chặn đề xuất không hợp lý; đây là chỉ báo hình học, không phải xác suất tracker đúng.
+6. Tick **Accept this proposal** cho frame đã xem, rồi **Apply selected position proposals**. Tối đa 20 frame/lần (UI chọn trong trang 7 frame đang xem). Chỉ ghi các frame được chọn; giữ nguyên track ID, keyframe gốc và frame bảo vệ. Mỗi frame là một native Undo entry; không có Undo gộp toàn batch.
+7. **Open in CVAT** chuyển tới đúng frame/track rồi đóng preview chưa áp dụng. Chỉnh tay một mốc trong CVAT, mở lại batch để tính theo mốc mới.
+8. **Export preview (.json)** xuất baseline, đề xuất và ROI đã lấy mẫu của trang đang xem để chẩn đoán. Không phải định dạng import annotation hoặc full raw point-cloud sequence.
 
----
+Preview không ghi annotation. Apply dùng ObjectState.save và cập nhật editor/history, không REST PATCH hay tự Save server. Track đổi trong lúc preview sẽ bị chặn; workspace review/đang vẽ/box khóa cũng bị chặn khi apply. Lỗi giữa chừng trả danh sách frame đã ghi; kiểm tra Undo/history trước khi thử lại, không tự rollback giả. Sau apply phải đóng/mở lại preview.
 
-### 3. Bất biến kích thước vật thể cứng (Rigid Dimension Invariance)
-* **Quy tắc**: Kích thước 3 chiều của một phương tiện $[L, W, H]$ (Length, Width, Height) là **bất biến tuyệt đối** trong suốt toàn bộ chu kỳ sống của track.
-* **Cải tiến**: Không bao giờ tính lại $dx, dy, dz$ trên từng frame trung gian vì mật độ điểm LiDAR thay đổi theo khoảng cách và góc quét. Kích thước chuẩn được xác lập từ keyframe ban đầu và giữ nguyên qua mọi frame.
+Chỉ cache hai cloud trong bộ xử lý batch; mỗi PCD tối đa 128 MiB. ROI hiển thị tối đa 4.000 điểm/frame, thuật toán phân tích ROI chưa lấy mẫu. Nạp frame đầu có thể chậm vì native tải/giải nén chunk. Chưa có worker nền, ego-motion/pose registration, forward/backward tracking, AI tracker hay temporal QC đầy đủ. Không coi box đủ điểm hoặc ít lỗi QC là ground truth.
 
----
+Pilot cho job601: giữ anchors0/7/14, xem #1/#2/#5 ở các frame3/4/10/11, chỉ chấp nhận sau kiểm tra Top/Side/Front. Chưa chạy apply batch trên job thật trong đợt phát triển này.
+[Thiết kế và phần còn lại](docs/BATCH_TRACK_REFINEMENT_PROPOSAL.md) · [Bằng chứng kiểm thử](docs/verification/batch-1.8.0.md).
 
-### 4. Triệt tiêu hiện tượng đảo hướng 180° (Yaw Angle-Wrapping)
-* **Hiện tượng trước đây**: Thuật toán PCA thuần túy trên mặt phẳng XY không phân biệt được đầu xe và đuôi xe, dẫn tới việc box đột ngột quay ngược 180° khi đổi frame.
-* **Giải pháp**: Đồng bộ Yaw theo vector vận tốc di chuyển $\vec{v} = (v_x, v_y)$. Áp dụng hàm bọc góc (angle wrapping) để đảm bảo góc xoay biến thiên liên tục, không nhảy góc.
+## Phiên CVAT và Import/Export — 1.7.0
 
----
+Bấm **Phiên CVAT & Import/Export** trên HUD để mở trang riêng của extension. Không hoạt động trong demo. Extension cần thêm quyền cookies và downloads; trình duyệt có thể yêu cầu chấp nhận quyền mới khi cập nhật.
 
-### 5. Xử lý trạng thái rời khỏi cảnh (`outside = True`)
-* **Quy tắc**: Khi phương tiện di chuyển ra khỏi tầm quét LiDAR ($R > 65\text{ m}$) hoặc không có đủ điểm LiDAR ($\le 4$ điểm trong 4 frame liên tiếp), track phải được gán `outside = True` ngay tại frame đó và ngừng tạo shape ở các frame sau.
+- **Lấy thông tin phiên:** kiểm tra người dùng bằng API users/self, chỉ đọc cookie sessionid/CSRF khi bấm nút. Giá trị mặc định che; có nút hiện/copy/xóa. Cookie HttpOnly được đọc bằng service worker, chỉ trả về trang extension, không chuyển qua bridge CustomEvent hay DOM của CVAT. Rời tab sẽ xóa giá trị hiển thị; không lưu vào storage/log/file chẩn đoán. Cookie đã copy vẫn có thể còn trong clipboard.
+- **Copy mẫu Python:** dùng biến môi trường CVAT_SESSIONID/CVAT_CSRFTOKEN, URL server và job hiện tại; không nhúng cookie thật. Mẫu kiểm tra đăng nhập và ghi chú endpoint import/export, chưa là CLI import/export đầy đủ.
+- **Export:** đọc định dạng từ server, export annotation đã Save của job hiện tại, theo dõi rq_id rồi tải file. Không cần đọc sessionID trước.
+- **Import:** chọn file/định dạng, nhập job ID và xác nhận tác động. Tool export bản dự phòng theo định dạng export đã chọn và chờ download hoàn tất trước khi upload. Import có thể thay thế annotation server, không có Undo native. File và download tối đa **8 MiB**; dữ liệu lớn hơn dùng giao diện native CVAT. Save editor trước khi bắt đầu.
+- Sau import, bấm **Nạp lại tab CVAT** trước khi tiếp tục sửa. Không Save editor cũ. Bản này dùng reload có chủ đích để đồng bộ dữ liệu import; Auto-Fit/QC và các thao tác box vẫn cập nhật realtime.
+- Khi đã gửi import, transport chặn import/export mới đến khi tab CVAT reload. Nếu timeout/đóng trang, tác vụ server có thể vẫn chạy: kiểm tra Requests trước khi thử lại.
+- Chỉ làm việc với tab/job đã mở; đổi server/job sẽ chặn thao tác. Phiên adapter nội bộ không phải sessionid đăng nhập. SSO/token-only hoặc cookie có tên tùy biến chưa có chức năng copy tương ứng; API vẫn dùng cookie phiên trình duyệt nếu server hỗ trợ.
+- API chỉ gọi các endpoint giới hạn qua runtime message trong isolated world, cùng origin CVAT, credentials include và CSRF cookie. Không dùng cookie đọc ra để gắn Cookie header thủ công.
 
----
+Đối chiếu API: [mã nguồn CVAT 2.76](https://github.com/cvat-ai/cvat/blob/v2.76.0/cvat/apps/engine/views.py), [Jobs API](https://docs.cvat.ai/docs/api_sdk/sdk/reference/apis/jobs-api/). Import/export dùng POST và theo dõi GET /api/requests/{rq_id}. Mới kiểm thử bằng mock server/extension API, chưa chạy import ghi dữ liệu trên CVAT thật. Chưa chứng nhận compatibility cho mọi deployment/SSO/cấu hình CSRF.
 
-## 📂 Cấu trúc thư mục
+## Class và subtype hiện tại
 
-```text
-CVAT_Tool/
-├── extension/                      # Chrome/Edge Extension mã nguồn
-│   ├── manifest.json               # Manifest V3 cấu hình domain CVAT
-│   ├── content_script.js           # Content script nhúng vào trang
-│   ├── copilot_main.js             # Logic khởi tạo & điều phối chính
-│   ├── copilot_panel.js            # Giao diện điều khiển nổi (Floating UI)
-│   ├── cvat_adapter.js             # Adapter giao tiếp React/Redux/Canvas 3D của CVAT
-│   ├── geometry_math.js            # RANSAC ground fitting, PCA, IoU 3D
-│   └── styles.css                  # Giao diện dark theme chuẩn WCAG 2.1
-├── scripts/                        # Automation & Python Processing Suite
-│   ├── cvat_client.py              # REST API Client (GET/PUT annotations, tải PCD)
-│   ├── clean_keyframes_pipeline.py # Script chuẩn hóa keyframe, sửa lỗi giật box
-│   ├── tracker_3d_pipeline.py      # Bộ bám vết 3D LiDAR & khớp bounding box
-│   ├── build-extension.cjs         # Script đóng gói extension
-│   ├── build-demo.cjs              # Script đóng gói bản demo WebGL
-│   └── demo-server.cjs             # Máy chủ chạy thử nghiệm cục bộ
-├── config/                         # Cấu hình môi trường & bảo mật
-│   ├── cvat_config.py              # Tự động nạp cấu hình từ .env hoặc môi trường
-│   └── .env.example                # File mẫu cấu hình biến môi trường
-├── samples/                        # Dữ liệu payload mẫu đã kiểm thử
-│   └── job58_clean_keyframes_payload.json # Payload Job 58 chuẩn hóa mượt mà
-├── tests/                          # Bộ kiểm thử tự động
-│   ├── geometry.test.cjs           # Test toán học hình học 3D, PCA & RANSAC
-│   ├── adapter.test.cjs            # Test adapter kết nối CVAT
-│   └── browser/                    # E2E Playwright tests
-├── docs/                           # Tài liệu chi tiết & báo cáo kiểm chứng
-│   ├── QC_ISSUE_FOCUS_DESIGN.md    # Thiết kế tính năng Focus Box & Camera
-│   └── DEMO_GUIDE.md               # Hướng dẫn chạy demo WebGL
-├── package.json                    # Cấu hình npm & dependencies
-└── .gitignore                      # Loại bỏ pcd, node_modules và credentials
-```
+Theo cấu hình công việc thực tế, **vehicles hiện hỗ trợ nhiều loại xe theo subtype**, không còn giới hạn toàn bộ class ở xe gia đình như bản 1.5.0.
 
----
+Adapter đọc attributes từ ObjectState, ánh xạ ID attribute sang tên của label. Subtype ưu tiên từ `type`, `vehicle_type`, `subtype`, `sub_type`, `category`; nếu không có, thử tìm giá trị subtype đã biết trong các attributes khác. Giá trị được trim và chuyển chữ thường.
 
-## 🛠️ Hướng dẫn cài đặt & Sử dụng
+QC và Auto-Fit giải quyết profile theo class + subtype. Nếu vehicles thiếu subtype hoặc subtype không được nhận biết, dùng profile xe gia đình mặc định (car). Tool **không tự suy subtype từ LiDAR**. Chọn đúng attribute trong CVAT trước khi Auto-Fit; panel chỉ hiển thị subtype, chưa có bộ chọn subtype riêng.
 
-### 1. Cài đặt Browser Extension vào Chrome / Edge
-1. Mở trình duyệt, truy cập `chrome://extensions/` hoặc `edge://extensions/`.
-2. Bật chế độ **Developer mode** (Góc trên cùng bên phải).
-3. Nhấn **Load unpacked** (Tải tiện ích đã giải nén) và chọn thư mục:
-   `D:\Project\VinPrj\CVAT_Tool\extension`
-4. Mở tab CVAT 3D job (ví dụ: `https://cvat-test.vantixapps.net/tasks/.../jobs/58`).
-5. Menu tiện ích **CVAT 3D TOOL** sẽ xuất hiện ở góc phải màn hình.
+Các khoảng dưới đây là cấu hình tham khảo của tool, đơn vị mét; không phải tiêu chuẩn được chứng nhận:
 
-#### Phím tắt tiện ích:
-* **Alt + Shift + A**: Auto-fit Bounding Box theo cụm điểm LiDAR hiện tại.
-* **Alt + Shift + G**: Snap đáy box sát mặt đường (RANSAC Ground Plane).
-* **Alt + Shift + [** / **]**: Xoay box nhanh $\pm 90^\circ$.
-* **Alt + Shift + F**: Đảo hướng đầu/đuôi xe $180^\circ$.
-* **Alt + Shift + C**: Bật/tắt chế độ Free Camera (WASD / QE di chuyển tự do).
-* **Alt + Shift + L**: Mở bảng danh sách lỗi Auto QC (kiểm tra lún sàn, bay box, lệch kích thước).
+| Subtype của vehicles | Dài | Rộng | Cao |
+|---|---:|---:|---:|
+| `car` | 2.8–5.8 | 1.4–2.3 | 1.1–2.2 |
+| `truck` | 5–14 | 1.9–3 | 2–4.2 |
+| `bus` | 6.5–15 | 2.2–3.2 | 2.6–4.2 |
+| `van` | 4.2–6.5 | 1.7–2.4 | 1.8–2.8 |
+| `pickup` | 4.5–6.5 | 1.7–2.3 | 1.6–2.4 |
+| `construction` | 3.5–12 | 2–3.5 | 1.8–4.5 |
+| `trailer` | 4–16 | 1.9–3 | 1.5–4.5 |
+| `tricycle` | 1.8–3.8 | 0.9–1.8 | 1.1–2.2 |
+| `stroller` | 0.6–1.4 | 0.4–0.9 | 0.7–1.4 |
+| `wheelchair` | 0.7–1.6 | 0.5–1.1 | 0.7–1.5 |
+| `other` | 1.5–15 | 0.8–3.5 | 0.8–4.5 |
 
----
+Chấp nhận cả `construction` và cách viết `contruction` để tương thích dữ liệu hiện có. Các khóa Trailer/Tricycle/Stroller/Wheelchair có alias khác kiểu chữ. Resolver cũng chấp nhận nhãn `vehicle`, `car`, `cars` và khóa trực tiếp như `vehicles:bus`.
 
-### 2. Sử dụng Python Automation Pipeline
+| Class khác | Dài | Rộng | Cao |
+|---|---:|---:|---:|
+| `two-wheels` | 1.4–2.6 | 0.5–1.3 | 0.9–1.9 |
+| `pedestrian` | 0.3–1 | 0.3–1 | 1.3–2.1 |
+| `Animal` | 0.4–2.5 | 0.3–1.2 | 0.3–1.8 |
+| `Obstacle` | 0.2–5 | 0.2–5 | 0.2–5 |
 
-#### Thiết lập môi trường:
-Tạo file `.env` tại thư mục gốc `CVAT_Tool/` từ mẫu `.env.example`:
-```bash
-cp config/.env.example .env
-```
-Điền thông tin đăng nhập hoặc cookie của bạn vào `.env`:
-```ini
-CVAT_BASE_URL=https://cvat-test.vantixapps.net
-CVAT_SESSION_ID=your_session_id_here
-CVAT_CSRF_TOKEN=your_csrf_token_here
-CVAT_JOB_ID=58
-```
+Alias được nhận biết: bicycle/motorcycle/cyclist/two_wheels → two-wheels; person → pedestrian; animal và obstacle được đối chiếu không phân biệt chữ hoa/thường. Khi fit class có tên chính xác `two-wheels`, chiều rộng tối thiểu là 0,6 m; profile QC cơ sở vẫn có min width 0,5 m. Class chưa có profile sẽ không được Auto-Fit.
 
-#### A. Chuẩn hóa Keyframe & Khắc phục giật Box:
-Để sửa một Job bị lỗi giật box do chèn shape liên tục, chạy lệnh:
+## Auto-Fit
+
+Chọn hoặc tạo box sơ bộ quanh vật thể → **AUTO-FIT BOX** hoặc **Alt+Shift+A**.
+
+1. Đọc trực tiếp buffer THREE.Points với world transform. Index không gian của frame được cache; đổi frame/cloud transform sẽ làm mất hiệu lực cache.
+2. Ước lượng ground cục bộ; mở vùng tìm theo kích thước profile class/subtype, thêm biên ROI 0,4 m. Không chỉ tìm trong box sơ bộ nhỏ.
+3. Lọc điểm thấp và tách cụm bằng khoảng cách XYZ trên voxel 0,12 m. Điểm sâu trong annotation lân cận (co 0,15 m) bị loại nếu không thuộc vùng box sơ bộ mở rộng 0,4 m.
+4. Thử radius 0,55 m trước. Nếu fit bị từ chối do cụm quá lớn/thiếu điểm/phân bố XY, thử 0,4 / 0,3 / 0,25 / 0,2 m. Kết quả sau tách nhỏ phải ổn định qua hai radius liên tiếp (IoU ≥0,9).
+5. Tìm hướng qua mặt đứng và minimum-area rectangle/PCA; tính kích thước theo profile. Cụm vượt max quá biên cho phép 0,1 m bị từ chối trước khi ghi. Giữ hướng yaw gần hướng hiện tại vì không nhận biết đầu/đuôi xe.
+6. Ground đủ tin cậy (confidence ≥0,65) thì đặt đáy theo điểm ground cao nhất dưới footprint và tính H. Nếu chưa đủ, cho phép fit XY/yaw và giữ Z/H; box có chiều cao vượt profile vẫn có thể bị từ chối.
+
+Cần ít nhất 10 điểm vật thể. Kết quả vẫn cần annotator kiểm tra khi điểm thưa, che khuất, nối cụm hoặc annotation lân cận sai. Việc tách hai radius ổn định không chứng minh cụm thuộc đúng vật thể.
+
+Auto-Fit ghi một lần qua `ObjectState.save()` và Redux/history native, hỗ trợ Undo/Redo. Không REST PATCH annotation.
+
+### Xuất ca thực tế
+
+Sau Auto-Fit, chỉnh tay chính box đó làm mẫu nếu cần, rồi bấm **Export Auto-Fit Case (.json)** trước khi đổi frame hoặc chạy fit khác. Nếu fit thất bại sau khi bắt đầu phân tích, có thể xuất phần dữ liệu đã thu được để chẩn đoán.
+
+JSON gồm seed/fit/current box, subtype/attributes, ROI, ground support, cluster và dữ liệu lựa chọn đã có. Bản hiện tại bổ sung neighborBoxes và các radius đã thử khi lựa chọn thành công. Box hiện tại chỉ là mẫu người dùng cung cấp, không tự được chứng nhận ground truth.
+
+Chỉ giữ ca fit gần nhất trong frame hiện tại; refresh làm mất dữ liệu. File tải về máy, không tự gửi ra ngoài. Chức năng xuất dành cho live editor.
+
+## Ground Snap, quay và Free Cam
+
+- **Ground Snap — Alt+Shift+G:** dịch Z để box chạm mặt phẳng ground; giữ kích thước và góc xoay. Mặt phẳng phải hợp lệ, slope ≤0,25; confidence ≥0,65 hoặc confidence ≥0,45 kèm RMSE ≤0,04 m và ít nhất 60 inliers. UI ghi ground ước lượng khi confidence thấp. Điều kiện thủ công này khác ngưỡng Auto-Fit tự snap.
+- Nếu footprint sau fit vẫn nằm trong bán kính ground đã khảo sát, giữ mặt phẳng vừa dùng để Snap không mất kết quả khi tính lại với footprint lớn. Cache mất hiệu lực khi đổi frame/cloud. Live Snap mặc định chặn |ΔZ| >1,5 m.
+- **Quay:** Alt+Shift+[ / ] cho −90° / +90°; Alt+Shift+F cho 180°. Sửa yaw qua native save/history.
+- **Free Cam — Alt+Shift+C:** WASD/QE, Shift tăng tốc, chuột phải để nhìn; Esc trả orbit. Focus box kết thúc Free Cam.
+
+Tool không cho sửa box khóa, ground truth, workspace review, hoặc khi đang vẽ/kéo. Reference job/frame/revision cũ bị từ chối.
+
+## QC, chọn lỗi và Focus camera
+
+**Alt+Shift+L** chạy QC; chế độ tự cập nhật dùng debounce 140 ms. QC kiểm tra min/max kích thước theo class/subtype, hình học, ground và oriented IoU; hiển thị lý do/mức lỗi và đổi màu theo clientID. Màu QC chỉ thay hiển thị, không sửa màu label task.
+
+- Chọn box trong CVAT/tool: danh sách chỉ hiện lỗi liên quan box đó. Bỏ chọn: hiện lỗi toàn frame.
+- Nhấn một dòng lỗi: chọn đúng clientID trong CVAT, đưa camera perspective tới box, chuyển filter mức lỗi về **Tất cả**. Box có ba lỗi vẫn hiện cả ba lỗi.
+- Lỗi overlap có nút chọn/Focus box thứ hai; danh sách chuyển theo box được chọn.
+- Camera giữ hướng nhìn, đổi tâm và khoảng cách theo kích thước/FOV; hiện chuyển ngay, chưa có animation. Không ghi annotation hoặc thêm history khi chọn/Focus.
+- Không truy cập được camera: vẫn chọn box và báo không Focus được. Chọn trực tiếp box vẫn tôn trọng filter mức lỗi hiện tại.
+
+[Thiết kế chọn lỗi và Focus](docs/QC_ISSUE_FOCUS_DESIGN.md). QC là kiểm tra hình học tham khảo, không tự xác nhận class đúng với vật thể. Overlap hỗ trợ upright cuboid có yaw; roll/pitch chưa được hỗ trợ trong phép IoU.
+
+## Build và kiểm thử
+
+Node 24+, cài dependency bằng `pnpm install`. Browser test dùng Edge headless với profile riêng, truy cập demo cục bộ.
+
 ```powershell
-python scripts/clean_keyframes_pipeline.py --job-id 58 --upload
-```
-Lệnh sẽ tự động:
-1. Tải toàn bộ annotation hiện tại của Job 58 về máy.
-2. Lọc bỏ các shape thừa ở các frame trung gian, chỉ giữ lại các keyframe mốc chuẩn (ví dụ: 0, 5, 8, 9, 10, 15, 16, 19, 23, 29).
-3. Upload payload sạch lên server qua method `PUT /api/jobs/58/annotations`.
-4. Kích hoạt tính năng nội suy 3D mượt mà gốc của CVAT.
-
-#### B. Tải dữ liệu Point Cloud (.pcd) hàng loạt:
-```powershell
-python -c "from scripts.cvat_client import CVATClient; client = CVATClient(); client.download_pointclouds(job_id=58, total_frames=30)"
-```
-
-#### C. Chạy bộ kiểm thử tự động (Unit Tests & E2E):
-```powershell
-# Kiểm thử hình học & adapter
 node --test tests/*.test.cjs
-
-# Đóng gói tiện ích
 node scripts/build-extension.cjs
+node scripts/build-demo.cjs
+node node_modules/@playwright/test/cli.js test
 ```
 
----
+Chạy demo bằng `node scripts/demo-server.cjs`. Đóng gói bằng `scripts/package-extension.ps1` trong PowerShell có quyền chạy script. Build extension tạo bundle MAIN và ISOLATED riêng, mỗi bundle chứa geometry để tránh lỗi dependency nạp thiếu. Build demo tạo HTML standalone, bundle Three.js và license trong dist.
 
-## 🛡️ Tiêu chuẩn dữ liệu Bounding Box (CVAT 3D Format)
+**Kiểm tra bản 1.8.0:** 64 unit test và17 browser test khác nhau pass (full suite16 và kiểm tra lại5 batch tests sau bổ sung test phím tắt). Bằng chứng tại docs/verification/batch-1.8.0-tests.json. Chưa chạy batch trên CVAT thật.
 
-Trong payload JSON của CVAT, mỗi shape 3D được biểu diễn qua mảng 16 giá trị hoặc 9 giá trị chính:
-$$\text{points} = [X, Y, Z, R_x, R_y, R_z, D_x, D_y, D_z]$$
+**Kiểm tra bản 1.6.0 ngày 15/10/2026 (lịch sử):** 49/49 unit test, 8/8 browser test pass; ZIP 1.6.0 khớp source, standalone chứa đúng source hiện tại. Có test subtype từ attributes và fit profile bus/truck, native selection/history mock, Ground Snap sau fit, camera framing, danh sách nhiều lỗi và ROI thật. Chưa nghiệm thu thao tác chọn/sửa/Save/reload trên tab CVAT thật; pass test không bảo đảm Auto-Fit đúng với mọi point cloud.
 
-| Chỉ số | Tên thuộc tính | Đơn vị | Ý nghĩa |
-|---|---|---|---|
-| `points[0..2]` | Center $(X, Y, Z)$ | mét | Tọa độ tâm 3D của bounding box |
-| `points[3..5]` | Rotation $(R_x, R_y, R_z)$ | radian | Góc quay Euler ($R_z$ là góc Yaw trên mặt đường) |
-| `points[6..8]` | Dimensions $(L, W, H)$ | mét | Kích thước Chiều dài ($D_x$), Chiều rộng ($D_y$), Chiều cao ($D_z$) |
+[Báo cáo audit](docs/verification/tool-audit-2026-10-15.md) ghi nhận trạng thái trước cập nhật tài liệu: phần nhận xét subtype lệch yêu cầu cũ đã được người dùng xác nhận là thay đổi có chủ đích theo công việc thực tế; README này mô tả hành vi hiện hành.
 
----
+## Bằng chứng và lịch sử
 
-## 📝 Thông tin bản quyền & Đóng góp
-Dự án được xây dựng và tối ưu riêng cho môi trường kiểm thử dữ liệu 3D LiDAR của VinFast / Vantix. Mọi thắc mắc hoặc yêu cầu bổ sung tính năng xin vui lòng mở Issue hoặc liên hệ nhóm phát triển.
+Các báo cáo cũ mô tả thuật toán/profile tại thời điểm tạo, không thay thế cấu hình class/subtype hiện tại:
+
+- [Box32 — xe gần nhau, 1.5.1](docs/verification/autofit-parking-1.5.1.json): 7.283 → 4.304 điểm, box khoảng 4,60 × 1,78 × 1,81 m; chưa có mẫu tay để nghiệm thu.
+- [Box17 — ground yếu, 1.4.2](docs/verification/autofit-truck-1.4.2.json): replay giữ Z/H, IoU với mẫu tay 0,862.
+- [Box62 — replay 1.4.0](docs/verification/autofit-real-case-1.4.0.json), [Top/Side/Front](docs/verification/autofit-real-case-1.4.0.png): IoU khoảng 0,802; export cũ không có toàn frame raw.
+- [Hướng dẫn demo](docs/DEMO_GUIDE.md), [kế hoạch dài hạn](docs/REALTIME_IMPLEMENTATION_PLAN.md).
+- [Kiểm chứng README cũ](docs/README_VERIFICATION.md), [README gốc](docs/verification/README.before-verification.md).
+
+Demo dùng dữ liệu mô phỏng; cache Job 9426 có 61 box trong khi lần kiểm tra API/UI lịch sử có 62. Số issue của engine cũ không đại diện cho kết quả QC hiện tại.

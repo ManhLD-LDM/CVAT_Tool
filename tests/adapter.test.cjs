@@ -18,7 +18,7 @@ function harness(options={}) {
     const notify=()=>listeners.forEach(fn=>fn());
     const store={getState:()=>state,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},dispatch(action){actions.push(action);if(action.type==='UPDATE_ANNOTATIONS_SUCCESS'){for(const saved of action.payload.states){const index=state.annotation.annotations.states.findIndex(s=>s.clientID===saved.clientID);state.annotation.annotations.states[index]=saved;}notify();}}};
     const win={location:{pathname:'/tasks/2837/jobs/9426'},CustomEvent:class{constructor(type,init){this.type=type;this.detail=init.detail;}},setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){}};
-    const adapter=createCvatAdapter({window:win,document:{getElementById:()=>null},store,math,delay:async()=>{}});adapter.start();
+    const adapter=createCvatAdapter({window:win,document:{getElementById:()=>null},store,math,delay:async()=>{},...options.adapterEnv});adapter.start();
     const ref=id=>{const s=adapter.getSnapshot();return {sessionId:s.sessionId,jobId:s.jobId,frame:s.frame,revision:s.revision,clientId:id};};
     return {adapter,ref,state,actions,colors,history,notify,failSave:()=>{fail=true;},labels,view};
 }
@@ -209,5 +209,22 @@ test('focus selects exact clientID and frames all vertices while preserving view
  assert.deepEqual(target.toArray(),before.slice(0,3));
  camera.updateMatrixWorld();
  for(const v of math.cuboidVertices(before)){const projected=new THREE.Vector3(...v).project(camera);assert.ok(Math.abs(projected.x)<1&&Math.abs(projected.y)<1);}
+ assert.equal(h.history.length,0);h.adapter.dispose();
+});
+
+test('batch commands use native unsaved collection and protect clientID keyframes',async()=>{
+ const {createBatchController}=require('../extension/batch_controller.js'),batchMath=require('../extension/batch_math.js');
+ const h=harness({adapterEnv:{batchFactory:createBatchController,batchMath,parsePCD:b=>new Float32Array(b)}});
+ const job=h.state.annotation.job.instance;job.startFrame=0;job.stopFrame=50;
+ h.state.annotation.annotations.states[0].objectType='track';
+ job.annotations.export=async()=>({tracks:[{clientID:1,id:99,shapes:[{frame:29,points:h.state.annotation.annotations.states[0].points,type:'cuboid',outside:false}]}]});
+ job.annotations.get=async()=>h.state.annotation.annotations.states;
+ job.frames={get:async()=>({deleted:false,data:async()=>({imageData:new Blob([new Float32Array([0,0,0]).buffer])})})};
+ h.notify();assert.equal(h.adapter.getSnapshot().capabilities.batch,true);
+ const opened=await h.adapter.command('BATCH_OPEN',{ref:h.ref(1)});
+ assert.equal(opened.clientId,1);assert.equal(opened.serverId,99);
+ const card=await h.adapter.command('BATCH_FRAME',{token:opened.token,frame:29});
+ assert.equal(card.protected,true);
+ await assert.rejects(h.adapter.command('BATCH_APPLY',{token:opened.token,frames:[29]}),/editable proposal/);
  assert.equal(h.history.length,0);h.adapter.dispose();
 });

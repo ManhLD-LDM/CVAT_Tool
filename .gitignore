@@ -42,3 +42,29 @@ credentials.json
 Thumbs.db
 *.log
 .reference/
+
+# Additional local-only files
+node_modules/
+.reference/
+test-results/
+playwright-report/
+dist/
+*.log
+*.local.json
+
+# Local CVAT jobs and raw point clouds (keep on this workstation).
+data_job*/
+/*job58*.json
+/server_current_after_user_edit.json
+
+# One-off audit/upload scripts can contain workstation session credentials.
+/scripts/*.py
+!/scripts/plot-fit-case.py
+!/scripts/cvat_session_test.py
+
+# Environment files and local credentials must never be published.
+.env
+.env.*
+!.env.example
+*.pem
+*.key

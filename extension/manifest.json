@@ -1,11 +1,13 @@
 {
   "manifest_version": 3,
   "name": "CVAT 3D TOOL",
-  "version": "1.6.0",
+  "version": "1.8.0",
   "description": "Minimalist Real-time Quality Linter, Auto Ground Snapping, and 3D Assistant for CVAT",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "cookies",
+    "downloads"
   ],
   "host_permissions": [
     "*://cvat.note.transformerlabs.ai/*",
@@ -63,5 +65,8 @@
         "*://localhost/*"
       ]
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "session_worker.js"
+  }
 }

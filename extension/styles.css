@@ -500,3 +500,23 @@
   z-index: 1000;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
+
+/* Batch track editor: separate from the compact HUD. */
+.c3d-batch-dialog{color-scheme:dark;position:fixed;inset:3vh 2vw;width:94vw;max-width:1600px;height:90vh;box-sizing:border-box;background:#18181d;color:#e4e4e7;border:1px solid #52525b;border-radius:10px;padding:18px;z-index:2147483647;overflow:auto;font:13px system-ui}
+.c3d-batch-dialog::backdrop{background:#0008}
+.c3d-batch-dialog header,.c3d-batch-controls,.c3d-batch-dialog footer{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.c3d-batch-dialog header{justify-content:space-between}.c3d-batch-dialog h2{font-size:18px}
+.c3d-batch-dialog input[type=number]{width:75px;background:#27272a;color:#eee;border:1px solid #52525b;padding:5px}
+.c3d-batch-dialog button{background:#303039;color:#eee;border:1px solid #52525b;border-radius:4px;padding:7px;cursor:pointer}
+.c3d-batch-dialog button:disabled{opacity:.45;cursor:default}
+.c3d-batch-cards{display:flex;gap:10px;overflow-x:auto;padding:10px 0;scrollbar-color:#52525b #18181d;scrollbar-width:thin}
+.c3d-batch-card{flex:0 0 310px;border:1px solid #3f3f46;padding:10px;background:#202025;border-radius:5px}
+.c3d-batch-card canvas{display:block;width:300px;height:110px;margin:4px 0 10px}
+.c3d-batch-card p{color:#b4b4bd;min-height:30px}.c3d-batch-card h3{font-size:14px}.c3d-batch-card button{margin:6px}
+.c3d-batch-card label{display:block;color:#6ee7b7}.c3d-batch-dialog [data-progress]{color:#fbbf24;white-space:pre-wrap}
+
+.c3d-batch-dialog[open]{display:flex;flex-direction:column;gap:6px}
+.c3d-batch-dialog header,.c3d-batch-dialog>p,.c3d-batch-controls,.c3d-batch-dialog footer{flex-shrink:0}
+.c3d-batch-dialog>p{margin:4px 0}
+.c3d-batch-cards{flex:1;min-height:0;overflow:auto;align-items:flex-start}
+.c3d-batch-dialog footer{background:#18181d;border-top:1px solid #3f3f46;padding-top:8px}

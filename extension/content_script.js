@@ -11,6 +11,7 @@
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
+    let batchUI=null;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -20,7 +21,7 @@
     function request(type, payload = {}) {
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
-            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},20000);
+            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},type.startsWith('BATCH_')?120000:20000);
             pending.set(requestId,{resolve,reject,timeout});
             window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
         });
@@ -93,7 +94,7 @@
             <header class="c3d-header"><div><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
+                <button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button><div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
                 <div class="c3d-toolbar"><button id="c3d-btn-scan" class="c3d-btn-primary">RUN QC NOW <kbd>Alt Shift L</kbd></button><div class="c3d-toggles"><label><input id="c3d-auto" type="checkbox" checked> Auto QC</label><label><input id="c3d-colors" type="checkbox" checked> 3D Error Colors</label></div>
                     <div class="c3d-action-grid"><button id="c3d-btn-ground" class="c3d-btn-secondary" title="Alt+Shift+G">Ground Snap</button><button id="c3d-btn-freecam" class="c3d-btn-secondary" title="Alt+Shift+C">Free Cam</button></div>
                     <button id="c3d-btn-autofit" class="c3d-btn-primary" title="Alt+Shift+A">AUTO-FIT BOX <kbd>Alt Shift A</kbd></button>
@@ -115,9 +116,18 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.6.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.8.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
+        batchUI=window.__C3D_BATCH_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
+
+        el('c3d-session').disabled=!globalThis.chrome?.runtime?.id;
+        el('c3d-session').addEventListener('click',async()=>{
+            try{
+                const response=await chrome.runtime.sendMessage({type:'C3D_OPEN_SESSION'});
+                if(!response?.ok)throw new Error(response?.error||'Extension unavailable');
+            }catch(error){toast(error.message,true);}
+        });
         el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';});
         el('c3d-btn-scan').addEventListener('click',()=>runQC(true));
         el('c3d-btn-ground').addEventListener('click',()=>action('SNAP_GROUND'));
@@ -175,6 +185,8 @@
         for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
         const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!math?.canManuallySnapGround(ground);
         el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
+        el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
+        el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
         el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
         el('c3d-btn-focus').disabled=!box||!cap.selection;el('c3d-btn-scan').disabled=!s?.connected;
@@ -252,13 +264,21 @@
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){batchUI?.dispose();batchUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
+    const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args)});
+    function sessionMessage(message,sender,reply){
+        if(message?.type!=='C3D_SESSION_API')return;
+        if(sender.id!==globalThis.chrome?.runtime?.id||sender.url?.split('?')[0]!==chrome.runtime.getURL('session.html'))return;
+        sessionTransport(message).then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));
+        return true;
+    }
+    if(sessionTransport&&globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.addListener(sessionMessage);
     window.__CVAT_COPILOT_PANEL={dispose};
     window.addEventListener('c3d:response:v2',receive);window.addEventListener('c3d:snapshot:v2',receiveSnapshot);window.addEventListener('keydown',keydown,true);
     function start(){routeCheck();request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not connected'));routeTimer=setInterval(routeCheck,1500);}
