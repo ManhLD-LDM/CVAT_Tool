@@ -71,3 +71,29 @@ test('shrinking requires a nearby supported surface and preserves distant faces 
     assert.ok(r.retainedFaces.includes('front'));assert.ok(r.retainedFaces.includes('left'));assert.ok(r.retainedFaces.includes('top'));
     assert.ok(r.points[6]>=3.9);assert.ok(r.points[7]>=1.9);
 });
+
+test('Auto Adjust ignores a dense near-ground layer connected to the object',()=>{
+    const original=box(),object=cloud(),dirty=object.slice();
+    for(let x=-1.35;x<=1.35;x+=.08)for(let y=-.85;y<=.85;y+=.08)for(const z of [.1,.14,.18])dirty.push([x,y,z]);
+    const clean=m.autoAdjustBox(object,original,plane),result=m.autoAdjustBox(dirty,original,plane);
+    assert.deepEqual(result.points,clean.points);
+    assert.equal(result.groundClearance,.2);assert.ok(result.excludedNearGroundPoints>clean.excludedNearGroundPoints);
+});
+
+test('ground exclusion follows the local slope and adapts to plane uncertainty',()=>{
+    for(const rmse of [undefined,.11]){
+        const ground=m.makePlane(.07,-.04,2,{accepted:true,confidence:.99,rmse}),original=box();
+        original.points=m.snapGroundPoints(original.points,ground).newPoints;
+        const top=original.points[2]+original.points[8]/2,object=cloud({top,ground}),dirty=object.slice();
+        const expectedClearance=rmse===undefined?.2:.33;
+        for(let x=-1.3;x<=1.3;x+=.09)for(let y=-.8;y<=.8;y+=.09)for(const clearance of [.1,.18,...(rmse?[.26,.31]:[])])dirty.push([x,y,ground.getTargetZ(x,y)+clearance]);
+        const clean=m.autoAdjustBox(object,original,ground),result=m.autoAdjustBox(dirty,original,ground);
+        assert.deepEqual(result.points,clean.points);close(result.groundClearance,expectedClearance,1e-8);
+        close(Math.min(...m.cuboidVertices(result.points).map(([x,y,z])=>z-ground.getTargetZ(x,y))),0,1e-8);
+    }
+});
+
+test('near-ground returns alone cannot authorize an Auto Adjust edit',()=>{
+    const points=[];for(let x=-1.2;x<=1.2;x+=.08)for(let y=-.7;y<=.7;y+=.08)for(const z of [.1,.15,.19,Math.fround(.2)])points.push([x,y,z]);
+    assert.throws(()=>m.autoAdjustBox(points,box(),plane),/Insufficient object points/);
+});

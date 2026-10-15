@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CVAT 3D TOOL",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Minimalist Real-time Quality Linter, Auto Ground Snapping, and 3D Assistant for CVAT",
   "permissions": [
     "activeTab",

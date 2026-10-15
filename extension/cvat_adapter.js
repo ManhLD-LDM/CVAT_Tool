@@ -456,7 +456,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -505,8 +505,9 @@
                     const notes=[];
                     if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
                     if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
-                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,warning:notes.join(' · ')||null};
-                    return {...await updateObject(payload.ref,{points}),pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                    const evidence={groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints};
+                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
+                    return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
                 }
                 case 'MOVE_TO_MOUSE': {
                     const {target}=validate(payload.ref,true);

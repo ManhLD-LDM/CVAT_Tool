@@ -2,15 +2,16 @@ const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 const THREEBundle=require('esbuild').buildSync({stdin:{contents:"window.__TEST_THREE=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
 
-async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true}={}){
+async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true,nearGroundNoise=false}={}){
     await page.goto('http://127.0.0.1:4173/extension/manifest.json');
     await page.setContent('<html data-c3d-demo="true"><body><canvas id="perspective"></canvas><canvas id="top" style="position:absolute;left:100px;top:200px;width:800px;height:400px"></canvas></body></html>');
     await page.addStyleTag({path:'extension/styles.css'});
     await page.addScriptTag({content:THREEBundle});
-    await page.evaluate(({withObject,initialPoints})=>{
+    await page.evaluate(({withObject,initialPoints,nearGroundNoise})=>{
         const THREE=window.__TEST_THREE,points=[];
         for(let x=-12;x<=12;x+=.3)for(let y=-12;y<=12;y+=.3)points.push(x,y,0);
         if(withObject)for(let i=0;i<=20;i++)for(let j=0;j<=10;j++)for(const z of [.6,.8,1,1.2,1.4])points.push(.6+(i/20-.5)*2,.3+(j/10-.5),z);
+        if(nearGroundNoise)for(let x=-.75;x<=1.95;x+=.08)for(let y=-.55;y<=1.15;y+=.08)for(const z of [.1,.14,.18,.2])points.push(x,y,z);
         const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(points,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));
         const camera=new THREE.OrthographicCamera(-10,10,5,-5,.1,100);camera.position.set(0,0,20);camera.lookAt(0,0,0);camera.updateProjectionMatrix();camera.updateMatrixWorld();
         const perspective=document.getElementById('perspective'),top=document.getElementById('top');
@@ -21,7 +22,7 @@ async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_M
         const state={annotation:{job:{instance:{id:1,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>history.length>0}}},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas},workspace:'standard3d'}};
         const listeners=new Set();
         window.__store__={getState:()=>state,subscribe(fn){listeners.add(fn);return ()=>listeners.delete(fn);},dispatch(action){if(action.type==='UPDATE_ANNOTATIONS_SUCCESS')state.annotation.annotations.states=action.payload.states;for(const fn of listeners)fn();}};
-    },{withObject,initialPoints});
+    },{withObject,initialPoints,nearGroundNoise});
     for(const file of ['geometry_math.js','cvat_adapter.js','main_world_bridge.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
     await expect(page.locator('#c3d-btn-move')).toBeEnabled();
     await expect(page.locator('#c3d-adjust-direction')).not.toBeChecked();
@@ -76,4 +77,21 @@ test('Auto Adjust preserves far faces on a partially observed object without sav
     await expect(page.locator('#c3d-toast')).toContainText('no supported local correction');
     expect(await page.evaluate(()=>savedEdits.length)).toBe(0);
     expect(await page.evaluate(()=>__store__.getState().annotation.annotations.states[0].points)).toEqual(original);
+});
+
+test('Auto Adjust ignores connected near-ground noise when measuring box faces',async({page})=>{
+    const initialPoints=[.5,.25,.7,0,0,.2,2,1,1.4,0,0,0,0,0,0,0];
+    await fixture(page,true,false,{command:'AUTO_ADJUST',initialPoints});
+    const clean=await page.evaluate(()=>savedEdits[0]);
+    await fixture(page,true,false,{command:'AUTO_ADJUST',initialPoints,nearGroundNoise:true});
+    const dirty=await page.evaluate(()=>savedEdits[0]);
+    for(const i of [0,1,5,6,7])expect(dirty[i]).toBeCloseTo(clean[i],5);
+});
+
+test('near-ground points alone leave the selected box unchanged without a native save',async({page})=>{
+    const initialPoints=[.5,.25,.7,0,0,.2,2,1,1.4,0,0,0,0,0,0,0];
+    await fixture(page,false,false,{command:'AUTO_ADJUST',initialPoints,nearGroundNoise:true,expectSave:false});
+    await expect(page.locator('#c3d-toast')).toContainText('ground exclusion band');
+    expect(await page.evaluate(()=>savedEdits.length)).toBe(0);
+    expect(await page.evaluate(()=>__store__.getState().annotation.annotations.states[0].points)).toEqual(initialPoints);
 });

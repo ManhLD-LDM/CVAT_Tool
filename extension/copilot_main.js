@@ -370,13 +370,20 @@
         const plane=makePlane(ground.a,ground.b,ground.c),snap=snapGroundPoints(original,plane);
         if(Math.abs(snap.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
         const base=snap.newPoints,c=Math.cos(base[5]),s=Math.sin(base[5]),owned=new Set();
-        const local=extractBoxROI(points,{points:base},.4);
+        const roi=extractBoxROI(points,{points:base},.4);
+        const rmse=Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0;
+        const groundClearance=Math.max(.2,3*rmse);
+        // Remove the entire near-ground band before clustering. Otherwise road
+        // returns can bridge into the object and supply false face evidence.
+        // Use each point's local plane height so slopes are handled correctly.
+        const local=roi.filter(p=>p[2]-plane.getTargetZ(p[0],p[1])>groundClearance+1e-6);
+        const excludedNearGroundPoints=roi.length-local.length;
         for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(local,box,.02))owned.add(p);
         const clusters=seededClusters(local.filter(p=>!owned.has(p)),{points:base},ground,.45).map(({cluster})=>{
             const interior=extractBoxROI(cluster,{points:base},0),cells=new Set(interior.map(p=>p.map(v=>Math.floor(v/.08)).join(',')));
             return {cluster,inside:cells.size};
         }).filter(item=>item.inside>=10&&item.cluster.length>=20).sort((a,b)=>b.inside-a.inside);
-        if(!clusters.length)throw new Error('Insufficient object points inside this box; Auto Adjust left it unchanged');
+        if(!clusters.length)throw new Error(`Insufficient object points above the ${(groundClearance*100).toFixed(0)}cm ground exclusion band; box unchanged`);
         if(clusters[1]&&clusters[1].inside>=clusters[0].inside*.8)throw new Error('Ambiguous object clusters inside this box; Auto Adjust left it unchanged');
         const cluster=clusters[0].cluster,cells=new Map();
         for(const p of cluster){const key=p.map(v=>Math.floor(v/.08)).join(',');if(!cells.has(key))cells.set(key,[c*(p[0]-base[0])+s*(p[1]-base[1]),-s*(p[0]-base[0])+c*(p[1]-base[1]),p[2]]);}
@@ -417,7 +424,7 @@
         if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
         if(result[8]<base[8]-Math.min(.1,base[8]*.05)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
         return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
-            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces};
+            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints};
     }
 
     // Mouse placement is a position correction, not a dimension or heading fit.
@@ -4893,7 +4900,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -4942,8 +4949,9 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const notes=[];
                     if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
                     if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
-                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,warning:notes.join(' · ')||null};
-                    return {...await updateObject(payload.ref,{points}),pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                    const evidence={groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints};
+                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
+                    return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
                 }
                 case 'MOVE_TO_MOUSE': {
                     const {target}=validate(payload.ref,true);
