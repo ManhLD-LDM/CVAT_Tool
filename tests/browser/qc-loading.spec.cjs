@@ -15,6 +15,7 @@ async function editorFixture(page){
 }
 test('QC reports a missing dependency and recovers when geometry loads late',async({page})=>{
     const errors=[];page.on('pageerror',e=>errors.push(e.message));await editorFixture(page);
+    await page.addScriptTag({content:fs.readFileSync('extension/shortcut_settings.js','utf8')});
     await page.addScriptTag({content:fs.readFileSync('extension/content_script.js','utf8')});
     await expect(page.locator('#c3d-val-count')).toHaveText('1');
     await page.locator('#c3d-btn-scan').click();
@@ -51,7 +52,8 @@ test('clicking one QC issue focuses its box and retains all three issues includi
   });
  });
  await page.addScriptTag({content:fs.readFileSync('extension/geometry_math.js','utf8')});
- await page.addScriptTag({content:fs.readFileSync('extension/content_script.js','utf8')});
+ await page.addScriptTag({content:fs.readFileSync('extension/shortcut_settings.js','utf8')});
+    await page.addScriptTag({content:fs.readFileSync('extension/content_script.js','utf8')});
  await page.locator('#c3d-btn-scan').click();
  await expect(page.locator('.c3d-issue-select')).toHaveCount(3);
  await page.locator('#c3d-filter').selectOption('WARNING');

@@ -3,6 +3,22 @@ const assert = require('node:assert/strict');
 const m = require('../extension/geometry_math.js');
 const box = (id = 1, x = 0, y = 0, z = 1, l = 4, w = 2, h = 2) => ({id, label_name:'vehicles', points:[x,y,z,0,0,0,l,w,h,0,0,0,0,0,0,0]});
 const close = (a,b,t=1e-8) => assert.ok(Math.abs(a-b)<t, `${a} != ${b}`);
+
+test('Keep direction fits extents in the chosen heading and recenters without changing yaw',()=>{
+    const yaw=.43,points=[];
+    for(let x=-2;x<=2;x+=.2)for(let y=-.8;y<=.8;y+=.2)points.push([3+Math.cos(yaw)*x-Math.sin(yaw)*y,-2+Math.sin(yaw)*x+Math.cos(yaw)*y,1.7]);
+    const seed=box().points;seed[5]=yaw;
+    const fitted=m.fitBoxToCluster(points,'vehicles',{points:seed,ground:m.makePlane(0,0,0,{accepted:true,confidence:1}),keepDirection:true});
+    assert.equal(fitted[5],yaw);close(fitted[0],3);close(fitted[1],-2);close(fitted[6],4);close(fitted[7],1.6);
+    const weak=m.fitBoxToCluster(points,'vehicles',{points:seed,ground:{accepted:false},allowGroundFallback:true,keepDirection:true});
+    assert.equal(weak[5],yaw);assert.equal(weak[2],seed[2]);assert.equal(weak[8],seed[8]);
+    // An intentionally different heading must change the measured extents.
+    seed[5]=yaw+.1;
+    const offAxis=m.fitBoxToCluster(points,'vehicles',{points:seed,ground:m.makePlane(0,0,0,{accepted:true,confidence:1}),keepDirection:true});
+    assert.equal(offAxis[5],seed[5]);close(offAxis[6],4*Math.cos(.1)+1.6*Math.sin(.1));close(offAxis[7],1.6*Math.cos(.1)+4*Math.sin(.1));
+    seed[3]=.1;
+    assert.throws(()=>m.fitBoxToCluster(points,'vehicles',{points:seed,keepDirection:true}),/upright/);
+});
 test('rotation is immutable, preserves geometry and wraps after a full turn', () => {
     const p=box().points; let r=p;
     for(let i=0;i<4;i++) r=m.rotateYawPoints(r,90);

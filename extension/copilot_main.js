@@ -321,7 +321,7 @@
             (ground.confidence >= 0.45 && ground.rmse <= 0.04 && ground.inlierCount >= 60);
     }
 
-    function selectSeedCluster(points, currentBox, ground, distance = 0.55) {
+    function seededClusters(points, currentBox, ground, distance = 0.55) {
         // A plausible plane may remove road returns without authorizing a ground snap.
         // Low support confidence is distinct from a bad plane fit.
         ground = canManuallySnapGround(ground) ? ground : null;
@@ -353,7 +353,162 @@
             if (overlap) clusters.push({ cluster, overlap });
         }
         clusters.sort((a, b) => b.overlap - a.overlap || b.cluster.length - a.cluster.length);
-        return clusters[0]?.cluster || [];
+        return clusters;
+    }
+
+    function selectSeedCluster(points, currentBox, ground, distance = 0.55) {
+        return seededClusters(points, currentBox, ground, distance)[0]?.cluster || [];
+    }
+
+    // Local cleanup of five faces. Ground fixes the bottom; heading is immutable.
+    // Unlike Auto-Fit, this does not impose class dimensions or search for a heading.
+    function autoAdjustBox(points, currentBox, ground, neighborBoxes = []) {
+        const original=Array.from(currentBox.points||currentBox);
+        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
+        if(!canManuallySnapGround(ground)||(ground.confidence!=null&&ground.confidence<.65))throw new Error('Reliable ground required for Auto Adjust; box unchanged');
+        const plane=makePlane(ground.a,ground.b,ground.c),snap=snapGroundPoints(original,plane);
+        if(Math.abs(snap.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
+        const base=snap.newPoints,c=Math.cos(base[5]),s=Math.sin(base[5]),owned=new Set();
+        const local=extractBoxROI(points,{points:base},.4);
+        for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(local,box,.02))owned.add(p);
+        const clusters=seededClusters(local.filter(p=>!owned.has(p)),{points:base},ground,.45).map(({cluster})=>{
+            const interior=extractBoxROI(cluster,{points:base},0),cells=new Set(interior.map(p=>p.map(v=>Math.floor(v/.08)).join(',')));
+            return {cluster,inside:cells.size};
+        }).filter(item=>item.inside>=10&&item.cluster.length>=20).sort((a,b)=>b.inside-a.inside);
+        if(!clusters.length)throw new Error('Insufficient object points inside this box; Auto Adjust left it unchanged');
+        if(clusters[1]&&clusters[1].inside>=clusters[0].inside*.8)throw new Error('Ambiguous object clusters inside this box; Auto Adjust left it unchanged');
+        const cluster=clusters[0].cluster,cells=new Map();
+        for(const p of cluster){const key=p.map(v=>Math.floor(v/.08)).join(',');if(!cells.has(key))cells.set(key,[c*(p[0]-base[0])+s*(p[1]-base[1]),-s*(p[0]-base[0])+c*(p[1]-base[1]),p[2]]);}
+        const support=[...cells.values()];
+        if(support.length<12)throw new Error('Too few occupied object cells; box unchanged');
+        const extent=(band,axis)=>{let lo=Infinity,hi=-Infinity;for(const p of band){lo=Math.min(lo,p[axis]);hi=Math.max(hi,p[axis]);}return hi-lo;};
+        function edge(axis,sign){
+            const sorted=support.slice().sort((a,b)=>sign*(a[axis]-b[axis]));
+            for(let i=0;i<sorted.length;i++){
+                let j=i;while(j<sorted.length&&sign*(sorted[j][axis]-sorted[i][axis])<=.12)j++;
+                if(j-i<3)continue;
+                const band=sorted.slice(i,j),other=[0,1,2].filter(a=>a!==axis);
+                if(other.some(a=>extent(band,a)>=.08))return {value:sorted[i][axis],band};
+            }
+            return null;
+        }
+        const old=[-base[6]/2,base[6]/2,-base[7]/2,base[7]/2,base[2]+base[8]/2],next=old.slice();
+        const names=['rear','front','right','left','top'],limitedFaces=[],retainedFaces=[];
+        for(let face=0;face<5;face++){
+            const axis=face<2?0:face<4?1:2,sign=face<4&&face%2===0?1:-1,e=edge(axis,sign);
+            if(!e){retainedFaces.push(names[face]);continue;}
+            const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
+            // Never walk a face across an occluded region, even on repeated
+            // presses: distant evidence means preserve, not clamp-and-shrink.
+            const shrinkLimit=Math.min(.1,base[6+axis]*.05);
+            if(shrinking&&sign*(e.value-old[face])>shrinkLimit+1e-8){retainedFaces.push(names[face]);continue;}
+            // Empty space alone is not evidence of a hidden surface. Side
+            // shrinking needs vertical surface support; top needs an XY patch.
+            if(shrinking&&(axis<2?extent(e.band,2)<Math.min(.25,base[8]*.2):extent(e.band,0)<Math.min(.25,base[6]*.2)||extent(e.band,1)<Math.min(.2,base[7]*.2))){retainedFaces.push(names[face]);continue;}
+            const delta=desired-old[face];if(!shrinking&&Math.abs(delta)>.4+1e-8)limitedFaces.push(names[face]);
+            if(Math.abs(delta)>.01)next[face]=old[face]+Math.max(-.4,Math.min(.4,delta));
+        }
+        const dx=(next[0]+next[1])/2,dy=(next[2]+next[3])/2,result=original.slice();
+        result[0]=base[0]+c*dx-s*dy;result[1]=base[1]+s*dx+c*dy;
+        result[6]=next[1]-next[0];result[7]=next[3]-next[2];
+        const bottom=Math.max(...[[-1,-1],[-1,1],[1,-1],[1,1]].map(([x,y])=>plane.getTargetZ(result[0]+c*x*result[6]/2-s*y*result[7]/2,result[1]+s*x*result[6]/2+c*y*result[7]/2)));
+        result[8]=next[4]-bottom;result[2]=bottom+result[8]/2;
+        if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
+        if(result[8]<base[8]-Math.min(.1,base[8]*.05)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
+        return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
+            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces};
+    }
+
+    // Mouse placement is a position correction, not a dimension or heading fit.
+    // Rank separate clusters by proximity to the pointer rather than point count.
+    function refineCenterNearPointer(points, currentBox, ground, neighborBoxes = [], options = {}) {
+        const original=Array.from(currentBox.points||currentBox);
+        const fallback=reason=>({refined:false,points:original.slice(),reason,pointCount:0});
+        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)return fallback('Center refinement supports upright boxes only');
+        const owned=new Set();
+        for(const box of neighborBoxes){
+            if(parseCVAT16Points(box.points))for(const p of extractBoxROI(points,box,.02))owned.add(p);
+        }
+        const available=points.filter(p=>!owned.has(p));
+        const c=Math.cos(original[5]),s=Math.sin(original[5]),candidates=[];
+        for(const {cluster} of seededClusters(available,{points:original},ground,.45)){
+            if(cluster.length<20)continue;
+            // Use occupied cells for bounds so repeated near-surface returns do
+            // not pull the center toward the denser visible side of an object.
+            const cells=new Map();
+            for(const p of cluster){const key=p.map(v=>Math.floor(v/.12)).join(',');if(!cells.has(key))cells.set(key,p);}
+            if(cells.size<10)continue;
+            const xs=[],ys=[];
+            for(const p of cells.values()){const dx=p[0]-original[0],dy=p[1]-original[1];xs.push(c*dx+s*dy);ys.push(-s*dx+c*dy);}
+            const bounds=a=>{a.sort((a,b)=>a-b);return [a[Math.floor((a.length-1)*.01)],a[Math.ceil((a.length-1)*.99)]];};
+            const [x0,x1]=bounds(xs),[y0,y1]=bounds(ys),dx=(x0+x1)/2,dy=(y0+y1)/2;
+            const heading=options.adjustDirection?estimateFootprintHeading(cluster,{points:original}):null;
+            let spanX=x1-x0,spanY=y1-y0;
+            if(Number.isFinite(heading?.objectAxis)){
+                // A rotated narrow object can look oversized in the old heading.
+                // Check object size in its measured axes even if rotation is refused.
+                const yaw=heading.objectAxis-(original[7]>original[6]?Math.PI/2:0),cx=Math.cos(yaw),sy=Math.sin(yaw),u=[],v=[];
+                for(const p of cells.values()){const x=p[0]-original[0],y=p[1]-original[1];u.push(cx*x+sy*y);v.push(-sy*x+cx*y);}
+                const [u0,u1]=bounds(u),[v0,v1]=bounds(v);spanX=u1-u0;spanY=v1-v0;
+            }
+            if(spanX>original[6]*1.5||spanY>original[7]*1.5||spanX<Math.max(.08,original[6]*.1)||spanY<Math.max(.08,original[7]*.1))continue;
+            if(Math.abs(dx)>original[6]/2+.4||Math.abs(dy)>original[7]/2+.4)continue;
+            const edgeDistance=Math.hypot(Math.max(x0,-x1,0),Math.max(y0,-y1,0));
+            candidates.push({dx,dy,edgeDistance,centerDistance:Math.hypot(dx,dy),pointCount:cluster.length,heading,support:[...cells.values()]});
+        }
+        if(!candidates.length)return fallback('No reliable nearby object cluster');
+        candidates.sort((a,b)=>a.edgeDistance-b.edgeDistance||a.centerDistance-b.centerDistance);
+        const best=candidates[0],second=candidates[1];
+        if(second&&Math.abs(second.edgeDistance-best.edgeDistance)<.15&&Math.abs(second.centerDistance-best.centerDistance)<.25)
+            return fallback('Nearby object clusters are ambiguous; point closer to the intended object');
+        const result=original.slice();result[0]+=c*best.dx-s*best.dy;result[1]+=s*best.dx+c*best.dy;
+        let directionAdjusted=false,directionDeltaDegrees=0,directionWarning=null;
+        if(options.adjustDirection){
+            const heading=best.heading;
+            if(heading.accepted){
+                result[5]=heading.yaw;directionAdjusted=true;directionDeltaDegrees=heading.deltaDegrees;
+                // Recenter in the final heading, without changing the dimensions.
+                const cs=Math.cos(result[5]),sn=Math.sin(result[5]),xs=[],ys=[];
+                for(const p of best.support){const x=p[0]-original[0],y=p[1]-original[1];xs.push(cs*x+sn*y);ys.push(-sn*x+cs*y);}
+                const midpoint=a=>{a.sort((a,b)=>a-b);return (a[Math.floor((a.length-1)*.01)]+a[Math.ceil((a.length-1)*.99)])/2;};
+                const dx=midpoint(xs),dy=midpoint(ys);result[0]=original[0]+cs*dx-sn*dy;result[1]=original[1]+sn*dx+cs*dy;
+            }else directionWarning=heading.reason;
+        }
+        return {refined:true,points:result,pointCount:best.pointCount,shift:Math.hypot(result[0]-original[0],result[1]-original[1]),reason:null,
+            directionAdjusted,directionDeltaDegrees,directionWarning};
+    }
+
+    function estimateFootprintHeading(points, currentBox) {
+        const original=currentBox.points||currentBox;
+        const reject=reason=>({accepted:false,yaw:original[5],deltaDegrees:0,reason});
+        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)return reject('Direction unchanged: tilted box');
+        if(Math.max(original[6],original[7])/Math.min(original[6],original[7])<1.1)return reject('Direction unchanged: box footprint has no clear longest axis');
+        const axisDifference=(a,b)=>.5*Math.atan2(Math.sin(2*(a-b)),Math.cos(2*(a-b)));
+        const measure=cellSize=>{
+            // Equal XY occupancy weights: roof/rider height and duplicate
+            // near-surface returns must not dominate the top-view long axis.
+            const cells=new Map();
+            for(const p of points){if(!p?.slice(0,3).every(Number.isFinite))continue;const key=`${Math.floor((p[0]-original[0])/cellSize)},${Math.floor((p[1]-original[1])/cellSize)}`;if(!cells.has(key))cells.set(key,p);}
+            const support=[...cells.values()];if(support.length<20)return null;
+            const mx=support.reduce((sum,p)=>sum+p[0],0)/support.length,my=support.reduce((sum,p)=>sum+p[1],0)/support.length;
+            let xx=0,yy=0,xy=0;for(const p of support){const x=p[0]-mx,y=p[1]-my;xx+=x*x;yy+=y*y;xy+=x*y;}
+            const spread=xx+yy,contrast=Math.hypot(xx-yy,2*xy);
+            if(spread/support.length<.01||contrast/spread<.3)return null;
+            return {yaw:.5*Math.atan2(2*xy,xx-yy),anisotropy:contrast/spread,supportCount:support.length};
+        };
+        const fine=measure(.08),coarse=measure(.12);
+        if(!fine||!coarse)return reject('Direction unchanged: sparse or nearly symmetric object footprint');
+        if(Math.abs(axisDifference(fine.yaw,coarse.yaw))>10*Math.PI/180)return reject('Direction unchanged: unstable object axis');
+        // Width may be the box's longest dimension. Keep L/W assignments and
+        // forward/backward facing; only apply the nearest axial correction.
+        const longAxis=original[5]+(original[7]>original[6]?Math.PI/2:0);
+        const delta=axisDifference(fine.yaw,longAxis),deltaDegrees=delta*180/Math.PI;
+        if(Math.abs(deltaDegrees)>30+1e-8)return {...reject('Direction unchanged: object axis requires more than 30° correction'),objectAxis:fine.yaw};
+        const yaw=Math.abs(delta)<1e-10?original[5]:Math.atan2(Math.sin(original[5]+delta),Math.cos(original[5]+delta));
+        return {accepted:true,yaw,deltaDegrees,reason:null,objectAxis:fine.yaw,anisotropy:fine.anisotropy,supportCount:fine.supportCount};
     }
 
     function fitSeededBox(points, classLabel, currentBox, neighborBoxes = []) {
@@ -460,6 +615,7 @@
     function fitBoxToCluster(points, classLabel, currentBox) {
         const original = currentBox.points || currentBox, ground = currentBox.ground;
         if (!parseCVAT16Points(original)) throw new Error('Invalid box coordinates');
+        if (Math.abs(original[3]) > 1e-6 || Math.abs(original[4]) > 1e-6) throw new Error('Auto-Fit supports upright boxes only');
         const effectiveSub = currentBox.subType || currentBox.attributes?.type;
         const resolved = resolveDimensionSpec(classLabel, effectiveSub);
         if (!resolved) throw new Error(`No dimension rule configured for class: ${classLabel}`);
@@ -482,12 +638,13 @@
         const spread = xx + yy;
         if (spread < 1e-9) throw new Error('Point cluster lacks sufficient XY spread for Auto-Fit');
         let yaw = Math.hypot(xx - yy, 2 * xy) / spread < 0.1 ? original[5] : 0.5 * Math.atan2(2 * xy, xx - yy);
-        if (Math.hypot(xx - yy, 2 * xy) / spread >= 0.1) yaw = minimumRectangleYaw(cluster, yaw);
-        const surface = estimateVerticalHeading(cluster, original[5]);
+        if (!currentBox.keepDirection && Math.hypot(xx - yy, 2 * xy) / spread >= 0.1) yaw = minimumRectangleYaw(cluster, yaw);
+        const surface = currentBox.keepDirection ? { accepted: false } : estimateVerticalHeading(cluster, original[5]);
         if (surface.accepted) yaw = surface.yaw;
         while (yaw - original[5] > Math.PI / 2) yaw -= Math.PI;
         while (yaw - original[5] < -Math.PI / 2) yaw += Math.PI;
         yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
+        if (currentBox.keepDirection) yaw = original[5];
         const cs = Math.cos(yaw), sn = Math.sin(yaw);
         let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity, zmax = -Infinity;
         for (const p of cluster) {
@@ -525,7 +682,7 @@
 
     const api = {
         VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec,
-        fitSeededBox, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
+        fitSeededBox, autoAdjustBox, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
         SpatialPointIndex, minimumRectangleYaw, selectSeedCluster, extractBoxROI, fitBoxToCluster,
         DIMENSION_SPECS, idOf, parseCVAT16Points, cuboidVertices, rotateYawPoints, makePlane, fitPlane,
         estimateRoadPlane, snapGroundPoints, footprint, polygonArea, polygonIntersection, orientedIoU,
@@ -4296,6 +4453,37 @@ if(typeof module!=='undefined')module.exports={createBatchController};
         const listeners = new Set(), pendingObjects = new Set();
         const keys = new Set();
         let flightFrame = null, lastFlightTime = 0, looking = false;
+        let topPointer = null;
+
+        function topView() {
+            const view=canvas?.view?.views?.top;
+            return view?.camera?.position?.clone && view.camera.projectionMatrixInverse && view?.renderer?.domElement?.getBoundingClientRect ? view : null;
+        }
+        function clearPointer() { topPointer=null; }
+        function pointerOut(event) {
+            if(event.target===topView()?.renderer.domElement)clearPointer();
+        }
+        function pointerWorld(target) {
+            const view=topView(),element=view?.renderer.domElement,pointer=topPointer;
+            if(!view)throw new Error('Move to mouse unavailable: top-view camera or canvas API missing');
+            if(!pointer||pointer.element!==element||pointer.scope!==scope)throw new Error('Hover inside the top-view canvas before moving the box');
+            const rect=element.getBoundingClientRect(),{x,y}=pointer;
+            if(rect.width<=0||rect.height<=0||x<rect.left||x>=rect.left+rect.width||y<rect.top||y>=rect.top+rect.height)throw new Error('Pointer is outside the top-view canvas');
+            if(doc?.elementFromPoint && doc.elementFromPoint(x,y)!==element)throw new Error('Top-view canvas is covered; hover over the visible canvas');
+            const nx=(x-rect.left)/rect.width*2-1,ny=1-(y-rect.top)/rect.height*2;
+            view.camera.updateMatrixWorld?.(true);
+            const near=view.camera.position.clone().set(nx,ny,-1).unproject(view.camera);
+            const far=view.camera.position.clone().set(nx,ny,1).unproject(view.camera);
+            // Orthographic copies may be rendered under a transformed parent.
+            // Box points are expressed in the cuboid parent's local coordinates.
+            const parent=canvas?.view?.drawnObjects?.[target.clientID]?.cuboid?.top?.parent;
+            if(parent){parent.updateWorldMatrix?.(true,false);parent.worldToLocal(near);parent.worldToLocal(far);}
+            const direction=far.clone().sub(near);
+            if(Math.abs(direction.z)<1e-9)throw new Error('Top-view camera cannot project onto the box center plane');
+            const position=near.addScaledVector(direction,(target.points[2]-near.z)/direction.z);
+            if(![position.x,position.y].every(Number.isFinite))throw new Error('Invalid top-view projection');
+            return position;
+        }
 
         function discoverStore() {
             for (const candidate of [win.__store__, win.__REDUX_STORE__]) if (validStore(candidate)) return candidate;
@@ -4369,6 +4557,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
             const frame = ann?.player?.frame?.number ?? null;
             const nextScope = `${jobId}:${frame}`;
             if (nextScope !== scope) {
+                clearPointer();
                 scope = nextScope; lastFitCase=null; cloudIndex = null; spatialIndex = null; cloudKey = ''; cloudLoading = null; groundCache.clear();
                 clearAppearance(); stopCamera();
             }
@@ -4401,6 +4590,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
                     batch: !!(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get&&!!job?.frames?.get,
+                    moveToMouse: !!topView(),
                     ground: !!views?.perspective?.scene, freeCam: !!views?.perspective?.camera && !!views?.perspective?.controls },
                 reason: ann ? (!is3D ? 'Only 3D jobs are supported' : canvas ? '' : 'Waiting for 3D canvas') : 'Compatible CVAT editor not found' };
         }
@@ -4591,7 +4781,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
             }
         }
         function keyUp(event) { keys.delete(event.code); }
-        function clearKeys() { keys.clear(); looking = false; }
+        function clearKeys() { keys.clear(); looking = false; clearPointer(); }
         function pointerDown(event) {
             if (cameraRestore && event.target === cameraRestore.view.renderer.domElement && event.button === 2) {
                 looking = true; event.preventDefault(); event.stopImmediatePropagation();
@@ -4599,6 +4789,13 @@ if(typeof module!=='undefined')module.exports={createBatchController};
         }
         function pointerUp() { looking = false; }
         function pointerMove(event) {
+            const element=topView()?.renderer.domElement;
+            // Avoid serializing every annotation on every mouse movement.
+            if(element&&event.target===element){
+                const ann=editor(),jobId=Number(ann?.job?.instance?.id||win.location?.pathname?.match(/\/jobs\/(\d+)/)?.[1])||null;
+                if(`${jobId}:${ann?.player?.frame?.number??null}`!==scope)getSnapshot();
+            }
+            topPointer=element&&event.target===element&&Number.isFinite(event.clientX)&&Number.isFinite(event.clientY)?{element,x:event.clientX,y:event.clientY,scope}:null;
             if (!cameraRestore || !looking) return;
             const camera = cameraRestore.view.camera, up = camera.position.clone().set(0,0,1);
             const yaw = camera.quaternion.clone().setFromAxisAngle(up, -(event.movementX || 0) * 0.003);
@@ -4682,7 +4879,8 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                 }
                 case 'AUTO_FIT': {
                     const now=()=>win.performance?.now?.()??Date.now(),started=now();
-                    validate(payload.ref,true);
+                    const initial=validate(payload.ref,true).target;
+                    if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto-Fit supports upright boxes only');
                     const grounds = await getGrounds(payload.ref,[payload.ref.clientId]);
                     const groundDone=now();
                     const { target } = validate(payload.ref,true);
@@ -4695,13 +4893,13 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.8.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
-                        parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08},status:'fit-started'};
+                        parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
                     const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
                     lastFitCase.neighborBoxes=neighbors.map(b=>({id:b.id,points:b.points,label:b.label_name,subType:b.subType}));
-                    const selection=math.fitSeededBox(points,target.label.name,{points:target.points,ground,allowGroundFallback:true,subType,attributes:attrs},neighbors);
+                    const selection=math.fitSeededBox(points,target.label.name,{points:target.points,ground,allowGroundFallback:true,subType,attributes:attrs,keepDirection:payload.keepDirection===true},neighbors);
                     const {cluster,fitted}=selection,clusterDone=now();
                     lastFitCase.parameters.selectedClusterRadius=selection.radius;
                     lastFitCase.selection={excludedNeighborPoints:selection.excludedNeighborPoints,attempts:selection.attempts};
@@ -4716,10 +4914,78 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     }
                     const fitDone=now(),updated=await updateObject(payload.ref,{points:fitted}),done=now();
                     if(lastFitCase){lastFitCase.status='applied';lastFitCase.elapsedMs=done-started;}
-                    return {...updated,pointCount:cluster.length,groundFallback:!trusted,groundReason:ground?.reason,elapsedMs:done-started,
+                    return {...updated,keepDirection:payload.keepDirection===true,pointCount:cluster.length,groundFallback:!trusted,groundReason:ground?.reason,elapsedMs:done-started,
                         timingsMs:{groundAndIndex:groundDone-started,roi:roiDone-groundDone,cluster:clusterDone-roiDone,fit:fitDone-clusterDone,nativeSave:done-fitDone}};
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
+                case 'AUTO_ADJUST': {
+                    const initial=validate(payload.ref,true).target;
+                    if(pendingObjects.size)throw new Error('Previous operation in progress');
+                    if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
+                    const grounds=await getGrounds(payload.ref,[payload.ref.clientId]),ground=grounds[payload.ref.clientId];
+                    validate(payload.ref,true);
+                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for Auto Adjust; box unchanged');
+                    const base=math.snapGroundPoints(initial.points,math.makePlane(ground.a,ground.b,ground.c));
+                    if(Math.abs(base.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
+                    const nearby=await extractLocalPoints(payload.ref,.4,{points:base.newPoints});
+                    const {target}=validate(payload.ref,true),neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
+                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors),points=adjustment.points;
+                    const finalGround=cloudIndex.estimate({points});
+                    if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under adjusted box; box unchanged');
+                    // Preserve the fitted world-space top while the final footprint's
+                    // ground fixes the bottom. This changes height, never heading.
+                    const snap=math.snapGroundPoints(points,math.makePlane(finalGround.a,finalGround.b,finalGround.c));
+                    if(Math.abs(snap.deltaZ)>1.5||points[8]-snap.deltaZ<.1)throw new Error('Final ground adjustment is unsuitable; box unchanged');
+                    points[2]+=snap.deltaZ/2;points[8]-=snap.deltaZ;
+                    if(points[8]<target.points[8]-Math.min(.1,target.points[8]*.05)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
+                    validate(payload.ref,true);
+                    const notes=[];
+                    if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
+                    if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
+                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,warning:notes.join(' · ')||null};
+                    return {...await updateObject(payload.ref,{points}),pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                }
+                case 'MOVE_TO_MOUSE': {
+                    const {target}=validate(payload.ref,true);
+                    if(pendingObjects.size)throw new Error('Previous operation in progress');
+                    const position=pointerWorld(target);let points=Array.from(target.points);
+                    points[0]=position.x;points[1]=position.y;
+                    let ground=null,refined=false,pointCount=0,centerWarning=null,directionWarning=null,directionAdjusted=false,directionDeltaDegrees=0;
+                    try {
+                        const index=await ensureCloud();
+                        validate(payload.ref,true);
+                        ground=index.estimate({points});
+                        const search=points.slice();search[6]*=2;search[7]*=2;
+                        if(math.canManuallySnapGround(ground)){
+                            search[2]=ground.a*points[0]+ground.b*points[1]+ground.c+points[8]*.75;
+                            search[8]=points[8]*1.5;
+                        }
+                        const nearby=await extractLocalPoints(payload.ref,.4,{points:search});
+                        validate(payload.ref,true);
+                        const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
+                        const refinement=math.refineCenterNearPointer(nearby,{points},ground,neighbors,{adjustDirection:payload.adjustDirection===true});
+                        refined=refinement.refined;pointCount=refinement.pointCount;
+                        directionAdjusted=refinement.directionAdjusted===true;directionDeltaDegrees=refinement.directionDeltaDegrees||0;directionWarning=refinement.directionWarning||null;
+                        if(refined){
+                            points=refinement.points;
+                            // A shifted footprint requires its own ground estimate.
+                            ground=null;ground=cloudIndex.estimate({points});
+                        }else centerWarning=refinement.reason;
+                    } catch(error) {
+                        // A cloud failure permits XY placement; a stale edit never does.
+                        validate(payload.ref,true);
+                        centerWarning='Nearby object refinement unavailable: '+error.message;
+                    }
+                    let groundWarning='Ground unavailable or uncertain; kept Z';
+                    if(math.canManuallySnapGround(ground)){
+                        const snapped=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
+                        if(Math.abs(snapped.deltaZ)<=1.5){points[2]=snapped.newPoints[2];groundWarning=null;}
+                        else groundWarning='Ground adjustment exceeds 1.5m; kept Z';
+                    }
+                    validate(payload.ref,true);
+                    const warning=[centerWarning,directionWarning,groundWarning].filter(Boolean).join(' · ')||null;
+                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,warning};
+                }
                 case 'SNAP_GROUND': {
                     validate(payload.ref,true); const grounds = await getGrounds(payload.ref,[payload.ref.clientId]);
                     const ground = grounds[payload.ref.clientId];
@@ -4736,11 +5002,11 @@ if(typeof module!=='undefined')module.exports={createBatchController};
         }
         function start() {
             connect(); interval = win.setInterval(connect, 1200);
-            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
+            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
             if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopCamera(); clearAppearance(); listeners.clear();
-            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
+            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};
     }

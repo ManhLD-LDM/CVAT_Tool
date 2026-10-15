@@ -1,4 +1,4 @@
-# CVAT 3D TOOL 1.8.0
+# CVAT 3D TOOL 1.10.0
 
 Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
@@ -7,7 +7,7 @@ Repository còn giữ bộ script Python và cấu hình `config/` từ phiên b
 
 ## Cài đặt và sử dụng
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.8.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.10.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
 Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
@@ -83,7 +83,34 @@ Chấp nhận cả `construction` và cách viết `contruction` để tương t
 
 Alias được nhận biết: bicycle/motorcycle/cyclist/two_wheels → two-wheels; person → pedestrian; animal và obstacle được đối chiếu không phân biệt chữ hoa/thường. Khi fit class có tên chính xác `two-wheels`, chiều rộng tối thiểu là 0,6 m; profile QC cơ sở vẫn có min width 0,5 m. Class chưa có profile sẽ không được Auto-Fit.
 
+## Auto Adjust Box — 1.10.0
+
+Select a box and click **Auto Adjust Box**, or press **Alt+Shift+B** (remappable in Keyboard shortcuts). This cleans up nearby sides and the top while preserving direction and ground contact.
+
+- Expand supported faces to catch nearby missed object points, within a 0.4 m local search/correction range and with 3 cm padding.
+- Shrink only when a supported surface is already within the smaller of **10 cm or 5% of that dimension** from the current face. Keep distant faces unchanged; do not take small steps toward faraway returns. Repeated actions therefore preserve an occluded rear rather than progressively cutting it off.
+- Side shrinking also requires vertical surface support; top shrinking requires a supported XY patch. Roof-only evidence does not justify bringing in side faces. Ground, isolated noise, and neighboring annotation points are excluded.
+- Keep heading fixed, including when Move to mouse's Adjust direction is enabled. Keep the bottom on reliable ground. Weak ground, empty/ambiguous object evidence, tilted boxes, or unsuitable final ground leave the box unchanged.
+- Apply at most one native edit to the current frame, with normal Undo/Redo. A no-op does not create a keyframe/history entry. Save through CVAT as usual.
+
+This is local cleanup of the existing box; class dimension profiles do not force it toward preset minimum sizes. The original Auto-Fit remains available for a broader refit. Inspect the resulting annotation. See [Auto Adjust verification](docs/verification/auto-adjust-1.10.0.md).
+
 ## Auto-Fit
+
+### New in 1.9.0: direction, placement, and shortcuts
+
+- **Keep direction**, beside Auto-Fit, resizes and recenters using the current heading. It starts unchecked and remembers your choice. Auto-Fit requires an upright box.
+- **Move to mouse — Alt+Shift+M:** select a box, hover roughly near the intended object in the native **top view**, then press the shortcut. In 1.9.1 the tool searches nearby LiDAR clusters and refines the box center from the closest suitable object. Dimensions stay unchanged; rotation stays unchanged unless **Adjust direction** is enabled. Sparse, ambiguous, oversized, or already annotated evidence keeps the raw mouse placement with a warning. Ground is estimated at the final footprint; unsuitable ground or a Z correction over 1.5 m leaves Z unchanged and shows a warning. The panel button explains the gesture; placement itself requires the shortcut while hovering the canvas.
+- **Adjust direction**, beside Move to mouse (1.9.2), aligns the box's longest horizontal axis with the nearby object's longest horizontal axis, choosing the closest forward/backward facing. It permits at most **30°** correction, preserves dimensions and roll/pitch, then recenters and checks ground at the final orientation. Sparse, symmetric, or unstable axes and corrections over 30° retain the current direction with a warning. The checkbox starts unchecked and remembers its setting independently of Auto-Fit's Keep direction.
+- Each placement uses CVAT's native save/history path for the current frame. A track edit follows native keyframe/interpolation behavior. Use normal Undo/Redo and **Save CVAT**.
+- **Keyboard shortcuts** records single keys or modifier combinations for tool actions. Clear a binding, reset one, or reset all shortcuts. Escape cancels recording. Duplicate tool bindings are rejected. Browser-reserved combinations may not arrive, and CVAT shortcuts can conflict. Free Cam movement keys remain WASD/QE.
+- Settings are stored in `chrome.storage.local` across jobs and browser restarts. The offline demo uses local browser storage and supports direction settings; it has no native top-view placement action.
+
+Automated geometry/adapter/browser verification is recorded in [1.9.0 verification](docs/verification/placement-shortcuts-1.9.0.md). Live top-view and track verification requires an authenticated CVAT session.
+
+The 1.9.1 center-refinement update is covered separately in [mouse refinement verification](docs/verification/mouse-refinement-1.9.1.md).
+
+The optional long-axis direction correction is covered in [1.9.2 verification](docs/verification/mouse-direction-1.9.2.md).
 
 Chọn hoặc tạo box sơ bộ quanh vật thể → **AUTO-FIT BOX** hoặc **Alt+Shift+A**.
 

@@ -5,7 +5,7 @@ async function main(){
     const bundle=result.outputFiles[0].text;fs.writeFileSync(path.join(root,'demo/demo.bundle.js'),bundle);
     let html=fs.readFileSync(path.join(root,'demo/index.html'),'utf8');
     html=html.replace('<link rel="stylesheet" href="../extension/styles.css">',()=>'<style>'+fs.readFileSync(path.join(root,'extension/styles.css'),'utf8')+'</style>');
-    for(const [url,file] of [['../extension/geometry_math.js','extension/geometry_math.js'],['../extension/job_9426_fallback.js','extension/job_9426_fallback.js'],['demo.bundle.js',null],['../extension/content_script.js','extension/content_script.js']]){
+    for(const [url,file] of [['../extension/geometry_math.js','extension/geometry_math.js'],['../extension/job_9426_fallback.js','extension/job_9426_fallback.js'],['demo.bundle.js',null],['../extension/shortcut_settings.js','extension/shortcut_settings.js'],['../extension/content_script.js','extension/content_script.js']]){
         const code=(file?fs.readFileSync(path.join(root,file),'utf8'):bundle).replace(/<\/script/gi,'<\\/script');
         html=html.replace(`<script src="${url}"></script>`,()=>'<script>'+code+'</script>');
     }

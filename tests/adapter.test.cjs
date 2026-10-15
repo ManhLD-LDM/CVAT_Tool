@@ -17,11 +17,142 @@ function harness(options={}) {
     const listeners=new Set(),actions=[];
     const notify=()=>listeners.forEach(fn=>fn());
     const store={getState:()=>state,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},dispatch(action){actions.push(action);if(action.type==='UPDATE_ANNOTATIONS_SUCCESS'){for(const saved of action.payload.states){const index=state.annotation.annotations.states.findIndex(s=>s.clientID===saved.clientID);state.annotation.annotations.states[index]=saved;}notify();}}};
-    const win={location:{pathname:'/tasks/2837/jobs/9426'},CustomEvent:class{constructor(type,init){this.type=type;this.detail=init.detail;}},setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){}};
+    const events={};
+    const win={location:{pathname:'/tasks/2837/jobs/9426'},CustomEvent:class{constructor(type,init){this.type=type;this.detail=init.detail;}},setInterval:()=>1,clearInterval(){},addEventListener(type,fn){events[type]=fn;},removeEventListener(type){delete events[type];}};
     const adapter=createCvatAdapter({window:win,document:{getElementById:()=>null},store,math,delay:async()=>{},...options.adapterEnv});adapter.start();
     const ref=id=>{const s=adapter.getSnapshot();return {sessionId:s.sessionId,jobId:s.jobId,frame:s.frame,revision:s.revision,clientId:id};};
-    return {adapter,ref,state,actions,colors,history,notify,failSave:()=>{fail=true;},labels,view};
+    return {adapter,ref,state,actions,colors,history,notify,failSave:()=>{fail=true;},labels,view,events};
 }
+
+function topHarness(options={}){
+    const h=harness(options),camera=new THREE.OrthographicCamera(-10,10,5,-5,.1,100);
+    camera.position.set(0,0,20);camera.lookAt(0,0,0);camera.updateProjectionMatrix();camera.updateMatrixWorld();
+    const rect={left:100,top:200,width:800,height:400};
+    const element={getBoundingClientRect:()=>rect};
+    h.view.views.top={camera,renderer:{domElement:element}};
+    const hover=(x=700,y=300)=>h.events.pointermove({target:element,clientX:x,clientY:y});
+    return {...h,camera,rect,element,hover};
+}
+
+function adjustmentHarness({occluded=false,weakGround=false}={}){
+    const h=harness(),scene=new THREE.Scene(),coordinates=[];
+    h.state.annotation.annotations.states[1].points[0]=30;
+    if(!weakGround)for(let x=-9;x<=9;x+=.3)for(let y=-9;y<=9;y+=.3)coordinates.push(x,y,0);
+    const xmin=occluded?-.8:-1.93,xmax=occluded?.8:2.2,ymin=occluded?-.4:-.95,ymax=occluded?.4:1.1,top=occluded?1.3:1.94;
+    for(let i=0;i<=40;i++)for(let j=0;j<=20;j++){
+        const x=xmin+(xmax-xmin)*i/40,y=ymin+(ymax-ymin)*j/20;coordinates.push(x,y,top);
+        if(i===0||i===40||j===0||j===20)for(let z=.15;z<top;z+=.15)coordinates.push(x,y,z);
+    }
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
+    return h;
+}
+
+test('Auto Adjust saves one fixed-heading grounded edit and skips a repeat that has no correction',async()=>{
+    const h=adjustmentHarness(),before=h.adapter.getSnapshot().boxes[0].points;
+    const result=await h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)}),after=h.adapter.getSnapshot().boxes[0].points;
+    assert.equal(result.applied,true);assert.equal(h.history.length,1);assert.deepEqual(after.slice(3,6),before.slice(3,6));
+    assert.ok(after[6]>before[6]);assert.ok(after[7]>before[7]);assert.ok(after[8]<before[8]&&after[8]>=before[8]-.1);
+    assert.ok(Math.abs(after[2]-after[8]/2)<1e-6);
+    const repeat=await h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)});assert.equal(repeat.unchanged,true);assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+test('Auto Adjust preserves distant unsupported faces without creating a keyframe',async()=>{
+    const h=adjustmentHarness({occluded:true}),before=h.adapter.getSnapshot().boxes[0].points.slice();
+    const result=await h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)});
+    assert.equal(result.unchanged,true);assert.match(result.warning,/nearby surface/);assert.equal(h.history.length,0);assert.deepEqual(h.adapter.getSnapshot().boxes[0].points,before);h.adapter.dispose();
+});
+
+test('Auto Adjust refuses weak ground, locked boxes and review mode without a native save',async()=>{
+    const h=adjustmentHarness({weakGround:true});
+    await assert.rejects(h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)}),/ground/i);
+    h.state.annotation.annotations.states[0].lock=true;
+    await assert.rejects(h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)}),/locked/);
+    h.state.annotation.annotations.states[0].lock=false;h.state.annotation.job.instance.dimension='3d';h.state.annotation.workspace='Review';
+    await assert.rejects(h.adapter.command('AUTO_ADJUST',{ref:h.ref(1)}),/review/);assert.equal(h.history.length,0);h.adapter.dispose();
+});
+test('mouse placement maps camera pan, zoom, resize and transformed top copy to native coordinates',async()=>{
+    const h=topHarness();
+    h.camera.position.x=10;h.camera.position.y=4;h.camera.zoom=2;h.camera.updateProjectionMatrix();
+    h.rect.width=400;h.rect.height=200;
+    const parent=new THREE.Group();parent.position.set(2,3,0);parent.rotation.z=.3;
+    h.view.drawnObjects[1].cuboid.top=new THREE.Object3D();parent.add(h.view.drawnObjects[1].cuboid.top);
+    const seed=h.state.annotation.annotations.states[0].points.slice();seed[3]=.15;seed[5]=.7;h.state.annotation.annotations.states[0].points=seed;
+    h.hover(400,250);
+    const expected=parent.worldToLocal(new THREE.Vector3(12.5,5.25,1));
+    const result=await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)});
+    const actual=h.adapter.getSnapshot().boxes[0].points;
+    assert.ok(Math.abs(actual[0]-expected.x)<1e-8);assert.ok(Math.abs(actual[1]-expected.y)<1e-8);
+    assert.deepEqual(actual.slice(2),seed.slice(2));assert.equal(result.groundFallback,true);assert.equal(h.history.length,1);h.adapter.dispose();
+});
+test('mouse placement estimates destination ground, preserving rotation and size in one native save',async()=>{
+    const h=topHarness(),scene=new THREE.Scene(),coordinates=[];
+    for(let x=-10;x<=15;x+=.3)for(let y=-10;y<=10;y+=.3)coordinates.push(x,y,.02*x+.1);
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
+    const before=h.adapter.getSnapshot().boxes[0].points;h.hover();
+    const result=await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),after=h.adapter.getSnapshot().boxes[0].points;
+    assert.equal(result.groundFallback,false);assert.ok(Math.abs(after[0]-5)<1e-8);assert.ok(Math.abs(after[1]-2.5)<1e-8);
+    const clearance=Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z-(.02*x+.1)));
+    assert.ok(Math.abs(clearance)<1e-6);assert.deepEqual(after.slice(3),before.slice(3));assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+for(const adjustDirection of [false,true])test(`mouse placement refines center and final ground in one save; direction option ${adjustDirection}`,async()=>{
+    const h=topHarness(),scene=new THREE.Scene(),coordinates=[],yaw=.35,c=Math.cos(yaw),s=Math.sin(yaw);
+    for(let x=-10;x<=15;x+=.3)for(let y=-10;y<=10;y+=.3)coordinates.push(x,y,.02*x+.1);
+    for(let i=0;i<=24;i++)for(let j=0;j<=12;j++)for(const z of [.8,1,1.2,1.4]){
+        const x=(i/24-.5)*2.6,y=(j/12-.5)*1.2;coordinates.push(5.6+c*x-s*y,2.8+s*x+c*y,z);
+    }
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
+    h.state.annotation.annotations.states[0].points[5]=.2;
+    const before=h.adapter.getSnapshot().boxes[0].points;h.hover();
+    const result=await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1),adjustDirection}),after=h.adapter.getSnapshot().boxes[0].points;
+    assert.equal(result.refined,true);assert.equal(result.groundFallback,false);
+    assert.ok(Math.abs(after[0]-5.6)<.07);assert.ok(Math.abs(after[1]-2.8)<.07);
+    assert.equal(result.directionAdjusted,adjustDirection);
+    if(adjustDirection)assert.ok(Math.abs(after[5]-yaw)<.04);else assert.equal(after[5],before[5]);
+    assert.deepEqual(after.slice(3,5),before.slice(3,5));assert.deepEqual(after.slice(6),before.slice(6));assert.equal(h.history.length,1);
+    const clearance=Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z-(.02*x+.1)));assert.ok(Math.abs(clearance)<1e-6);h.adapter.dispose();
+});
+test('mouse placement drops stale pointer and refuses locked, busy, drawing and review edits',async()=>{
+    const h=topHarness();
+    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/Hover/);
+    h.hover();h.events.pointerout({target:h.element});await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/Hover/);
+    h.hover();h.events.blur();await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/Hover/);
+    h.hover();h.state.annotation.player.frame.number=30;h.adapter.getSnapshot();h.state.annotation.player.frame.number=29;h.adapter.getSnapshot();
+    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/Hover/);
+    h.hover();const old=h.ref(1);h.state.annotation.annotations.states[0].points[0]+=1;
+    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:old}),/modified/);
+    h.state.annotation.annotations.states[0].lock=true;
+    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/locked/);
+    h.state.annotation.annotations.states[0].lock=false;h.state.annotation.job.instance.dimension='3d';h.state.annotation.workspace='Review';
+    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/review/);
+    assert.equal(h.history.length,0);h.adapter.dispose();
+    const drawing=topHarness({mode:'draw'});drawing.hover();await assert.rejects(drawing.adapter.command('MOVE_TO_MOUSE',{ref:drawing.ref(1)}),/drawing/);drawing.adapter.dispose();
+});
+
+test('large destination ground adjustment falls back to XY and preserves exact Z',async()=>{
+    const h=topHarness({adapterEnv:{math:{...math,GroundIndex:class{estimate(){return {a:0,b:0,c:10,accepted:true,confidence:1};}}}}});
+    const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute([0,0,10],3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};h.hover();
+    const before=h.adapter.getSnapshot().boxes[0].points;
+    const result=await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)});
+    assert.match(result.warning,/1.5m/);assert.deepEqual(h.adapter.getSnapshot().boxes[0].points.slice(2),before.slice(2));h.adapter.dispose();
+});
+
+test('track placement delegates current-frame keyframe creation to native save once',async()=>{
+    const h=topHarness(),target=h.state.annotation.annotations.states[0];target.objectType='track';target.keyframe=false;
+    const before=target.points.slice(),keyframes={0:[...before]},undo=[];let redo;
+    target.save=async function(){undo.push(before.slice());redo=this.points.slice();keyframes[29]=this.points.slice();return {...this,keyframe:true};};
+    h.hover();await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)});
+    const fitted=h.adapter.getSnapshot().boxes[0].points.slice();
+    assert.equal(undo.length,1);assert.equal(h.actions.length,1);assert.equal(h.actions[0].type,'UPDATE_ANNOTATIONS_SUCCESS');assert.equal(h.adapter.getSnapshot().boxes[0].keyframe,true);
+    assert.deepEqual(keyframes[0],before);assert.deepEqual(keyframes[29],fitted);assert.deepEqual(undo.pop(),before);assert.deepEqual(redo,fitted);h.adapter.dispose();
+});
+
+test('frame change during cloud read discards placement before any native save',async()=>{
+    let h;
+    h=topHarness({adapterEnv:{delay:async()=>{h.state.annotation.player.frame.number=30;h.adapter.getSnapshot();}}});
+    const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(new Float32Array(32769*3),3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};h.hover();
+    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1)}),/frame changed/i);assert.equal(h.history.length,0);h.adapter.dispose();
+});
 test('selection uses clientID even when another object has the same serverID',async()=>{
     const h=harness();await h.adapter.command('SELECT_OBJECT',{ref:h.ref(99)});assert.equal(h.adapter.getSnapshot().activeBoxId,99);assert.equal(h.actions.length,0);h.adapter.dispose();
 });

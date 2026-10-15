@@ -16,6 +16,37 @@
         const listeners = new Set(), pendingObjects = new Set();
         const keys = new Set();
         let flightFrame = null, lastFlightTime = 0, looking = false;
+        let topPointer = null;
+
+        function topView() {
+            const view=canvas?.view?.views?.top;
+            return view?.camera?.position?.clone && view.camera.projectionMatrixInverse && view?.renderer?.domElement?.getBoundingClientRect ? view : null;
+        }
+        function clearPointer() { topPointer=null; }
+        function pointerOut(event) {
+            if(event.target===topView()?.renderer.domElement)clearPointer();
+        }
+        function pointerWorld(target) {
+            const view=topView(),element=view?.renderer.domElement,pointer=topPointer;
+            if(!view)throw new Error('Move to mouse unavailable: top-view camera or canvas API missing');
+            if(!pointer||pointer.element!==element||pointer.scope!==scope)throw new Error('Hover inside the top-view canvas before moving the box');
+            const rect=element.getBoundingClientRect(),{x,y}=pointer;
+            if(rect.width<=0||rect.height<=0||x<rect.left||x>=rect.left+rect.width||y<rect.top||y>=rect.top+rect.height)throw new Error('Pointer is outside the top-view canvas');
+            if(doc?.elementFromPoint && doc.elementFromPoint(x,y)!==element)throw new Error('Top-view canvas is covered; hover over the visible canvas');
+            const nx=(x-rect.left)/rect.width*2-1,ny=1-(y-rect.top)/rect.height*2;
+            view.camera.updateMatrixWorld?.(true);
+            const near=view.camera.position.clone().set(nx,ny,-1).unproject(view.camera);
+            const far=view.camera.position.clone().set(nx,ny,1).unproject(view.camera);
+            // Orthographic copies may be rendered under a transformed parent.
+            // Box points are expressed in the cuboid parent's local coordinates.
+            const parent=canvas?.view?.drawnObjects?.[target.clientID]?.cuboid?.top?.parent;
+            if(parent){parent.updateWorldMatrix?.(true,false);parent.worldToLocal(near);parent.worldToLocal(far);}
+            const direction=far.clone().sub(near);
+            if(Math.abs(direction.z)<1e-9)throw new Error('Top-view camera cannot project onto the box center plane');
+            const position=near.addScaledVector(direction,(target.points[2]-near.z)/direction.z);
+            if(![position.x,position.y].every(Number.isFinite))throw new Error('Invalid top-view projection');
+            return position;
+        }
 
         function discoverStore() {
             for (const candidate of [win.__store__, win.__REDUX_STORE__]) if (validStore(candidate)) return candidate;
@@ -89,6 +120,7 @@
             const frame = ann?.player?.frame?.number ?? null;
             const nextScope = `${jobId}:${frame}`;
             if (nextScope !== scope) {
+                clearPointer();
                 scope = nextScope; lastFitCase=null; cloudIndex = null; spatialIndex = null; cloudKey = ''; cloudLoading = null; groundCache.clear();
                 clearAppearance(); stopCamera();
             }
@@ -121,6 +153,7 @@
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
                     batch: !!(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get&&!!job?.frames?.get,
+                    moveToMouse: !!topView(),
                     ground: !!views?.perspective?.scene, freeCam: !!views?.perspective?.camera && !!views?.perspective?.controls },
                 reason: ann ? (!is3D ? 'Only 3D jobs are supported' : canvas ? '' : 'Waiting for 3D canvas') : 'Compatible CVAT editor not found' };
         }
@@ -311,7 +344,7 @@
             }
         }
         function keyUp(event) { keys.delete(event.code); }
-        function clearKeys() { keys.clear(); looking = false; }
+        function clearKeys() { keys.clear(); looking = false; clearPointer(); }
         function pointerDown(event) {
             if (cameraRestore && event.target === cameraRestore.view.renderer.domElement && event.button === 2) {
                 looking = true; event.preventDefault(); event.stopImmediatePropagation();
@@ -319,6 +352,13 @@
         }
         function pointerUp() { looking = false; }
         function pointerMove(event) {
+            const element=topView()?.renderer.domElement;
+            // Avoid serializing every annotation on every mouse movement.
+            if(element&&event.target===element){
+                const ann=editor(),jobId=Number(ann?.job?.instance?.id||win.location?.pathname?.match(/\/jobs\/(\d+)/)?.[1])||null;
+                if(`${jobId}:${ann?.player?.frame?.number??null}`!==scope)getSnapshot();
+            }
+            topPointer=element&&event.target===element&&Number.isFinite(event.clientX)&&Number.isFinite(event.clientY)?{element,x:event.clientX,y:event.clientY,scope}:null;
             if (!cameraRestore || !looking) return;
             const camera = cameraRestore.view.camera, up = camera.position.clone().set(0,0,1);
             const yaw = camera.quaternion.clone().setFromAxisAngle(up, -(event.movementX || 0) * 0.003);
@@ -402,7 +442,8 @@
                 }
                 case 'AUTO_FIT': {
                     const now=()=>win.performance?.now?.()??Date.now(),started=now();
-                    validate(payload.ref,true);
+                    const initial=validate(payload.ref,true).target;
+                    if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto-Fit supports upright boxes only');
                     const grounds = await getGrounds(payload.ref,[payload.ref.clientId]);
                     const groundDone=now();
                     const { target } = validate(payload.ref,true);
@@ -415,13 +456,13 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.8.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
-                        parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08},status:'fit-started'};
+                        parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
                     const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
                     lastFitCase.neighborBoxes=neighbors.map(b=>({id:b.id,points:b.points,label:b.label_name,subType:b.subType}));
-                    const selection=math.fitSeededBox(points,target.label.name,{points:target.points,ground,allowGroundFallback:true,subType,attributes:attrs},neighbors);
+                    const selection=math.fitSeededBox(points,target.label.name,{points:target.points,ground,allowGroundFallback:true,subType,attributes:attrs,keepDirection:payload.keepDirection===true},neighbors);
                     const {cluster,fitted}=selection,clusterDone=now();
                     lastFitCase.parameters.selectedClusterRadius=selection.radius;
                     lastFitCase.selection={excludedNeighborPoints:selection.excludedNeighborPoints,attempts:selection.attempts};
@@ -436,10 +477,78 @@
                     }
                     const fitDone=now(),updated=await updateObject(payload.ref,{points:fitted}),done=now();
                     if(lastFitCase){lastFitCase.status='applied';lastFitCase.elapsedMs=done-started;}
-                    return {...updated,pointCount:cluster.length,groundFallback:!trusted,groundReason:ground?.reason,elapsedMs:done-started,
+                    return {...updated,keepDirection:payload.keepDirection===true,pointCount:cluster.length,groundFallback:!trusted,groundReason:ground?.reason,elapsedMs:done-started,
                         timingsMs:{groundAndIndex:groundDone-started,roi:roiDone-groundDone,cluster:clusterDone-roiDone,fit:fitDone-clusterDone,nativeSave:done-fitDone}};
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
+                case 'AUTO_ADJUST': {
+                    const initial=validate(payload.ref,true).target;
+                    if(pendingObjects.size)throw new Error('Previous operation in progress');
+                    if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
+                    const grounds=await getGrounds(payload.ref,[payload.ref.clientId]),ground=grounds[payload.ref.clientId];
+                    validate(payload.ref,true);
+                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for Auto Adjust; box unchanged');
+                    const base=math.snapGroundPoints(initial.points,math.makePlane(ground.a,ground.b,ground.c));
+                    if(Math.abs(base.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
+                    const nearby=await extractLocalPoints(payload.ref,.4,{points:base.newPoints});
+                    const {target}=validate(payload.ref,true),neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
+                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors),points=adjustment.points;
+                    const finalGround=cloudIndex.estimate({points});
+                    if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under adjusted box; box unchanged');
+                    // Preserve the fitted world-space top while the final footprint's
+                    // ground fixes the bottom. This changes height, never heading.
+                    const snap=math.snapGroundPoints(points,math.makePlane(finalGround.a,finalGround.b,finalGround.c));
+                    if(Math.abs(snap.deltaZ)>1.5||points[8]-snap.deltaZ<.1)throw new Error('Final ground adjustment is unsuitable; box unchanged');
+                    points[2]+=snap.deltaZ/2;points[8]-=snap.deltaZ;
+                    if(points[8]<target.points[8]-Math.min(.1,target.points[8]*.05)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
+                    validate(payload.ref,true);
+                    const notes=[];
+                    if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
+                    if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
+                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,warning:notes.join(' · ')||null};
+                    return {...await updateObject(payload.ref,{points}),pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                }
+                case 'MOVE_TO_MOUSE': {
+                    const {target}=validate(payload.ref,true);
+                    if(pendingObjects.size)throw new Error('Previous operation in progress');
+                    const position=pointerWorld(target);let points=Array.from(target.points);
+                    points[0]=position.x;points[1]=position.y;
+                    let ground=null,refined=false,pointCount=0,centerWarning=null,directionWarning=null,directionAdjusted=false,directionDeltaDegrees=0;
+                    try {
+                        const index=await ensureCloud();
+                        validate(payload.ref,true);
+                        ground=index.estimate({points});
+                        const search=points.slice();search[6]*=2;search[7]*=2;
+                        if(math.canManuallySnapGround(ground)){
+                            search[2]=ground.a*points[0]+ground.b*points[1]+ground.c+points[8]*.75;
+                            search[8]=points[8]*1.5;
+                        }
+                        const nearby=await extractLocalPoints(payload.ref,.4,{points:search});
+                        validate(payload.ref,true);
+                        const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
+                        const refinement=math.refineCenterNearPointer(nearby,{points},ground,neighbors,{adjustDirection:payload.adjustDirection===true});
+                        refined=refinement.refined;pointCount=refinement.pointCount;
+                        directionAdjusted=refinement.directionAdjusted===true;directionDeltaDegrees=refinement.directionDeltaDegrees||0;directionWarning=refinement.directionWarning||null;
+                        if(refined){
+                            points=refinement.points;
+                            // A shifted footprint requires its own ground estimate.
+                            ground=null;ground=cloudIndex.estimate({points});
+                        }else centerWarning=refinement.reason;
+                    } catch(error) {
+                        // A cloud failure permits XY placement; a stale edit never does.
+                        validate(payload.ref,true);
+                        centerWarning='Nearby object refinement unavailable: '+error.message;
+                    }
+                    let groundWarning='Ground unavailable or uncertain; kept Z';
+                    if(math.canManuallySnapGround(ground)){
+                        const snapped=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
+                        if(Math.abs(snapped.deltaZ)<=1.5){points[2]=snapped.newPoints[2];groundWarning=null;}
+                        else groundWarning='Ground adjustment exceeds 1.5m; kept Z';
+                    }
+                    validate(payload.ref,true);
+                    const warning=[centerWarning,directionWarning,groundWarning].filter(Boolean).join(' · ')||null;
+                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,warning};
+                }
                 case 'SNAP_GROUND': {
                     validate(payload.ref,true); const grounds = await getGrounds(payload.ref,[payload.ref.clientId]);
                     const ground = grounds[payload.ref.clientId];
@@ -456,11 +565,11 @@
         }
         function start() {
             connect(); interval = win.setInterval(connect, 1200);
-            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
+            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
             if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopCamera(); clearAppearance(); listeners.clear();
-            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
+            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};
     }

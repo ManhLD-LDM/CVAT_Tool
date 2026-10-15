@@ -1,0 +1,79 @@
+const {test,expect}=require('@playwright/test');
+const fs=require('node:fs');
+const THREEBundle=require('esbuild').buildSync({stdin:{contents:"window.__TEST_THREE=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
+
+async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true}={}){
+    await page.goto('http://127.0.0.1:4173/extension/manifest.json');
+    await page.setContent('<html data-c3d-demo="true"><body><canvas id="perspective"></canvas><canvas id="top" style="position:absolute;left:100px;top:200px;width:800px;height:400px"></canvas></body></html>');
+    await page.addStyleTag({path:'extension/styles.css'});
+    await page.addScriptTag({content:THREEBundle});
+    await page.evaluate(({withObject,initialPoints})=>{
+        const THREE=window.__TEST_THREE,points=[];
+        for(let x=-12;x<=12;x+=.3)for(let y=-12;y<=12;y+=.3)points.push(x,y,0);
+        if(withObject)for(let i=0;i<=20;i++)for(let j=0;j<=10;j++)for(const z of [.6,.8,1,1.2,1.4])points.push(.6+(i/20-.5)*2,.3+(j/10-.5),z);
+        const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(points,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));
+        const camera=new THREE.OrthographicCamera(-10,10,5,-5,.1,100);camera.position.set(0,0,20);camera.lookAt(0,0,0);camera.updateProjectionMatrix();camera.updateMatrixWorld();
+        const perspective=document.getElementById('perspective'),top=document.getElementById('top');
+        const label={id:1,name:'vehicles',color:'#fff'},history=[];window.savedEdits=history;
+        const box={clientID:1,frame:0,objectType:'track',shapeType:'cuboid',outside:false,lock:false,keyframe:false,label,points:[-4,-3,1,0,0,.2,4,2,2,0,0,0,0,0,0,0],async save(){history.push(this.points.slice());return {...this,keyframe:true,points:this.points.slice()};}};
+        if(initialPoints)box.points=initialPoints;
+        const canvas={activate(){},mode:()=> 'idle',html:()=>({perspective,top}),view:{views:{perspective:{scene},top:{camera,renderer:{domElement:top}}}}};
+        const state={annotation:{job:{instance:{id:1,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>history.length>0}}},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas},workspace:'standard3d'}};
+        const listeners=new Set();
+        window.__store__={getState:()=>state,subscribe(fn){listeners.add(fn);return ()=>listeners.delete(fn);},dispatch(action){if(action.type==='UPDATE_ANNOTATIONS_SUCCESS')state.annotation.annotations.states=action.payload.states;for(const fn of listeners)fn();}};
+    },{withObject,initialPoints});
+    for(const file of ['geometry_math.js','cvat_adapter.js','main_world_bridge.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
+    await expect(page.locator('#c3d-btn-move')).toBeEnabled();
+    await expect(page.locator('#c3d-adjust-direction')).not.toBeChecked();
+    if(adjustDirection)await page.locator('#c3d-adjust-direction').check();
+    await page.mouse.move(500,400);
+    await page.keyboard.press(command==='AUTO_ADJUST'?'Alt+Shift+B':'Alt+Shift+M');
+    if(expectSave)await expect.poll(()=>page.evaluate(()=>savedEdits.length)).toBe(1);
+}
+
+test('move shortcut refines nearby object center, preserves geometry, and saves once through the bridge',async({page})=>{
+    await fixture(page,true);
+    const points=await page.evaluate(()=>savedEdits[0]);
+    expect(points[0]).toBeCloseTo(.6,1);expect(points[1]).toBeCloseTo(.3,1);
+    expect(points.slice(3)).toEqual([0,0,.2,4,2,2,0,0,0,0,0,0,0]);
+    await expect(page.locator('#c3d-toast')).toContainText('Box centered on nearby object');
+    expect(await page.evaluate(()=>__store__.getState().annotation.annotations.states[0].keyframe)).toBe(true);
+});
+
+test('sparse object evidence keeps exact mouse placement and reports center fallback',async({page})=>{
+    await fixture(page,false);
+    const points=await page.evaluate(()=>savedEdits[0]);
+    expect(points[0]).toBeCloseTo(0,8);expect(points[1]).toBeCloseTo(0,8);
+    await expect(page.locator('#c3d-toast')).toContainText('Moved to mouse; center not refined');
+    await expect(page.locator('#c3d-toast')).toContainText('No reliable nearby object cluster');
+});
+
+test('direction checkbox aligns the long axis within 30 degrees without resizing or extra saves',async({page})=>{
+    await fixture(page,true,true);
+    const points=await page.evaluate(()=>savedEdits[0]);
+    expect(points[5]).toBeCloseTo(0,1);
+    expect(points.slice(6)).toEqual([4,2,2,0,0,0,0,0,0,0]);
+    expect(points.slice(3,5)).toEqual([0,0]);
+    expect(await page.evaluate(()=>savedEdits.length)).toBe(1);
+    await expect(page.locator('#c3d-toast')).toContainText('direction aligned');
+});
+
+test('Auto Adjust shortcut catches nearby points with fixed direction, ground contact and one save',async({page})=>{
+    const original=[.5,.25,.7,0,0,.2,2,1,1.4,0,0,0,0,0,0,0];
+    await fixture(page,true,false,{command:'AUTO_ADJUST',initialPoints:original});
+    const points=await page.evaluate(()=>savedEdits[0]);
+    expect(points.slice(3,6)).toEqual(original.slice(3,6));expect(points[6]).toBeGreaterThan(original[6]);expect(points[7]).toBeGreaterThan(original[7]);
+    expect(points[2]-points[8]/2).toBeCloseTo(0,6);
+    await expect(page.locator('#c3d-toast')).toContainText('Auto Adjust updated sides/top');
+    await expect(page.locator('#c3d-btn-adjust')).toBeEnabled();await page.locator('#c3d-btn-adjust').click();
+    await expect(page.locator('#c3d-toast')).toContainText('no supported local correction');
+    expect(await page.evaluate(()=>savedEdits.length)).toBe(1);
+});
+
+test('Auto Adjust preserves far faces on a partially observed object without saving a smaller box',async({page})=>{
+    const original=[.6,.3,1,0,0,.2,4,2,2,0,0,0,0,0,0,0];
+    await fixture(page,true,false,{command:'AUTO_ADJUST',initialPoints:original,expectSave:false});
+    await expect(page.locator('#c3d-toast')).toContainText('no supported local correction');
+    expect(await page.evaluate(()=>savedEdits.length)).toBe(0);
+    expect(await page.evaluate(()=>__store__.getState().annotation.annotations.states[0].points)).toEqual(original);
+});

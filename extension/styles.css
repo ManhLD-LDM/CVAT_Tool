@@ -1,4 +1,12 @@
 /* CVAT 3D TOOL - Minimalist Industrial HUD Theme */
+#cvat-3d-copilot-root .c3d-fit-row { display:flex;align-items:center;gap:8px; }
+#cvat-3d-copilot-root .c3d-fit-row button { flex:1;min-width:0; }
+#cvat-3d-copilot-root .c3d-fit-row label { font-size:11px;display:flex;align-items:center;gap:4px;max-width:100px; }
+#cvat-3d-copilot-root .c3d-shortcut-settings { position:absolute;inset:0;z-index:10;background:#18181b;padding:14px;overflow:auto;border:1px solid #62626c;border-radius:8px; }
+#cvat-3d-copilot-root .c3d-shortcut-settings p { font-size:11px;line-height:1.5;color:#b0b0ba; }
+#cvat-3d-copilot-root .c3d-shortcut-row { display:grid;grid-template-columns:1fr auto auto;gap:5px;margin:12px 0;align-items:center; }
+#cvat-3d-copilot-root .c3d-shortcut-row > span { grid-column:1/-1;font-size:12px; }
+#cvat-3d-copilot-root .c3d-shortcut-row button { min-width:0;overflow-wrap:anywhere; }
 #cvat-3d-copilot-root { color-scheme: dark; }
 #cvat-3d-copilot-root, #cvat-3d-copilot-root * {
   scrollbar-width: thin;
