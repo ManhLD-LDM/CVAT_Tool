@@ -228,4 +228,10 @@ Free Cam stays enabled on next/previous/jumped frames within the same job and ke
 
 While Free Cam is active, **Follow selected object** pauses without losing its checkbox preference. Focus selects the box but asks you to exit Free Cam before moving the camera. Native orbit/focus transitions cannot override flight. When flight ends, following resumes on the current track using the flight viewing direction and the previous orbit distance. No annotations or keyframes are changed.
 
-Bản gộp **1.13.0** giữ Auto-Fit preset/Python CLI cùng các cập nhật Auto Adjust, Follow Camera và Free Cam từ nhánh làm việc chung. Kiểm thử sau merge: **121 Node unit + 11 Python + 35 browser test pass**. [Bằng chứng bản gộp](docs/verification/merge-1.13.0.md).
+### Noise-resistant Auto Adjust (1.12.2)
+
+Auto Adjust now measures a face from a connected surface patch instead of accepting three nearby returns or a single outermost return. A candidate needs at least six distinct occupied cells, spread in both directions of the face, within a 6 cm boundary band. Local connections are limited to 24 cm. Duplicate returns do not increase confidence. The patch median supplies the boundary estimate; existing 3 cm padding remains.
+
+Small trash clusters, isolated returns and thin noise streaks cannot justify expansion. Faces without a supported patch stay unchanged. A group of uncertain outer returns also prevents inward trimming across a possibly real thin part. Ground exclusion, saved shrink limits, heading preservation, bottom contact, and single-edit behavior remain active. A sufficiently coherent nearby background surface can still resemble an object surface; this is a conservative geometry filter, not semantic object recognition. Review the result in multiple views.
+
+Bản gộp **1.13.0** giữ Auto-Fit preset/Python CLI cùng các cập nhật Auto Adjust, Follow Camera và Free Cam từ nhánh làm việc chung. Kiểm thử sau merge: **124 Node unit + 11 Python + 36 browser test pass**. [Bằng chứng bản gộp](docs/verification/merge-1.13.0.md).
