@@ -528,3 +528,7 @@
 .c3d-batch-dialog>p{margin:4px 0}
 .c3d-batch-cards{flex:1;min-height:0;overflow:auto;align-items:flex-start}
 .c3d-batch-dialog footer{background:#18181d;border-top:1px solid #3f3f46;padding-top:8px}
+
+#cvat-3d-copilot-root .c3d-shrink-field { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; font-size:12px; }
+#cvat-3d-copilot-root .c3d-shrink-field input { width:75px; color:#eee; background:#27272a; border:1px solid #62626c; border-radius:4px; padding:5px; }
+#cvat-3d-copilot-root .c3d-shrink-field input[aria-invalid="true"] { border-color:#f87171; }

@@ -361,7 +361,13 @@
 
     // Local cleanup of five faces. Ground fixes the bottom; heading is immutable.
     // Unlike Auto-Fit, this does not impose class dimensions or search for a heading.
-    function autoAdjustBox(points, currentBox, ground, neighborBoxes = []) {
+    function autoAdjustOptions(options = {}) {
+        const {maxShrinkDistance = .1,maxShrinkPercent = 5}=options;
+        if(!Number.isFinite(maxShrinkDistance)||maxShrinkDistance<0||maxShrinkDistance>.4||!Number.isFinite(maxShrinkPercent)||maxShrinkPercent<0||maxShrinkPercent>50)throw new Error('Shrink limits must be 0–40 cm and 0–50%');
+        return {maxShrinkDistance,maxShrinkPercent};
+    }
+    function autoAdjustBox(points, currentBox, ground, neighborBoxes = [], options = {}) {
+        const {maxShrinkDistance,maxShrinkPercent}=autoAdjustOptions(options);
         const original=Array.from(currentBox.points||currentBox);
         if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
         if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
@@ -407,7 +413,7 @@
             const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
             // Never walk a face across an occluded region, even on repeated
             // presses: distant evidence means preserve, not clamp-and-shrink.
-            const shrinkLimit=Math.min(.1,base[6+axis]*.05);
+            const shrinkLimit=Math.min(maxShrinkDistance,base[6+axis]*maxShrinkPercent/100);
             if(shrinking&&sign*(e.value-old[face])>shrinkLimit+1e-8){retainedFaces.push(names[face]);continue;}
             // Empty space alone is not evidence of a hidden surface. Side
             // shrinking needs vertical surface support; top needs an XY patch.
@@ -421,7 +427,7 @@
         const bottom=Math.max(...[[-1,-1],[-1,1],[1,-1],[1,1]].map(([x,y])=>plane.getTargetZ(result[0]+c*x*result[6]/2-s*y*result[7]/2,result[1]+s*x*result[6]/2+c*y*result[7]/2)));
         result[8]=next[4]-bottom;result[2]=bottom+result[8]/2;
         if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
-        if(result[8]<base[8]-Math.min(.1,base[8]*.05)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
+        if(result[8]<base[8]-Math.min(maxShrinkDistance,base[8]*maxShrinkPercent/100)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
         return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
             faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints};
     }
@@ -688,7 +694,7 @@
 
     const api = {
         VEHICLE_SUBTYPES, BASE_DIMENSION_SPECS, resolveDimensionSpec,
-        fitSeededBox, autoAdjustBox, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
+        fitSeededBox, autoAdjustBox, autoAdjustOptions, refineCenterNearPointer, estimateFootprintHeading, canManuallySnapGround, estimateLocalGround, estimateVerticalHeading, autoFitSearchBox,
         SpatialPointIndex, minimumRectangleYaw, selectSeedCluster, extractBoxROI, fitBoxToCluster,
         DIMENSION_SPECS, idOf, parseCVAT16Points, cuboidVertices, rotateYawPoints, makePlane, fitPlane,
         estimateRoadPlane, snapGroundPoints, footprint, polygonArea, polygonIntersection, orientedIoU,

@@ -29,7 +29,7 @@
             const node=el(d.button);if(!node)continue;
             const hint=shortcuts.format(settings.bindings[d.id]);
             node.title=d.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse?'Move to mouse unavailable: top-view camera or canvas API missing':`${d.label} · ${hint}`;
-            if(d.id==='AUTO_ADJUST')node.title+=' · Expand nearby missed points; shrink only toward a nearby supported face, within 10cm or 5% of its dimension';
+            if(d.id==='AUTO_ADJUST')node.title+=` · Shrink toward nearby supported faces within ${+(settings.maxShrinkDistance*100).toFixed(2)} cm or ${settings.maxShrinkPercent}% of the dimension, whichever is smaller`;
             const kbd=node.querySelector('kbd');if(kbd)kbd.textContent=hint;
         }
         if(el('c3d-keep-direction')){el('c3d-keep-direction').checked=settings.keepDirection;el('c3d-keep-direction').disabled=!settingsReady||busy;}
@@ -40,6 +40,20 @@
     function openSettings(){
         if(settingsPanel||!settingsReady)return;
         settingsPanel=document.createElement('div');settingsPanel.className='c3d-shortcut-settings';settingsPanel.setAttribute('role','dialog');settingsPanel.setAttribute('aria-label','Keyboard shortcuts');
+        const shrinkHeading=document.createElement('strong');shrinkHeading.textContent='Auto Adjust Box — shrink limits';
+        const shrinkNote=document.createElement('p');shrinkNote.textContent='Use the smaller of these limits per face. Only nearby supported points permit shrinking. Zero disables shrinking; expansion and ground contact remain active.';
+        const shrinkFields=document.createElement('div');
+        const inputs={};
+        for(const [key,label,max,scale] of [['maxShrinkDistance','Maximum shrink distance (cm)',40,100],['maxShrinkPercent','Maximum shrink (%)',50,1]]){
+            const row=document.createElement('label');row.className='c3d-shrink-field';row.textContent=label;
+            const input=document.createElement('input');input.type='number';input.min='0';input.max=String(max);input.step='any';input.value=String(+(settings[key]*scale).toFixed(4));input.setAttribute('aria-label',label);inputs[key]=input;
+            input.onchange=()=>{
+                if(!input.value.trim()||!input.checkValidity()){input.setAttribute('aria-invalid','true');message.textContent=`Enter a value from 0 to ${max}`;return;}
+                input.removeAttribute('aria-invalid');settings[key]=input.valueAsNumber/scale;saveSettings();message.textContent='Shrink limits saved';
+            };
+            row.append(input);shrinkFields.append(row);
+        }
+        const resetShrink=document.createElement('button');resetShrink.className='c3d-btn-secondary';resetShrink.textContent='Reset shrink limits';resetShrink.onclick=()=>{const defaults=shortcuts.defaults();for(const key of Object.keys(inputs)){settings[key]=defaults[key];inputs[key].value=String(defaults[key]*(key==='maxShrinkDistance'?100:1));inputs[key].removeAttribute('aria-invalid');}saveSettings();message.textContent='Shrink defaults restored';};
         const heading=document.createElement('strong');heading.textContent='Keyboard shortcuts';
         const note=document.createElement('p');note.textContent='Click a shortcut, then press a key combination. Escape cancels recording. Browser-reserved keys may be unavailable; CVAT shortcuts may conflict.';
         const list=document.createElement('div');
@@ -68,7 +82,7 @@
             if(!value){message.textContent='Press a supported key, with optional modifiers';return;}
             try{shortcuts.assign(settings,recording,value);recording=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}
         },true);
-        settingsPanel.append(heading,note,list,message,resetAll,close);root.append(settingsPanel);render();close.focus();
+        settingsPanel.append(shrinkHeading,shrinkNote,shrinkFields,resetShrink,heading,note,list,message,resetAll,close);root.append(settingsPanel);render();close.focus();settingsPanel.scrollTop=0;
     }
     function geometry(required=true) {
         const api=window.__CVAT_COPILOT_MATH;
@@ -116,6 +130,7 @@
         if(busy||!settingsReady)return;
         // Capture settings and reference before asynchronous work begins.
         if(type==='AUTO_FIT')payload={...payload,keepDirection:settings.keepDirection};
+        if(type==='AUTO_ADJUST')payload={...payload,maxShrinkDistance:settings.maxShrinkDistance,maxShrinkPercent:settings.maxShrinkPercent};
         if(type==='MOVE_TO_MOUSE')payload={...payload,adjustDirection:settings.adjustMoveDirection};
         let ref;try{if(type!=='FREECAM')ref=reference();}catch(error){toast(error.message,true);return;}
         busy=true;renderInspector();status('Processing…');
@@ -171,7 +186,7 @@
                     <div class="c3d-fit-row"><button id="c3d-btn-autofit" class="c3d-btn-primary">AUTO-FIT BOX <kbd></kbd></button><label><input id="c3d-keep-direction" type="checkbox"> Keep direction</label></div>
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
-                    <button id="c3d-btn-settings" class="c3d-btn-secondary">Keyboard shortcuts</button>
+                    <button id="c3d-btn-settings" class="c3d-btn-secondary">Settings &amp; shortcuts</button>
                     <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="After Auto-Fit, adjust manually and export for reference">Export Auto-Fit Case (.json)</button>
                     <div class="c3d-rot-grid"><button id="c3d-btn-rot-left" class="c3d-btn-mini" title="Alt+Shift+[">−90°</button><button id="c3d-btn-rot-right" class="c3d-btn-mini" title="Alt+Shift+]">+90°</button><button id="c3d-btn-flip" class="c3d-btn-mini" title="Alt+Shift+F">180°</button></div>
                 </div>
@@ -190,7 +205,7 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.10.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.11.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});

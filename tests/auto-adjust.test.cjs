@@ -15,6 +15,20 @@ function cloud({xmin=-1,xmax=1,ymin=-.5,ymax=.5,top=1.5,yaw=0,ground=plane,roofO
 function bounds(points){const p=points,c=Math.cos(p[5]),s=Math.sin(p[5]),x=c*p[0]+s*p[1],y=-s*p[0]+c*p[1];return [x-p[6]/2,x+p[6]/2,y-p[7]/2,y+p[7]/2,p[2]+p[8]/2];}
 const close=(a,b,t=.012)=>assert.ok(Math.abs(a-b)<t,`${a} != ${b}`);
 
+test('configurable shrink limits require both distance and percentage and retain distant faces on repeat',()=>{
+    const original=box(4,2,1.8),source=cloud({xmin:-1.8,xmax:2,ymin:-1,ymax:1,top:1.8});
+    const run=options=>m.autoAdjustBox(source,original,plane,[],options);
+    close(bounds(run().points)[0],-2);
+    close(bounds(run({maxShrinkDistance:.25,maxShrinkPercent:10}).points)[0],-1.83);
+    close(bounds(run({maxShrinkDistance:.1,maxShrinkPercent:50}).points)[0],-2);
+    close(bounds(run({maxShrinkDistance:.4,maxShrinkPercent:2}).points)[0],-2);
+    for(const options of [{maxShrinkDistance:0,maxShrinkPercent:50},{maxShrinkDistance:.4,maxShrinkPercent:0}])close(bounds(run(options).points)[0],-2);
+    const distant=cloud({xmin:-1.5,xmax:2,ymin:-1,ymax:1,top:1.8});let current=original;
+    for(let i=0;i<4;i++){current={points:m.autoAdjustBox(distant,current,plane,[],{maxShrinkDistance:.25,maxShrinkPercent:50}).points};close(bounds(current.points)[0],-2);}
+    const lowered=m.autoAdjustBox(cloud({xmin:-2,xmax:2,ymin:-1,ymax:1,top:1.6}),original,plane,[],{maxShrinkDistance:.25,maxShrinkPercent:20});close(lowered.points[8],1.63);
+    for(const options of [{maxShrinkDistance:.41},{maxShrinkDistance:-1},{maxShrinkPercent:51},{maxShrinkPercent:NaN},{maxShrinkDistance:'0.2'}])assert.throws(()=>run(options),/Shrink limits/);
+});
+
 test('Auto Adjust expands missed points and shrinks empty faces independently while keeping direction and ground',()=>{
     const original=box(2,1,1.5,.37),source=cloud({xmin:-.92,xmax:1.2,ymin:-.455,ymax:.65,top:1.44,yaw:.37});
     const r=m.autoAdjustBox(source,original,plane),b=bounds(r.points);

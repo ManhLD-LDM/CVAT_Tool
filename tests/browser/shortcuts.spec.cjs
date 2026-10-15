@@ -17,6 +17,23 @@ async function fixture(page){
     await expect(page.locator('#c3d-btn-settings')).toBeEnabled();
 }
 
+test('shrink settings save, validate, persist, reset and reach Auto Adjust commands',async({page})=>{
+    await fixture(page);await page.locator('#c3d-btn-settings').click();
+    const distance=page.getByRole('spinbutton',{name:'Maximum shrink distance (cm)',exact:true}),percent=page.getByRole('spinbutton',{name:'Maximum shrink (%)',exact:true});
+    await expect(distance).toHaveValue('10');await expect(percent).toHaveValue('5');
+    await distance.fill('25');await percent.click();await percent.fill('20');await distance.click();
+    await distance.fill('41');await percent.click();await expect(distance).toHaveAttribute('aria-invalid','true');
+    await distance.fill('25');await percent.click();
+    await page.screenshot({path:'docs/verification/shrink-settings-1.11.0.png'});
+    await page.getByRole('button',{name:'Close',exact:true}).click();
+    await expect(page.locator('#c3d-btn-adjust')).toHaveAttribute('title',/25 cm or 20%/);
+    await page.keyboard.press('Alt+Shift+B');
+    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_ADJUST').length)).toBe(1);
+    expect(await page.evaluate(()=>{const p=requests.find(r=>r.type==='AUTO_ADJUST').payload;return [p.maxShrinkDistance,p.maxShrinkPercent];})).toEqual([.25,20]);
+    await page.reload();await page.locator('#c3d-btn-settings').click();await expect(distance).toHaveValue('25');await expect(percent).toHaveValue('20');
+    await page.getByRole('button',{name:'Reset shrink limits',exact:true}).click();await expect(distance).toHaveValue('10');await expect(percent).toHaveValue('5');
+});
+
 test('settings record single keys, reject duplicates, persist direction and refresh hints',async({page})=>{
     const errors=[];page.on('pageerror',e=>errors.push(e.message));
     await fixture(page);

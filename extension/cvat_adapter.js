@@ -456,7 +456,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.10.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.11.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -482,6 +482,7 @@
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
                 case 'AUTO_ADJUST': {
+                    const options=math.autoAdjustOptions(payload);
                     const initial=validate(payload.ref,true).target;
                     if(pendingObjects.size)throw new Error('Previous operation in progress');
                     if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
@@ -492,7 +493,7 @@
                     if(Math.abs(base.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
                     const nearby=await extractLocalPoints(payload.ref,.4,{points:base.newPoints});
                     const {target}=validate(payload.ref,true),neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors),points=adjustment.points;
+                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors,options),points=adjustment.points;
                     const finalGround=cloudIndex.estimate({points});
                     if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under adjusted box; box unchanged');
                     // Preserve the fitted world-space top while the final footprint's
@@ -500,7 +501,7 @@
                     const snap=math.snapGroundPoints(points,math.makePlane(finalGround.a,finalGround.b,finalGround.c));
                     if(Math.abs(snap.deltaZ)>1.5||points[8]-snap.deltaZ<.1)throw new Error('Final ground adjustment is unsuitable; box unchanged');
                     points[2]+=snap.deltaZ/2;points[8]-=snap.deltaZ;
-                    if(points[8]<target.points[8]-Math.min(.1,target.points[8]*.05)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
+                    if(points[8]<target.points[8]-Math.min(options.maxShrinkDistance,target.points[8]*options.maxShrinkPercent/100)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
                     validate(payload.ref,true);
                     const notes=[];
                     if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');

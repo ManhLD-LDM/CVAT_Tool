@@ -1,6 +1,14 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const s=require('../extension/shortcut_settings.js');
+test('shrink settings persist, migrate old settings, and reject invalid stored values',()=>{
+    const settings={...s.defaults(),maxShrinkDistance:.25,maxShrinkPercent:20};
+    assert.deepEqual(s.normalize(JSON.parse(JSON.stringify(settings))),settings);
+    assert.equal(s.normalize({version:1}).maxShrinkDistance,.1);assert.equal(s.normalize({version:1}).maxShrinkPercent,5);
+    for(const bad of [-1,Infinity,NaN,'10',null,51])assert.equal(s.normalize({version:1,maxShrinkPercent:bad}).maxShrinkPercent,5);
+    assert.equal(s.normalize({version:1,maxShrinkDistance:.41}).maxShrinkDistance,.1);
+    assert.equal(s.normalize({version:1,maxShrinkDistance:0,maxShrinkPercent:0}).maxShrinkDistance,0);
+});
 test('shortcut settings preserve valid choices and clear assignments across serialization',()=>{
     const settings=s.defaults();settings.keepDirection=true;settings.adjustMoveDirection=true;
     s.assign(settings,'SNAP_GROUND',s.fromEvent({code:'KeyZ'}));

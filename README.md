@@ -1,4 +1,4 @@
-# CVAT 3D TOOL 1.10.1
+# CVAT 3D TOOL 1.11.0
 
 Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
@@ -7,7 +7,7 @@ Repository còn giữ bộ script Python và cấu hình `config/` từ phiên b
 
 ## Cài đặt và sử dụng
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.10.1.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.11.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
 Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
@@ -89,7 +89,7 @@ Select a box and click **Auto Adjust Box**, or press **Alt+Shift+B** (remappable
 
 - Expand supported faces to catch nearby missed object points, within a 0.4 m local search/correction range and with 3 cm padding.
 - **Near-ground exclusion (1.10.1):** ignore points at or below 20 cm above the local ground plane before clustering or measuring faces. The clearance increases to three times the plane RMSE when larger. It follows the slope at each point; raw ground points remain available for ground estimation and bottom contact. If only low returns remain, leave the box unchanged. See [ground exclusion verification](docs/verification/ground-exclusion-1.10.1.md).
-- Shrink only when a supported surface is already within the smaller of **10 cm or 5% of that dimension** from the current face. Keep distant faces unchanged; do not take small steps toward faraway returns. Repeated actions therefore preserve an occluded rear rather than progressively cutting it off.
+- Configure inward shrink limits under **Settings & shortcuts → Auto Adjust Box**. Defaults are **10 cm and 5% of that dimension**; the smaller limit applies to each face. Distance accepts 0–40 cm and percentage accepts 0–50%. Either value at zero disables shrinking. Settings persist across jobs and restarts; **Reset shrink limits** restores defaults. Shrink only when a supported surface is already within this limit from the current face. Keep distant faces unchanged; do not take small steps toward faraway returns. Repeated actions therefore preserve an occluded rear rather than progressively cutting it off.
 - Side shrinking also requires vertical surface support; top shrinking requires a supported XY patch. Roof-only evidence does not justify bringing in side faces. Ground, isolated noise, and neighboring annotation points are excluded.
 - Keep heading fixed, including when Move to mouse's Adjust direction is enabled. Keep the bottom on reliable ground. Weak ground, empty/ambiguous object evidence, tilted boxes, or unsuitable final ground leave the box unchanged.
 - Apply at most one native edit to the current frame, with normal Undo/Redo. A no-op does not create a keyframe/history entry. Save through CVAT as usual.
