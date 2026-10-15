@@ -532,3 +532,5 @@
 #cvat-3d-copilot-root .c3d-shrink-field { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; font-size:12px; }
 #cvat-3d-copilot-root .c3d-shrink-field input { width:75px; color:#eee; background:#27272a; border:1px solid #62626c; border-radius:4px; padding:5px; }
 #cvat-3d-copilot-root .c3d-shrink-field input[aria-invalid="true"] { border-color:#f87171; }
+#cvat-3d-copilot-root .c3d-follow-option { display:flex; align-items:center; gap:6px; font-size:12px; margin:8px 0; }
+#cvat-3d-copilot-root .c3d-follow-status { color:#a1a1aa; font-size:11px; margin-bottom:6px; }

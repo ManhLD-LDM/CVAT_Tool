@@ -970,12 +970,13 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
         return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
     }
-    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,followSelected:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
     function normalize(raw){
         const result=defaults();
         if(!raw||raw.version!==1)return result;
         result.keepDirection=raw.keepDirection===true;
         result.adjustMoveDirection=raw.adjustMoveDirection===true;
+        result.followSelected=raw.followSelected===true;
         for(const [key,max] of [['maxShrinkDistance',.4],['maxShrinkPercent',50]])if(Number.isFinite(raw[key])&&raw[key]>=0&&raw[key]<=max)result[key]=raw[key];
         // Load valid custom bindings first so a default cannot steal a saved key.
         const seen=new Set(),missing=[];
@@ -1012,12 +1013,20 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     const shortcuts=window.__C3D_SHORTCUTS,settingsKey='c3d.settings.v1';
     let settings=shortcuts.defaults(),settingsReady=false,recording=null,settingsPanel=null;
     let saveQueue=Promise.resolve();
+    let followSyncKey='';
+    function syncFollowCamera(){
+        if(!settingsReady||!snapshot?.connected||!snapshot.capabilities?.followCamera)return;
+        const key=`${snapshot.sessionId}:${settings.followSelected}`;
+        if(followSyncKey===key||!!snapshot.followCameraEnabled===settings.followSelected)return;
+        followSyncKey=key;
+        request('FOLLOW_CAMERA',{enabled:settings.followSelected}).catch(error=>toast(error.message,true));
+    }
     async function loadSettings(){
         try{
             const stored=globalThis.chrome?.storage?.local ? (await chrome.storage.local.get(settingsKey))[settingsKey] : JSON.parse(localStorage.getItem(settingsKey)||'null');
             settings=shortcuts.normalize(stored);
         }catch(error){console.warn('[CVAT 3D TOOL] Settings unavailable:',error.message);}
-        settingsReady=true;refreshShortcutHints();renderInspector();
+        settingsReady=true;refreshShortcutHints();renderInspector();syncFollowCamera();
     }
     function saveSettings(){
         const value=JSON.parse(JSON.stringify(settings));
@@ -1038,6 +1047,11 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         }
         if(el('c3d-keep-direction')){el('c3d-keep-direction').checked=settings.keepDirection;el('c3d-keep-direction').disabled=!settingsReady||busy;}
         if(el('c3d-adjust-direction')){el('c3d-adjust-direction').checked=settings.adjustMoveDirection;el('c3d-adjust-direction').disabled=!settingsReady||busy;}
+        if(el('c3d-follow-selected')){
+            const input=el('c3d-follow-selected');input.checked=settings.followSelected;input.disabled=!settingsReady||!snapshot?.capabilities?.followCamera;
+            input.parentElement.title=snapshot?.capabilities?.followCamera?'Follow the last selected track between frames; preserve orbit angle and zoom. Pauses when the track is absent or hidden.':'Follow unavailable: perspective camera or orbit controls missing';
+            text('c3d-follow-status',settings.followSelected?(snapshot?.followCameraStatus||'Waiting for camera'):'');
+        }
         if(el('c3d-btn-settings'))el('c3d-btn-settings').disabled=!settingsReady;
     }
     function closeSettings(){recording=null;settingsPanel?.remove();settingsPanel=null;el('c3d-btn-settings')?.focus();}
@@ -1167,6 +1181,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         const previousScope=scopeKey(snapshot), nextScope=scopeKey(next);
         if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
         snapshot=next;
+        syncFollowCamera();
         if(!root && shouldShow())createHUD();
         if(!root)return;
         renderInspector();
@@ -1195,6 +1210,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                     <div class="c3d-rot-grid"><button id="c3d-btn-rot-left" class="c3d-btn-mini" title="Alt+Shift+[">−90°</button><button id="c3d-btn-rot-right" class="c3d-btn-mini" title="Alt+Shift+]">+90°</button><button id="c3d-btn-flip" class="c3d-btn-mini" title="Alt+Shift+F">180°</button></div>
                 </div>
                 <div class="c3d-inspector-card"><div class="c3d-inspector-header"><span class="c3d-inspector-title">SELECTED BOX</span><button id="c3d-btn-focus" class="c3d-btn-mini">Focus</button></div>
+                    <label class="c3d-follow-option"><input id="c3d-follow-selected" type="checkbox"> Follow selected object</label><div id="c3d-follow-status" class="c3d-follow-status" role="status"></div>
                     <select id="c3d-select-box" aria-label="Select CVAT box" class="c3d-inspector-selector"></select>
                     <div class="c3d-class-row"><span>Class</span><select id="c3d-select-class" aria-label="Change box class" class="c3d-inspector-selector"></select></div>
                     <div class="c3d-inspector-grid">
@@ -1209,11 +1225,12 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.11.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.12.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
         el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
+        el('c3d-follow-selected').addEventListener('change',event=>{settings.followSelected=event.target.checked;followSyncKey='';saveSettings();syncFollowCamera();});
         el('c3d-btn-settings').addEventListener('click',openSettings);
         // Placement requires hovering the canvas; the button explains its shortcut.
         el('c3d-btn-move').addEventListener('click',()=>toast(`Hover over the object in the top view, then press ${shortcuts.format(settings.bindings.MOVE_TO_MOUSE)}${settings.bindings.MOVE_TO_MOUSE?'':' (assign a shortcut in settings)'}`));

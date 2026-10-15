@@ -17,6 +17,76 @@
         const keys = new Set();
         let flightFrame = null, lastFlightTime = 0, looking = false;
         let topPointer = null;
+        let followEnabled=false,followTarget=null,followFrame=null,followReady=null,followStatus='Off';
+        function followView(){
+            const view=canvas?.view?.views?.perspective,camera=view?.camera,controls=view?.controls;
+            return camera?.position?.clone && ((typeof controls?.setLookAt==='function'&&typeof controls.getTarget==='function')||controls?.target?.copy) && typeof win.requestAnimationFrame==='function' ? view : null;
+        }
+        function followMessage(message){if(followStatus!==message){followStatus=message;publish();}}
+        function stopFollowing(){
+            win.cancelAnimationFrame?.(followFrame);followFrame=null;followTarget=null;followReady=null;
+        }
+        function followTick(){
+            followFrame=null;
+            if(disposed||!followEnabled)return;
+            try{updateFollowCamera();}catch(_){followMessage('Paused: camera or object view unavailable');}
+            if(!disposed&&followEnabled)followFrame=win.requestAnimationFrame(followTick);
+        }
+        function updateFollowCamera(){
+            const ann=editor(),jobId=ann?.job?.instance?.id,frame=ann?.player?.frame?.number;
+            canvas=ann?.canvas?.instance||null;
+            if(followTarget&&followTarget.jobId!==jobId){followTarget=null;followReady=null;}
+            const view=followView();
+            if(!view){followMessage('Unavailable: perspective camera controls missing');return;}
+            if(cameraRestore){followReady=null;followMessage('Paused during Free Cam');return;}
+            if(typeof canvas.mode==='function'&&canvas.mode()!=='idle'){followReady=null;followMessage('Paused during canvas interaction');return;}
+            // Redux can advance before the point cloud and cuboids finish loading.
+            // Never read a rendered center until it agrees with current-frame state.
+            if(ann.player?.fetching||ann.canvas?.ready===false||
+                (canvas.view.model?.data?.imageID!=null&&canvas.view.model.data.imageID!==frame)){
+                followReady=null;followMessage('Waiting for frame canvas');return;
+            }
+            const states=ann.annotations?.states||[],active=ann.annotations?.activatedStateID;
+            const selected=states.find(s=>s.clientID===active&&(s.frame==null||s.frame===frame));
+            if(selected&&selected.objectType!=='track'){followTarget=null;followReady=null;followMessage('Select a track to follow across frames');return;}
+            const id=selected?.clientID??followTarget?.clientId;
+            const target=states.find(s=>s.clientID===id&&s.objectType==='track'&&s.shapeType==='cuboid'&&(s.frame==null||s.frame===frame));
+            if(!target||target.outside||target.hidden){followReady=null;followMessage(followTarget?'Paused: track absent or hidden in this frame':'Select a track to follow across frames');return;}
+            if(followTarget&&followTarget.clientId===id&&followTarget.serverId!==target.serverID){followTarget=null;followReady=null;followMessage('Track identity changed; reselect the track');return;}
+            const drawn=canvas.view.drawnObjects?.[id],mesh=drawn?.cuboid?.perspective;
+            if(!mesh?.getWorldPosition||!drawn.data?.points||drawn.data.points.length!==target.points.length||drawn.data.points.some((v,i)=>Math.abs(v-target.points[i])>1e-6)){
+                followReady=null;followMessage('Waiting for current track geometry');return;
+            }
+            mesh.updateWorldMatrix?.(true,false);
+            const center=mesh.getWorldPosition(view.camera.position.clone());
+            if(![center.x,center.y,center.z].every(Number.isFinite))return;
+            const key=`${jobId}:${frame}:${id}`;
+            // Let native setup finish before applying the preserved orbit pose.
+            if(followReady!==key){followReady=key;return;}
+            const controls=view.controls,camera=view.camera;
+            const orbitTarget=typeof controls.getTarget==='function'?controls.getTarget(camera.position.clone(),false):controls.target.clone();
+            const offset=camera.position.clone().sub(orbitTarget);
+            if(![offset.x,offset.y,offset.z].every(Number.isFinite)||offset.lengthSq()<1e-10)return;
+            const previous=followTarget;
+            if(!previous||previous.clientId!==id||previous.frame!==frame){
+                const position=center.clone().add(previous?.clientId===id?previous.offset:offset);
+                if(typeof controls.setLookAt==='function'){
+                    controls.setLookAt(position.x,position.y,position.z,center.x,center.y,center.z,false);controls.update?.(0);
+                }else{camera.position.copy(position);controls.target.copy(center);camera.lookAt(center);controls.update?.();}
+                camera.updateMatrixWorld?.();canvas.render?.();
+                followTarget={jobId,clientId:id,serverId:target.serverID,frame,offset:position.clone().sub(center)};
+            }else{
+                // Capture manual orbit/zoom without pulling the camera every tick.
+                followTarget.offset=offset;
+            }
+            followMessage(`Following track ${id}`);
+        }
+        function setFollowCamera(enabled){
+            if(enabled&&!followView())throw new Error('Follow selected object unavailable: perspective camera controls missing');
+            followEnabled=enabled;stopFollowing();followStatus=enabled?'Select a track to follow across frames':'Off';
+            if(enabled)followFrame=win.requestAnimationFrame(followTick);
+            publish();return {enabled};
+        }
 
         function topView() {
             const view=canvas?.view?.views?.top;
@@ -148,12 +218,12 @@
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
                 activeBoxId: ann?.annotations?.activatedStateID ?? null, boxes,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
-                freeCam: !!cameraRestore, pointCount: cloudIndex?.count || 0,
+                freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0,
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
                     batch: !!(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get&&!!job?.frames?.get,
-                    moveToMouse: !!topView(),
+                    moveToMouse: !!topView(), followCamera:!!followView(),
                     ground: !!views?.perspective?.scene, freeCam: !!views?.perspective?.camera && !!views?.perspective?.controls },
                 reason: ann ? (!is3D ? 'Only 3D jobs are supported' : canvas ? '' : 'Waiting for 3D canvas') : 'Compatible CVAT editor not found' };
         }
@@ -456,7 +526,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.11.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -562,6 +632,7 @@
                 case 'SET_QC_APPEARANCE': return setAppearance(payload.colors || []);
                 case 'CLEAR_QC_APPEARANCE': clearAppearance(); return {cleared:true};
                 case 'FREECAM': return setFreeCamera(!!payload.enabled);
+                case 'FOLLOW_CAMERA': return setFollowCamera(payload.enabled===true);
                 default: throw new Error('Unsupported command');
             }
         }
@@ -570,7 +641,7 @@
             for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
-            if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopCamera(); clearAppearance(); listeners.clear();
+            if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
             for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};
