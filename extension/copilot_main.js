@@ -396,13 +396,41 @@
         const support=[...cells.values()];
         if(support.length<12)throw new Error('Too few occupied object cells; box unchanged');
         const extent=(band,axis)=>{let lo=Infinity,hi=-Infinity;for(const p of band){lo=Math.min(lo,p[axis]);hi=Math.max(hi,p[axis]);}return hi-lo;};
+        let rejectedBoundaryCandidates=0;
+        function supportedPatch(band,other){
+            // A few returns or a one-dimensional noise streak are not a surface.
+            // Work in occupied cells, so duplicated returns cannot buy confidence.
+            const grid=new Map(),radius=.24,key=p=>p.map(v=>Math.floor(v/radius));
+            for(const p of band){const k=key(p).join(',');if(!grid.has(k))grid.set(k,[]);grid.get(k).push(p);}
+            const seen=new Set();
+            for(const seed of band){
+                if(seen.has(seed))continue;
+                const patch=[seed];seen.add(seed);
+                for(let i=0;i<patch.length;i++){
+                    const p=patch[i],[x,y,z]=key(p);
+                    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)for(let dz=-1;dz<=1;dz++)for(const q of grid.get(`${x+dx},${y+dy},${z+dz}`)||[]){
+                        if(!seen.has(q)&&Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2])<=radius+1e-8){seen.add(q);patch.push(q);}
+                    }
+                }
+                if(patch.length>=6&&other.every(a=>extent(patch,a)>=Math.min(.15,base[6+a]*.15)-1e-8)&&other.some(a=>extent(patch,a)>=Math.min(.25,base[6+a]*.25)-1e-8))return patch;
+            }
+            return null;
+        }
         function edge(axis,sign){
             const sorted=support.slice().sort((a,b)=>sign*(a[axis]-b[axis]));
             for(let i=0;i<sorted.length;i++){
-                let j=i;while(j<sorted.length&&sign*(sorted[j][axis]-sorted[i][axis])<=.12)j++;
-                if(j-i<3)continue;
+                if(i&&sorted[i][axis]===sorted[i-1][axis])continue;
+                let j=i;while(j<sorted.length&&sign*(sorted[j][axis]-sorted[i][axis])<=.06+1e-8)j++;
+                if(j-i<6){rejectedBoundaryCandidates++;continue;}
                 const band=sorted.slice(i,j),other=[0,1,2].filter(a=>a!==axis);
-                if(other.some(a=>extent(band,a)>=.08))return {value:sorted[i][axis],band};
+                const patch=supportedPatch(band,other);
+                if(patch){
+                    const values=patch.map(p=>p[axis]).sort((a,b)=>a-b);
+                    // A local surface estimate, not the extreme of a mixed band.
+                    const value=values[Math.floor(values.length/2)],uncertainOutside=support.filter(p=>sign*(p[axis]-value)<-.03-1e-8).length>=3;
+                    return {value,band:patch,uncertainOutside};
+                }
+                rejectedBoundaryCandidates++;
             }
             return null;
         }
@@ -412,6 +440,9 @@
             const axis=face<2?0:face<4?1:2,sign=face<4&&face%2===0?1:-1,e=edge(axis,sign);
             if(!e){retainedFaces.push(names[face]);continue;}
             const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
+            // Weak outlying returns cannot justify expansion, but may be a real
+            // thin part. Do not shrink through a group of such uncertain returns.
+            if(shrinking&&e.uncertainOutside){retainedFaces.push(names[face]);continue;}
             // Never walk a face across an occluded region, even on repeated
             // presses: distant evidence means preserve, not clamp-and-shrink.
             const shrinkLimit=Math.min(maxShrinkDistance,base[6+axis]*maxShrinkPercent/100);
@@ -430,7 +461,7 @@
         if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
         if(result[8]<base[8]-Math.min(maxShrinkDistance,base[8]*maxShrinkPercent/100)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
         return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
-            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints};
+            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints,rejectedBoundaryCandidates};
     }
 
     // Mouse placement is a position correction, not a dimension or heading fit.
@@ -5022,7 +5053,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.2',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -5072,7 +5103,8 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const notes=[];
                     if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
                     if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
-                    const evidence={groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints};
+                    if(adjustment.rejectedBoundaryCandidates)notes.push('Weak boundary patches ignored');
+                    const evidence={groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints,rejectedBoundaryCandidates:adjustment.rejectedBoundaryCandidates};
                     if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
                     return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
                 }

@@ -111,3 +111,39 @@ test('near-ground returns alone cannot authorize an Auto Adjust edit',()=>{
     const points=[];for(let x=-1.2;x<=1.2;x+=.08)for(let y=-.7;y<=.7;y+=.08)for(const z of [.1,.15,.19,Math.fround(.2)])points.push([x,y,z]);
     assert.throws(()=>m.autoAdjustBox(points,box(),plane),/Insufficient object points/);
 });
+
+test('small connected trash patches and duplicate returns cannot pull sides or top outward',()=>{
+    for(const yaw of [0,.37]){
+        const original=box(2,1,1.5,yaw),source=cloud({yaw}),c=Math.cos(yaw),s=Math.sin(yaw);
+        const transform=([x,y,z])=>[c*x-s*y,s*x+c*y,z];
+        for(const noise of [
+            [[1.25,-.08,.9],[1.25,.01,.9],[1.25,.1,.9]],
+            [[-.08,0,1.75],[.01,0,1.75],[.1,0,1.75]],
+            [[1.04,-.08,.9],[1.04,.01,.9],[1.04,.1,.9]],
+            Array.from({length:8},(_,i)=>[1.25,0,.5+i*.08]),
+            [-.4,0,.4].flatMap(y=>[.5,1].map(z=>[1.25,y,z])),
+            [-.04,.04].flatMap(y=>[.75,.83,.91].map(z=>[1.25,y,z])),
+        ]){
+            const dirty=source.concat(Array.from({length:100},()=>noise.map(transform)).flat());
+            const clean=m.autoAdjustBox(source,original,plane),result=m.autoAdjustBox(dirty,original,plane);
+            result.points.forEach((v,i)=>close(v,clean.points[i],1e-7));
+        }
+    }
+});
+
+test('coherent sparse real extensions still expand while uncertain thin returns do not shrink a face',()=>{
+    const original=box(),source=cloud();
+    // A spatially supported side patch with only six distinct returns.
+    const extension=[];for(const y of [-.2,0,.2])for(const z of [.75,.95])extension.push([1.2,y,z]);
+    const extended=m.autoAdjustBox(source.concat(extension),original,plane);close(bounds(extended.points)[1],1.23);
+    const sparse=[];for(let z=.4;z<1.5;z+=.18)for(const x of [-.96,.96])sparse.push([x,0,z]);
+    for(let x=-.96;x<=.96;x+=.08)sparse.push([x,0,1.3]);
+    const uncertain=m.autoAdjustBox(sparse,original,plane);assert.deepEqual(uncertain.points,original.points);assert.equal(uncertain.changed,false);
+});
+
+test('uncertain protrusions prevent inward trimming across possibly real parts',()=>{
+    const original=box(2.4,1,1.5),source=cloud();
+    source.push([1.15,-.08,.9],[1.15,.01,.9],[1.15,.1,.9]);
+    const r=m.autoAdjustBox(source,original,plane,[],{maxShrinkDistance:.3,maxShrinkPercent:30});
+    close(bounds(r.points)[1],1.2);assert.ok(r.retainedFaces.includes('front'));
+});

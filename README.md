@@ -1,4 +1,4 @@
-# CVAT 3D TOOL 1.12.1
+# CVAT 3D TOOL 1.12.2
 
 Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
@@ -7,7 +7,7 @@ Repository còn giữ bộ script Python và cấu hình `config/` từ phiên b
 
 ## Cài đặt và sử dụng
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.12.1.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.12.2.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
 Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
@@ -197,3 +197,9 @@ Follow waits for the new frame canvas and rendered track geometry. It pauses for
 Free Cam stays enabled on next/previous/jumped frames within the same job and keeps its world position, viewing direction, and camera zoom through native scene resets or replacement cameras. Frame changes clear held movement/look input; press a movement key again to fly. Escape or the Free Cam toggle exits; changing jobs or disposing the extension also exits and restores native controls.
 
 While Free Cam is active, **Follow selected object** pauses without losing its checkbox preference. Focus selects the box but asks you to exit Free Cam before moving the camera. Native orbit/focus transitions cannot override flight. When flight ends, following resumes on the current track using the flight viewing direction and the previous orbit distance. No annotations or keyframes are changed.
+
+### Noise-resistant Auto Adjust (1.12.2)
+
+Auto Adjust now measures a face from a connected surface patch instead of accepting three nearby returns or a single outermost return. A candidate needs at least six distinct occupied cells, spread in both directions of the face, within a 6 cm boundary band. Local connections are limited to 24 cm. Duplicate returns do not increase confidence. The patch median supplies the boundary estimate; existing 3 cm padding remains.
+
+Small trash clusters, isolated returns and thin noise streaks cannot justify expansion. Faces without a supported patch stay unchanged. A group of uncertain outer returns also prevents inward trimming across a possibly real thin part. Ground exclusion, saved shrink limits, heading preservation, bottom contact, and single-edit behavior remain active. A sufficiently coherent nearby background surface can still resemble an object surface; this is a conservative geometry filter, not semantic object recognition. Review the result in multiple views.
