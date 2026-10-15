@@ -10,7 +10,7 @@ async function fixture(page,{supported=true}={}){
         const controls=supported?{getTarget:out=>out.copy(target),setLookAt(x,y,z,tx,ty,tz){camera.position.set(x,y,z);target.set(tx,ty,tz);camera.lookAt(target);},update(){}}:{};
         const history=[],label={id:1,name:'vehicles',color:'#fff'},mesh=new T.Object3D();
         const box={clientID:1,serverID:8,objectType:'track',shapeType:'cuboid',frame:0,points:[2,3,1,0,0,0,4,2,2,0,0,0,0,0,0,0],label,async save(){history.push(this.points.slice());return this;}};
-        const view={views:{perspective:{camera,controls}},model:{data:{imageID:0}},drawnObjects:{}};
+        const view={views:{perspective:{camera,controls,renderer:{domElement:document.getElementById('perspective')}}},model:{data:{imageID:0}},drawnObjects:{}};
         const canvas={view,render(){},mode:()=> 'idle',activate(){},html:()=>({perspective:document.getElementById('perspective')})};
         const annotation={job:{instance:{id:1,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>false}}},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas,ready:true},workspace:'standard3d'};
         const subscribers=new Set();window.__store__={getState:()=>({annotation}),subscribe(fn){subscribers.add(fn);return()=>subscribers.delete(fn);},dispatch(){throw new Error('Unexpected annotation mutation');}};
@@ -39,4 +39,25 @@ test('follow checkbox preserves orbit through frame loading and persists across 
 test('follow checkbox explains missing camera APIs and remains disabled',async({page})=>{
     await fixture(page,{supported:false});const checkbox=page.getByRole('checkbox',{name:'Follow selected object',exact:true});
     await expect(checkbox).toBeDisabled();await expect(page.locator('.c3d-follow-option')).toHaveAttribute('title',/camera or orbit controls missing/);
+});
+
+test('Free Cam survives frame changes while follow pauses, then resumes the current flight heading',async({page})=>{
+    await fixture(page);await page.getByRole('checkbox',{name:'Follow selected object',exact:true}).check();await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    await page.locator('#c3d-btn-freecam').click();await expect(page.locator('#c3d-follow-status')).toHaveText('Paused during Free Cam');
+    await page.evaluate(()=>{
+        const surface=document.getElementById('perspective');surface.dispatchEvent(new PointerEvent('pointerdown',{button:2,bubbles:true}));
+        surface.dispatchEvent(new PointerEvent('pointermove',{movementX:80,movementY:20,bubbles:true}));
+    });
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const before=await page.evaluate(()=>({position:testFollow.camera.position.toArray(),direction:testFollow.camera.getWorldDirection(new __TEST_THREE.Vector3()).toArray()}));
+    await page.evaluate(()=>{testFollow.advance(2,[25,30,2],false);testFollow.camera.position.set(100,100,100);testFollow.camera.quaternion.set(0,0,0,1);});
+    await expect.poll(()=>page.evaluate(()=>testFollow.camera.position.toArray())).toEqual(before.position);
+    await page.evaluate(()=>testFollow.render());
+    await expect(page.locator('#c3d-follow-status')).toHaveText('Paused during Free Cam');
+    await page.locator('#c3d-btn-focus').click();await expect(page.locator('#c3d-toast')).toContainText('turn off Free Cam');
+    expect(await page.evaluate(()=>__CVAT_COPILOT_BRIDGE.adapter.getSnapshot().freeCam)).toBe(true);
+    await page.keyboard.press('Escape');await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([25,30,2]);
+    const direction=await page.evaluate(()=>testFollow.camera.getWorldDirection(new __TEST_THREE.Vector3()).toArray());direction.forEach((v,i)=>expect(v).toBeCloseTo(before.direction[i],8));
+    expect(await page.evaluate(()=>testFollow.history.length)).toBe(0);
 });

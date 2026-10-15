@@ -1,4 +1,4 @@
-# CVAT 3D TOOL 1.12.0
+# CVAT 3D TOOL 1.12.1
 
 Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
 
@@ -7,7 +7,7 @@ Repository còn giữ bộ script Python và cấu hình `config/` từ phiên b
 
 ## Cài đặt và sử dụng
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.12.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+Giải nén `dist/CVAT-3D-Tool-Extension-1.12.1.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
 
 Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
 
@@ -191,3 +191,9 @@ Demo dùng dữ liệu mô phỏng; cache Job 9426 có 61 box trong khi lần ki
 Enable **Follow selected object** beside the selected-box controls to keep the perspective orbit centered on the last selected **track** when navigating forward, backward, or jumping frames. Your current orbit angle and distance are preserved; manual rotation and zoom are remembered for the next frame. The checkbox starts unchecked and persists across jobs and browser restarts.
 
 Follow waits for the new frame canvas and rendered track geometry. It pauses for hidden/outside/missing tracks, Free Cam, and canvas interactions; the status beneath the checkbox explains why. Select another track to change the target; selecting a frame-local shape releases it. A job change drops the previous target. Hidden or absent tracks resume when available again. This changes only the perspective camera, creates no annotation edit or keyframe, and requires accessible orbit APIs. The fixed-frame offline demo does not expose this option.
+
+### Free Cam across frames (1.12.1)
+
+Free Cam stays enabled on next/previous/jumped frames within the same job and keeps its world position, viewing direction, and camera zoom through native scene resets or replacement cameras. Frame changes clear held movement/look input; press a movement key again to fly. Escape or the Free Cam toggle exits; changing jobs or disposing the extension also exits and restores native controls.
+
+While Free Cam is active, **Follow selected object** pauses without losing its checkbox preference. Focus selects the box but asks you to exit Free Cam before moving the camera. Native orbit/focus transitions cannot override flight. When flight ends, following resumes on the current track using the flight viewing direction and the previous orbit distance. No annotations or keyframes are changed.

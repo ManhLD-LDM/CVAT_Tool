@@ -192,7 +192,9 @@
             if (nextScope !== scope) {
                 clearPointer();
                 scope = nextScope; lastFitCase=null; cloudIndex = null; spatialIndex = null; cloudKey = ''; cloudLoading = null; groundCache.clear();
-                clearAppearance(); stopCamera();
+                clearAppearance();
+                if(cameraRestore&&cameraRestore.jobId!==jobId)stopCamera();
+                else if(cameraRestore){clearKeys();lastFlightTime=0;}
             }
             const states = (ann?.annotations?.states || []).filter(s => s.shapeType === 'cuboid' && !s.outside &&
                 (s.frame == null || s.frame === frame));
@@ -240,6 +242,7 @@
             return { target, snap };
         }
         function focusObject(target) {
+            if(cameraRestore)return false;
             const view=canvas?.view?.views?.perspective,cam=view?.camera,controls=view?.controls;
             if(!cam?.getWorldDirection || !controls){
                 if(typeof canvas.focus==='function'){canvas.focus(target.clientID);return true;}
@@ -270,7 +273,7 @@
             const focused=focus?focusObject(target):false;
             const row = doc?.getElementById(`cvat-objects-sidebar-state-item-${target.clientID}`);
             row?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-            publish(); return { selected: target.clientID,focused,...(focus&&!focused?{message:'Box selected; unable to access 3D camera to focus'}:{}) };
+            publish(); return { selected: target.clientID,focused,...(focus&&!focused?{message:cameraRestore?'Box selected; turn off Free Cam to focus or resume following':'Box selected; unable to access 3D camera to focus'}:{}) };
         }
         async function updateObject(ref, changes) {
             const { target, snap } = validate(ref, true), job = editor().job.instance;
@@ -408,14 +411,16 @@
         const editable = target => !!target?.closest?.('input,textarea,select,[contenteditable="true"],[role="dialog"]');
         function keyDown(event) {
             if (!cameraRestore || editable(event.target) || event.altKey || event.ctrlKey || event.metaKey) return;
-            if (event.code === 'Escape') { stopCamera(); publish(); return; }
-            if (['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','ShiftLeft','ShiftRight'].includes(event.code)) {
-                keys.add(event.code); event.preventDefault(); event.stopImmediatePropagation();
-            }
+            if (event.code === 'Escape') { event.preventDefault();event.stopImmediatePropagation();stopCamera(); publish(); return; }
+            if (!['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','ShiftLeft','ShiftRight'].includes(event.code))return;
+            event.preventDefault();event.stopImmediatePropagation();
+            if(event.repeat||!syncFreeCamera())return;
+            keys.add(event.code);
         }
         function keyUp(event) { keys.delete(event.code); }
         function clearKeys() { keys.clear(); looking = false; clearPointer(); }
         function pointerDown(event) {
+            if(cameraRestore&&!syncFreeCamera())return;
             if (cameraRestore && event.target === cameraRestore.view.renderer.domElement && event.button === 2) {
                 looking = true; event.preventDefault(); event.stopImmediatePropagation();
             }
@@ -430,21 +435,54 @@
             }
             topPointer=element&&event.target===element&&Number.isFinite(event.clientX)&&Number.isFinite(event.clientY)?{element,x:event.clientX,y:event.clientY,scope}:null;
             if (!cameraRestore || !looking) return;
+            if(!syncFreeCamera()||!looking)return;
             const camera = cameraRestore.view.camera, up = camera.position.clone().set(0,0,1);
+            camera.quaternion.copy(cameraRestore.quaternion);
             const yaw = camera.quaternion.clone().setFromAxisAngle(up, -(event.movementX || 0) * 0.003);
             camera.quaternion.premultiply(yaw);
             const right = camera.position.clone().set(1,0,0).applyQuaternion(camera.quaternion);
             const pitch = camera.quaternion.clone().setFromAxisAngle(right, -(event.movementY || 0) * 0.003);
             const candidate = camera.quaternion.clone().premultiply(pitch), forward = camera.position.clone().set(0,0,-1).applyQuaternion(candidate);
             if (Math.abs(forward.z) < 0.99) camera.quaternion.copy(candidate);
+            cameraRestore.quaternion.copy(camera.quaternion);
             event.preventDefault(); event.stopImmediatePropagation();
         }
         function contextMenu(event) { if (cameraRestore && event.target === cameraRestore.view.renderer.domElement) { event.preventDefault(); event.stopImmediatePropagation(); } }
+        function syncFreeCamera(){
+            if(!cameraRestore)return false;
+            const ann=editor(),jobId=Number(ann?.job?.instance?.id)||null,frame=ann?.player?.frame?.number;
+            if(jobId!==cameraRestore.jobId){stopCamera();publish();return false;}
+            if(frame!==cameraRestore.frame){cameraRestore.frame=frame;clearKeys();lastFlightTime=0;}
+            canvas=ann?.canvas?.instance||null;
+            const view=canvas?.view?.views?.perspective;
+            if(!view?.camera?.position?.copy||!view.camera.quaternion?.copy||!view.controls)return false;
+            if(view.controls!==cameraRestore.controls){
+                cameraRestore.controls.enabled=cameraRestore.enabled;
+                cameraRestore.controls=view.controls;cameraRestore.enabled=view.controls.enabled;
+            }
+            cameraRestore.view=view;view.controls.enabled=false;
+            return !ann.player?.fetching&&ann.canvas?.ready!==false&&
+                (canvas.view.model?.data?.imageID==null||canvas.view.model.data.imageID===frame);
+        }
+        function applyFreeCameraPose(){
+            const {view,position,quaternion,zoom}=cameraRestore,camera=view.camera,controls=view.controls;
+            // Keep native orbit transitions (including a native focus/double-click)
+            // from overwriting flight. Reapply the exact quaternion afterward.
+            const target=position.clone().add(position.clone().set(0,0,-1).applyQuaternion(quaternion).multiplyScalar(10));
+            if(typeof controls.setLookAt==='function'){controls.setLookAt(position.x,position.y,position.z,target.x,target.y,target.z,false);controls.update?.(0);}
+            else controls.target?.copy?.(target);
+            camera.position.copy(position);camera.quaternion.copy(quaternion);
+            if(camera.zoom!==zoom){camera.zoom=zoom;camera.updateProjectionMatrix?.();}
+            camera.updateMatrixWorld?.();
+        }
         function flight(time) {
             if (!cameraRestore || disposed) return;
+            const ready=syncFreeCamera();
+            if(!cameraRestore)return;
+            applyFreeCameraPose();
             const dt = lastFlightTime ? Math.min(0.05, (time-lastFlightTime)/1000) : 0; lastFlightTime = time;
             const camera = cameraRestore.view.camera, speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 18 : 6) * dt;
-            if (!doc?.hidden && !editable(doc?.activeElement)) {
+            if (ready && !doc?.hidden && !editable(doc?.activeElement)) {
                 const forward = camera.position.clone().set(0,0,-1).applyQuaternion(camera.quaternion);
                 const right = camera.position.clone().set(1,0,0).applyQuaternion(camera.quaternion);
                 const direction = camera.position.clone().set(0,0,0);
@@ -454,14 +492,21 @@
                 if (direction.lengthSq()) camera.position.addScaledVector(direction.normalize(), speed);
                 camera.updateMatrixWorld?.();
             }
+            cameraRestore.position.copy(camera.position);cameraRestore.quaternion.copy(camera.quaternion);cameraRestore.zoom=camera.zoom;
+            applyFreeCameraPose();
             flightFrame = win.requestAnimationFrame(flight);
         }
         function stopCamera() {
             if (!cameraRestore) return;
-            const { view, enabled } = cameraRestore, cam = view.camera;
-            const target = cam.position.clone().add(cam.position.clone().set(0,0,-1).applyQuaternion(cam.quaternion).multiplyScalar(10));
-            view.controls.setLookAt?.(cam.position.x,cam.position.y,cam.position.z,target.x,target.y,target.z,false);
-            view.controls.enabled = enabled;
+            const { view, controls, enabled,position,quaternion,zoom } = cameraRestore, cam = view.camera;
+            const distance=followTarget?Math.max(.1,followTarget.offset.length()):10;
+            const target = position.clone().add(position.clone().set(0,0,-1).applyQuaternion(quaternion).multiplyScalar(distance));
+            controls.setLookAt?.(position.x,position.y,position.z,target.x,target.y,target.z,false);
+            controls.target?.copy?.(target);cam.position.copy(position);cam.quaternion.copy(quaternion);
+            if(cam.zoom!==zoom){cam.zoom=zoom;cam.updateProjectionMatrix?.();}cam.updateMatrixWorld?.();
+            controls.enabled = enabled;
+            // Resume following from the flight heading, never a stale pre-flight pose.
+            if(followTarget){followTarget.frame=null;followTarget.offset=position.clone().sub(target);followReady=null;}
             win.cancelAnimationFrame?.(flightFrame); cameraRestore = null; lastFlightTime = 0; clearKeys();
         }
         function setFreeCamera(enabled) {
@@ -469,7 +514,8 @@
             if (cameraRestore) return { enabled: true };
             const view = canvas?.view?.views?.perspective;
             if (!view?.camera || !view?.controls || !win.requestAnimationFrame) throw new Error('Cannot access perspective camera');
-            cameraRestore = { view, enabled: view.controls.enabled };
+            cameraRestore = { view, controls:view.controls, enabled: view.controls.enabled,jobId:Number(editor()?.job?.instance?.id)||null,frame:editor()?.player?.frame?.number,
+                position:view.camera.position.clone(),quaternion:view.camera.quaternion.clone(),zoom:view.camera.zoom };
             view.controls.enabled = false; flightFrame = win.requestAnimationFrame(flight); publish(); return { enabled: true };
         }
         const batchController=(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)?.({
@@ -526,7 +572,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.12.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{clusterRadius:.55,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
