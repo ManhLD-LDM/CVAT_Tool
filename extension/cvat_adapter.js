@@ -538,6 +538,17 @@
                 publish();
             }
         });
+        function placementOptions(payload){
+            const originGroundFallback=payload.originGroundFallback??false,fallbackGroundHeight=payload.fallbackGroundHeight??0;
+            const moveLongitudinal=payload.moveLongitudinal??'none',moveLateral=payload.moveLateral??'none';
+            if(typeof originGroundFallback!=='boolean'||!Number.isFinite(fallbackGroundHeight))throw new Error('Invalid fallback ground height or enabled flag');
+            if(!['none','forward','backward'].includes(moveLongitudinal)||!['none','left','right'].includes(moveLateral))throw new Error('Invalid mouse alignment direction');
+            return {originGroundFallback,fallbackGroundHeight,moveLongitudinal,moveLateral};
+        }
+        function placementGround(ground,options){
+            if(math.canManuallySnapGround(ground))return ground;
+            return options.originGroundFallback?{...math.makePlane(0,0,options.fallbackGroundHeight),source:'origin-fallback'}:null;
+        }
         async function command(type, payload = {}) {
             if (disposed) throw new Error('Adapter is stopped');
             switch (type) {
@@ -637,15 +648,17 @@
                     return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
                 }
                 case 'MOVE_TO_MOUSE': {
+                    const options=placementOptions(payload);
                     const {target}=validate(payload.ref,true);
                     if(pendingObjects.size)throw new Error('Previous operation in progress');
                     const position=pointerWorld(target);let points=Array.from(target.points);
                     points[0]=position.x;points[1]=position.y;
+                    let alignment={longitudinal:'none',lateral:'none'},alignmentWarning=null;
                     let ground=null,refined=false,pointCount=0,centerWarning=null,directionWarning=null,directionAdjusted=false,directionDeltaDegrees=0;
                     try {
                         const index=await ensureCloud();
                         validate(payload.ref,true);
-                        ground=index.estimate({points});
+                        ground=placementGround(index.estimate({points}),options);
                         const search=points.slice();search[6]*=2;search[7]*=2;
                         if(math.canManuallySnapGround(ground)){
                             search[2]=ground.a*points[0]+ground.b*points[1]+ground.c+points[8]*.75;
@@ -654,19 +667,21 @@
                         const nearby=await extractLocalPoints(payload.ref,.4,{points:search});
                         validate(payload.ref,true);
                         const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                        const refinement=math.refineCenterNearPointer(nearby,{points},ground,neighbors,{adjustDirection:payload.adjustDirection===true});
+                        const refinement=math.refineCenterNearPointer(nearby,{points},ground,neighbors,{adjustDirection:payload.adjustDirection===true,...options});
+                        alignment=refinement.alignment||alignment;alignmentWarning=refinement.alignmentWarning||null;
                         refined=refinement.refined;pointCount=refinement.pointCount;
                         directionAdjusted=refinement.directionAdjusted===true;directionDeltaDegrees=refinement.directionDeltaDegrees||0;directionWarning=refinement.directionWarning||null;
                         if(refined){
                             points=refinement.points;
                             // A shifted footprint requires its own ground estimate.
-                            ground=null;ground=cloudIndex.estimate({points});
+                            ground=null;ground=placementGround(cloudIndex.estimate({points}),options);
                         }else centerWarning=refinement.reason;
                     } catch(error) {
                         // A cloud failure permits XY placement; a stale edit never does.
                         validate(payload.ref,true);
                         centerWarning='Nearby object refinement unavailable: '+error.message;
                     }
+                    ground=placementGround(ground,options);
                     let groundWarning='Ground unavailable or uncertain; kept Z';
                     if(math.canManuallySnapGround(ground)){
                         const snapped=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
@@ -674,16 +689,19 @@
                         else groundWarning='Ground adjustment exceeds 1.5m; kept Z';
                     }
                     validate(payload.ref,true);
-                    const warning=[centerWarning,directionWarning,groundWarning].filter(Boolean).join(' · ')||null;
-                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,warning};
+                    const warning=[centerWarning,directionWarning,alignmentWarning,groundWarning].filter(Boolean).join(' · ')||null;
+                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,groundSource:groundWarning?null:(ground?.source||'point-cloud'),alignment,warning};
                 }
                 case 'SNAP_GROUND': {
-                    validate(payload.ref,true); const grounds = await getGrounds(payload.ref,[payload.ref.clientId]);
-                    const ground = grounds[payload.ref.clientId];
+                    const options=placementOptions(payload);
+                    validate(payload.ref,true);let measured=null;
+                    try {const grounds=await getGrounds(payload.ref,[payload.ref.clientId]);measured=grounds[payload.ref.clientId];}
+                    catch(error){validate(payload.ref,true);if(!options.originGroundFallback)throw error;}
+                    const ground=placementGround(measured,options);
                     if (!math.canManuallySnapGround(ground)) throw new Error('No sufficient quality ground plane to snap');
                     const { target } = validate(payload.ref,true), plane = math.makePlane(ground.a,ground.b,ground.c), snap = math.snapGroundPoints(target.points,plane);
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
-                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.confidence};
+                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.confidence,groundSource:ground.source||'point-cloud'};
                 }
                 case 'EXPORT_ALL_ANNOTATIONS': {
                     let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;

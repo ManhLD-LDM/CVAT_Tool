@@ -1,4 +1,12 @@
-# CVAT 3D TOOL 1.14.0
+# CVAT 3D TOOL 1.14.1
+
+## Ground fallback and directional placement — 1.14.1
+
+- Enable **Use origin ground height when local ground is unavailable** to let Ground Snap and Move to mouse use **Fallback ground height (m)**. The default is Z = 0; signed offsets are supported. Local measured ground always takes precedence. Fallback is off by default and does not count as measured ground for QC. Existing 1.5 m adjustment safeguards still apply.
+- Move to mouse has independent **Longitudinal** (None / Push forward / Push backward) and **Lateral** (None / Push left / Push right) selectors. Both default to None and persist with your settings.
+- Directions follow the final box heading (+X forward, +Y left). Forward aligns the rear face to the rearmost detected object points; backward aligns the front face; left aligns the right face; right aligns the left face. Dimensions stay fixed. This uses the selected cluster’s robust bounds, so isolated outliers do not define contact.
+- Placement centers on the selected object, optionally adjusts yaw, aligns selected faces, then checks ground at the final footprint. An oversized span skips that axis; ambiguous or sparse clusters skip alignment. Results explain fallback and skipped adjustments. The whole edit is one native Undo entry; Save CVAT to persist it to the server.
+
 
 Bộ công cụ toàn diện hỗ trợ gán nhãn 3D LiDAR Bounding Box trên nền tảng **CVAT (Computer Vision Annotation Tool)** dành cho xe tự hành (Autonomous Vehicles / ADAS).
 
@@ -29,7 +37,7 @@ Dự án tích hợp 2 hệ thống phối hợp đồng bộ:
   curr_vel[2] = 0.0  # Vận tốc thẳng đứng bị triệt tiêu
   ```
 
-### 3. Nhận diện CVAT vạn năng (Universal URL Recognition) & Export/Import theo Link VinFast (v1.14.0)
+### 3. Nhận diện CVAT vạn năng (Universal URL Recognition) & Export/Import theo Link VinFast (v1.14.1)
 * Extension thiết lập quyền `<all_urls>` và tự động nhận diện trang CVAT thông qua cấu trúc URL (`/jobs/\d+`, `/tasks/\d+`) và DOM signature (`#cvat-app`, `.cvat-canvas-container`). Hoạt động tức thì trên **mọi link, mọi domain, IP nội bộ** của VinFast.
 * **Export / Import trực tiếp trên HUD**: Nút **⬇ Export Annotations** và **⬆ Import Annotations** giúp annotator sao lưu và nạp nhãn mồi ngay trong tab CVAT mà không cần rời trình duyệt.
 * **CLI Python `cvat_io.py`**:

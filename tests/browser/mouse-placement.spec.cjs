@@ -2,14 +2,14 @@ const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 const THREEBundle=require('esbuild').buildSync({stdin:{contents:"window.__TEST_THREE=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
 
-async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true,nearGroundNoise=false,boundaryNoise=false}={}){
+async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true,nearGroundNoise=false,boundaryNoise=false,withGround=true,placement=null}={}){
     await page.goto('http://127.0.0.1:4173/extension/manifest.json');
     await page.setContent('<html data-c3d-demo="true"><body><canvas id="perspective"></canvas><canvas id="top" style="position:absolute;left:100px;top:200px;width:800px;height:400px"></canvas></body></html>');
     await page.addStyleTag({path:'extension/styles.css'});
     await page.addScriptTag({content:THREEBundle});
-    await page.evaluate(({withObject,initialPoints,nearGroundNoise,boundaryNoise})=>{
+    await page.evaluate(({withObject,initialPoints,nearGroundNoise,boundaryNoise,withGround})=>{
         const THREE=window.__TEST_THREE,points=[];
-        for(let x=-12;x<=12;x+=.3)for(let y=-12;y<=12;y+=.3)points.push(x,y,0);
+        if(withGround)for(let x=-12;x<=12;x+=.3)for(let y=-12;y<=12;y+=.3)points.push(x,y,0);
         if(withObject)for(let i=0;i<=20;i++)for(let j=0;j<=10;j++)for(const z of [.6,.8,1,1.2,1.4])points.push(.6+(i/20-.5)*2,.3+(j/10-.5),z);
         if(nearGroundNoise)for(let x=-.75;x<=1.95;x+=.08)for(let y=-.55;y<=1.15;y+=.08)for(const z of [.1,.14,.18,.2])points.push(x,y,z);
         if(boundaryNoise){
@@ -26,13 +26,20 @@ async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_M
         const state={annotation:{job:{instance:{id:1,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>history.length>0}}},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas},workspace:'standard3d'}};
         const listeners=new Set();
         window.__store__={getState:()=>state,subscribe(fn){listeners.add(fn);return ()=>listeners.delete(fn);},dispatch(action){if(action.type==='UPDATE_ANNOTATIONS_SUCCESS')state.annotation.annotations.states=action.payload.states;for(const fn of listeners)fn();}};
-    },{withObject,initialPoints,nearGroundNoise,boundaryNoise});
+    },{withObject,initialPoints,nearGroundNoise,boundaryNoise,withGround});
     for(const file of ['geometry_math.js','cvat_adapter.js','main_world_bridge.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
     await expect(page.locator('#c3d-btn-move')).toBeEnabled();
     await expect(page.locator('#c3d-adjust-direction')).not.toBeChecked();
     if(adjustDirection)await page.locator('#c3d-adjust-direction').check();
+    if(placement){
+        if(placement.originGroundFallback)await page.locator('#c3d-origin-ground').check();
+        if(placement.fallbackGroundHeight!==undefined){await page.locator('#c3d-ground-height').fill(String(placement.fallbackGroundHeight));await page.locator('.c3d-title').click();}
+        if(placement.moveLongitudinal)await page.locator('#c3d-move-longitudinal').selectOption(placement.moveLongitudinal);
+        if(placement.moveLateral)await page.locator('#c3d-move-lateral').selectOption(placement.moveLateral);
+        await page.locator('.c3d-title').click();
+    }
     await page.mouse.move(500,400);
-    await page.keyboard.press(command==='AUTO_ADJUST'?'Alt+Shift+B':'Alt+Shift+M');
+    await page.keyboard.press(command==='AUTO_ADJUST'?'Alt+Shift+B':command==='SNAP_GROUND'?'Alt+Shift+G':'Alt+Shift+M');
     if(expectSave)await expect.poll(()=>page.evaluate(()=>savedEdits.length)).toBe(1);
 }
 
@@ -106,4 +113,17 @@ test('Auto Adjust rejects duplicated high trash patches without losing supported
     await fixture(page,true,false,{command:'AUTO_ADJUST',initialPoints,boundaryNoise:true});const dirty=await page.evaluate(()=>savedEdits[0]);
     for(let i=0;i<dirty.length;i++)expect(dirty[i]).toBeCloseTo(clean[i],5);
     await expect(page.locator('#c3d-toast')).toContainText('Weak boundary patches ignored');expect(await page.evaluate(()=>savedEdits.length)).toBe(1);
+});
+
+test('combined face alignment crosses the bridge in one unchanged-size edit',async({page})=>{
+    await fixture(page,true,true,{placement:{moveLongitudinal:'forward',moveLateral:'right'}});
+    const p=await page.evaluate(()=>savedEdits[0]);
+    expect(p[0]).toBeCloseTo(1.6,1);expect(p[1]).toBeCloseTo(-.2,1);expect(p.slice(6)).toEqual([4,2,2,0,0,0,0,0,0,0]);
+    await expect(page.locator('#c3d-toast')).toContainText('face aligned: forward + right');
+});
+for(const command of ['MOVE_TO_MOUSE','SNAP_GROUND'])test(`${command} uses configured ground height when cloud is absent`,async({page})=>{
+    await fixture(page,false,false,{command,withGround:false,placement:{originGroundFallback:true,fallbackGroundHeight:.25}});
+    const p=await page.evaluate(()=>savedEdits[0]);expect(p[2]-p[8]/2).toBeCloseTo(.25,7);
+    await expect(page.locator('#c3d-toast')).toContainText('origin ground height');
+    await expect(page.locator('#c3d-road-info')).not.toContainText('LiDAR ground');
 });

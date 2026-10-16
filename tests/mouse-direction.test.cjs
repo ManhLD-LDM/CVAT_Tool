@@ -52,3 +52,12 @@ test('direction option is independent of center refinement and preserves dimensi
     const skip=math.refineCenterNearPointer(diamond(radians(45)),target,ground,[],{adjustDirection:true});
     assert.equal(skip.refined,true);assert.equal(skip.points[5],0);assert.match(skip.directionWarning,/30°/);
 });
+
+test('face alignment follows the automatically corrected heading',()=>{
+    const target=box(),points=diamond(radians(18)),ground=math.makePlane(0,0,0,{accepted:true,confidence:1});
+    const base=math.refineCenterNearPointer(points,target,ground,[],{adjustDirection:true});
+    const r=math.refineCenterNearPointer(points,target,ground,[],{adjustDirection:true,moveLongitudinal:'forward',moveLateral:'left'});
+    assert.equal(r.directionAdjusted,true);assert.equal(r.points[5],base.points[5]);
+    const c=Math.cos(r.points[5]),s=Math.sin(r.points[5]),dx=r.points[0]-base.points[0],dy=r.points[1]-base.points[1];
+    assert.ok(c*dx+s*dy>=0);assert.ok(-s*dx+c*dy>=0);assert.deepEqual(r.points.slice(6),target.points.slice(6));
+});

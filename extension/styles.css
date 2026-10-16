@@ -563,3 +563,7 @@
 #cvat-3d-copilot-root .c3d-shrink-field input[aria-invalid="true"] { border-color:#f87171; }
 #cvat-3d-copilot-root .c3d-follow-option { display:flex; align-items:center; gap:6px; font-size:12px; margin:8px 0; }
 #cvat-3d-copilot-root .c3d-follow-status { color:#a1a1aa; font-size:11px; margin-bottom:6px; }
+
+#cvat-3d-copilot-root .c3d-placement-options { flex-wrap:wrap; margin:4px 0; }
+#cvat-3d-copilot-root .c3d-placement-options label { max-width:none; flex-wrap:wrap; }
+#cvat-3d-copilot-root .c3d-placement-options select { min-width:0; max-width:140px; }

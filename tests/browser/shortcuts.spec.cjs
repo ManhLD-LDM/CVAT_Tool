@@ -94,3 +94,22 @@ test('settings suppress actions, support clear/reset and ignore typing, extra mo
     await expect(page.locator('#c3d-btn-autofit kbd')).toHaveText('Alt+Shift+A');
     await expect(page.locator('#c3d-btn-move')).toBeDisabled();
 });
+
+test('placement controls persist, validate and reach keyboard command payloads',async({page})=>{
+    await fixture(page);
+    await expect(page.locator('#c3d-origin-ground')).not.toBeChecked();
+    await expect(page.locator('#c3d-ground-height')).toHaveValue('0');
+    await expect(page.locator('#c3d-move-longitudinal')).toHaveValue('none');
+    await page.locator('#c3d-origin-ground').check();
+    await page.locator('#c3d-ground-height').fill('-.3');await page.locator('#c3d-move-longitudinal').selectOption('forward');
+    await page.locator('#c3d-move-lateral').selectOption('right');
+    await page.locator('.c3d-title').click();
+    await page.keyboard.press('Alt+Shift+G');
+    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='SNAP_GROUND').length)).toBe(1);
+    expect(await page.evaluate(()=>{const p=requests.find(r=>r.type==='SNAP_GROUND').payload;return [p.originGroundFallback,p.fallbackGroundHeight];})).toEqual([true,-.3]);
+    await page.reload();await fixture(page);
+    await expect(page.locator('#c3d-origin-ground')).toBeChecked();await expect(page.locator('#c3d-ground-height')).toHaveValue('-0.3');
+    await expect(page.locator('#c3d-move-longitudinal')).toHaveValue('forward');await expect(page.locator('#c3d-move-lateral')).toHaveValue('right');
+    await page.locator('#c3d-ground-height').fill('');await page.locator('#c3d-move-lateral').click();
+    await expect(page.locator('#c3d-ground-height')).toHaveValue('-0.3');
+});

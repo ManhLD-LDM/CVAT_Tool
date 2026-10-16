@@ -24,12 +24,16 @@
         const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
         return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
     }
-    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,presetOverrides:{},followSelected:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,originGroundFallback:false,fallbackGroundHeight:0,moveLongitudinal:'none',moveLateral:'none',presetOverrides:{},followSelected:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
     function normalize(raw){
         const result=defaults();
         if(!raw||raw.version!==1)return result;
         result.keepDirection=raw.keepDirection===true;
         result.adjustMoveDirection=raw.adjustMoveDirection===true;
+        result.originGroundFallback=raw.originGroundFallback===true;
+        if(Number.isFinite(raw.fallbackGroundHeight))result.fallbackGroundHeight=raw.fallbackGroundHeight;
+        if(['none','forward','backward'].includes(raw.moveLongitudinal))result.moveLongitudinal=raw.moveLongitudinal;
+        if(['none','left','right'].includes(raw.moveLateral))result.moveLateral=raw.moveLateral;
         if(raw.presetOverrides&&typeof raw.presetOverrides==='object')for(const [key,value] of Object.entries(raw.presetOverrides)){
             if(/^(vehicles:[a-z-]+|two-wheels|pedestrian|Animal|Obstacle)$/.test(key)&&Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]))result.presetOverrides[key]=value.slice();
         }

@@ -369,3 +369,40 @@ test('batch commands use native unsaved collection and protect clientID keyframe
  await assert.rejects(h.adapter.command('BATCH_APPLY',{token:opened.token,frames:[29]}),/editable proposal/);
  assert.equal(h.history.length,0);h.adapter.dispose();
 });
+
+for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])for(const height of [0,-.4,.4])test(`${command} origin fallback without cloud at ${height}`,async()=>{
+    const h=topHarness();h.hover();h.state.annotation.annotations.states[0].points[2]=1.3;
+    const result=await h.adapter.command(command,{ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:height});
+    const after=h.adapter.getSnapshot().boxes[0].points;
+    assert.ok(Math.abs(after[2]-after[8]/2-height)<1e-8);assert.equal(result.groundSource,'origin-fallback');assert.equal(h.history.length,1);h.adapter.dispose();
+});
+for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])test(`${command} rejects invalid options and protects large height changes`,async()=>{
+    const h=topHarness();h.hover();
+    for(const options of [{fallbackGroundHeight:Infinity},{fallbackGroundHeight:'0'},{originGroundFallback:1},{moveLongitudinal:'left'},{moveLateral:'forward'}])await assert.rejects(h.adapter.command(command,{ref:h.ref(1),...options}),/Invalid/);
+    assert.equal(h.history.length,0);
+    if(command==='SNAP_GROUND')await assert.rejects(h.adapter.command(command,{ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:10}),/1.5m/);
+    else {const r=await h.adapter.command(command,{ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:10});assert.equal(r.groundSource,null);assert.match(r.warning,/1.5m/);assert.equal(h.adapter.getSnapshot().boxes[0].points[2],1);}
+    h.adapter.dispose();
+});
+test('Ground Snap fallback stays opt-in and does not replace measured ground',async()=>{
+    const empty=topHarness();await assert.rejects(empty.adapter.command('SNAP_GROUND',{ref:empty.ref(1)}));assert.equal(empty.history.length,0);empty.adapter.dispose();
+    const h=adjustmentHarness();const result=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:.8});
+    assert.equal(result.groundSource,'point-cloud');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-1)<1e-6);h.adapter.dispose();
+});
+test('mouse alignment and final ground resolve in one native save',async()=>{
+    const h=topHarness(),scene=new THREE.Scene(),coords=[];
+    h.state.annotation.annotations.states[1].points[0]=30;
+    for(let x=-10;x<16;x+=.3)for(let y=-10;y<10;y+=.3)coords.push(x,y,.02*x);
+    for(let i=0;i<=20;i++)for(let j=0;j<=10;j++)for(const z of [.8,1,1.2])coords.push(5.4+(i/20-.5)*2,2.7+(j/10-.5),z);
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coords,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};h.hover();
+    const result=await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1),moveLongitudinal:'forward',moveLateral:'right',originGroundFallback:true,fallbackGroundHeight:-.5});
+    const after=h.adapter.getSnapshot().boxes[0].points;
+    assert.equal(result.refined,true);assert.deepEqual(result.alignment,{longitudinal:'forward',lateral:'right'});assert.ok(Math.abs(after[0]-6.4)<.08);assert.ok(Math.abs(after[1]-2.2)<.08);
+    assert.equal(result.groundSource,'point-cloud');assert.ok(Math.abs(after[2]-after[8]/2-.02*(after[0]+after[6]/2))<1e-5);assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+test('origin fallback handles an existing cloud with insufficient local ground evidence',async()=>{
+    const h=adjustmentHarness({weakGround:true});
+    const result=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:-.2});
+    assert.equal(result.groundSource,'origin-fallback');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-.8)<1e-8);assert.equal(h.history.length,1);h.adapter.dispose();
+});

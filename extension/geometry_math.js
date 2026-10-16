@@ -519,7 +519,21 @@
                 const dx=midpoint(xs),dy=midpoint(ys);result[0]=original[0]+cs*dx-sn*dy;result[1]=original[1]+sn*dx+cs*dy;
             }else directionWarning=heading.reason;
         }
-        return {refined:true,points:result,pointCount:best.pointCount,shift:Math.hypot(result[0]-original[0],result[1]-original[1]),reason:null,
+        const alignment={longitudinal:'none',lateral:'none'},alignmentWarnings=[];
+        const cs=Math.cos(result[5]),sn=Math.sin(result[5]),xs=[],ys=[];
+        for(const p of best.support){const x=p[0]-result[0],y=p[1]-result[1];xs.push(cs*x+sn*y);ys.push(-sn*x+cs*y);}
+        const bounds=a=>{a.sort((a,b)=>a-b);return [a[Math.floor((a.length-1)*.01)],a[Math.ceil((a.length-1)*.99)]];};
+        let dx=0,dy=0;
+        for(const [axis,choice,values,size] of [['longitudinal',options.moveLongitudinal,xs,result[6]],['lateral',options.moveLateral,ys,result[7]]]){
+            if(!choice||choice==='none')continue;
+            const [lo,hi]=bounds(values);
+            if(hi-lo>size+1e-6){alignmentWarnings.push(`${axis} alignment skipped: object span exceeds box size`);continue;}
+            const shift=(choice==='forward'||choice==='left')?lo+size/2:hi-size/2;
+            if(axis==='longitudinal')dx=shift;else dy=shift;
+            alignment[axis]=choice;
+        }
+        result[0]+=cs*dx-sn*dy;result[1]+=sn*dx+cs*dy;
+        return {alignment,alignmentWarning:alignmentWarnings.join(' · ')||null,refined:true,points:result,pointCount:best.pointCount,shift:Math.hypot(result[0]-original[0],result[1]-original[1]),reason:null,
             directionAdjusted,directionDeltaDegrees,directionWarning};
     }
 
