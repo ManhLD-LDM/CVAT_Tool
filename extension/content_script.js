@@ -200,8 +200,8 @@
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
                 <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
                 <div class="c3d-action-grid" style="margin-top:4px;">
-                    <button id="c3d-btn-export-ann" class="c3d-btn-secondary" title="Export toàn bộ annotations 3D của Job này ra file JSON">⬇ Export Annotations</button>
-                    <button id="c3d-btn-import-ann" class="c3d-btn-secondary" title="Import file JSON annotations vào Job hiện tại">⬆ Import Annotations</button>
+                    <button id="c3d-btn-export-ann" class="c3d-btn-secondary" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
+                    <button id="c3d-btn-import-ann" class="c3d-btn-secondary" title="Import file JSON annotations vào toàn bộ Job hiện tại">⬆ Import Toàn Bộ Job (.json)</button>
                 </div>
                 <input type="file" id="c3d-file-import" accept=".json" style="display:none" />
                 <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
@@ -212,7 +212,7 @@
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
                     <button id="c3d-btn-settings" class="c3d-btn-secondary">Settings &amp; shortcuts</button>
-                    <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="After Auto-Fit, adjust manually and export for reference">Export Auto-Fit Case (.json)</button>
+                    <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="Chỉ export 1 box đang chọn + LiDAR xung quanh để debug thuật toán">Export Auto-Fit Case (Debug 1 Box)</button>
                     <div class="c3d-rot-grid"><button id="c3d-btn-rot-left" class="c3d-btn-mini" title="Alt+Shift+[">−90°</button><button id="c3d-btn-rot-right" class="c3d-btn-mini" title="Alt+Shift+]">+90°</button><button id="c3d-btn-flip" class="c3d-btn-mini" title="Alt+Shift+F">180°</button></div>
                 </div>
                 <div class="c3d-inspector-card"><div class="c3d-inspector-header"><span class="c3d-inspector-title">SELECTED BOX</span><button id="c3d-btn-focus" class="c3d-btn-mini">Focus</button></div>
