@@ -717,6 +717,16 @@
                     });
                     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
                     const data = await res.json();
+                    try {
+                        const lblRes = await win.fetch(`/api/labels?job_id=${jobId}`, {
+                            headers: { 'Accept': 'application/json' },
+                            credentials: 'same-origin'
+                        });
+                        if (lblRes.ok) {
+                            const lblData = await lblRes.json();
+                            data.labels_manifest = lblData.results || [];
+                        }
+                    } catch (_) {}
                     return {
                         success: true,
                         jobId,
@@ -761,12 +771,25 @@
                     for (const t of (annPayload.tracks || [])) if (t.label_id != null) importedLabelIds.add(t.label_id);
                     for (const s of (annPayload.shapes || [])) if (s.label_id != null) importedLabelIds.add(s.label_id);
 
+                    // A. Exact name matching if labels_manifest is present
+                    if (annPayload.labels_manifest && Array.isArray(annPayload.labels_manifest)) {
+                        const manifestMap = new Map(annPayload.labels_manifest.map(l => [l.id, l]));
+                        for (const importedId of importedLabelIds) {
+                            const srcLabel = manifestMap.get(importedId);
+                            if (srcLabel && srcLabel.name) {
+                                const targetLabel = targetLabels.find(l => l.name.toLowerCase() === srcLabel.name.toLowerCase());
+                                if (targetLabel) labelMap.set(importedId, targetLabel.id);
+                            }
+                        }
+                    }
+
+                    // B. Heuristic / attribute / geometry inference for raw exports
                     for (const importedId of importedLabelIds) {
+                        if (labelMap.has(importedId)) continue;
                         if (validLabelIds.has(importedId)) {
                             labelMap.set(importedId, importedId);
                             continue;
                         }
-                        // Infer label by scanning tracks with this label_id
                         let matchedLabel = null;
                         const sampleTracks = (annPayload.tracks || []).filter(t => t.label_id === importedId);
                         for (const tr of sampleTracks) {
@@ -782,8 +805,16 @@
                                         matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
                                         break;
                                     }
-                                    if (['car', 'truck', 'bus', 'van', 'pickup'].includes(val)) {
+                                    if (['car', 'truck', 'bus', 'van', 'pickup', 'contruction', 'trailer', 'tricycle', 'stroller', 'wheelchair'].includes(val)) {
                                         matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
+                                        break;
+                                    }
+                                    if (['cat', 'dog', 'cow', 'buffalow', 'buffalo', 'horse'].includes(val)) {
+                                        matchedLabel = targetLabels.find(l => /animal/i.test(l.name));
+                                        break;
+                                    }
+                                    if (['brick', 'traffic barrier', 'traffic cone', 'sack', 'trash_bag', 'container', 'metal_sheet', 'wood', 'pole', 'charging_point'].includes(val)) {
+                                        matchedLabel = targetLabels.find(l => /obstacle/i.test(l.name));
                                         break;
                                     }
                                 }
