@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 import threading
 import unittest
