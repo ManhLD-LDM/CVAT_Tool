@@ -896,9 +896,21 @@
                         tracks: cleanTracks
                     };
 
+                    const cookieStr = (win.document?.cookie || doc?.cookie || '');
+                    const csrfMatch = cookieStr.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+                    const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : '';
+
+                    const putHeaders = {
+                        'Content-Type': 'application/json',
+                        'Accept': '*/*'
+                    };
+                    if (csrfToken) {
+                        putHeaders['X-CSRFToken'] = csrfToken;
+                    }
+
                     const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: putHeaders,
                         credentials: 'same-origin',
                         body: JSON.stringify(uploadPayload)
                     });
