@@ -1407,10 +1407,20 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 doRefresh();
             }
         });
+        function getJobId() {
+            let id = snapshot?.jobId;
+            if (!id) {
+                const match = window.location.pathname.match(/\/jobs\/(\d+)/);
+                if (match) id = Number(match[1]);
+            }
+            if (!id) throw new Error('Không xác định được Job ID từ URL');
+            return Number(id);
+        }
         el('c3d-btn-export-ann')?.addEventListener('click', async () => {
             try {
                 toast('Đang tải toàn bộ annotations từ CVAT server...');
-                const res = await request('EXPORT_ALL_ANNOTATIONS', { ref: reference() });
+                const jobId = getJobId();
+                const res = await request('EXPORT_ALL_ANNOTATIONS', { jobId, sessionId: snapshot?.sessionId });
                 const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a'); a.href = url; a.download = `cvat-job-${res.jobId}-annotations.json`;
@@ -1427,7 +1437,8 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 const trackCount = json.tracks?.length || 0, shapeCount = json.shapes?.length || 0;
                 if (!window.confirm(`Xác nhận nạp ${trackCount} tracks và ${shapeCount} shapes vào Job này?\n(Lưu ý: Thao tác sẽ cập nhật annotations trên server)`)) return;
                 toast('Đang chuẩn hóa và upload annotations lên CVAT...');
-                const res = await request('IMPORT_ALL_ANNOTATIONS', { payload: json, ref: reference() });
+                const jobId = getJobId();
+                const res = await request('IMPORT_ALL_ANNOTATIONS', { payload: json, jobId, sessionId: snapshot?.sessionId });
                 toast(`Import thành công ${res.trackCount} tracks! Đang tải lại trang...`);
                 setTimeout(() => window.location.reload(), 1500);
             } catch (error) { toast('Lỗi import: ' + error.message, true); }

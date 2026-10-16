@@ -182,6 +182,88 @@ def import_annotations(target: str, in_path: Path, clean: bool = True):
         if "id" in sc:
             del sc["id"]
         clean_shapes.append(sc)
+
+    # Fetch target job labels to support importing files from other jobs/tasks
+    target_labels = []
+    try:
+        lbl_url = f"{base_url}/api/labels?job_id={job_id}"
+        lbl_req = urllib.request.Request(lbl_url, headers=headers)
+        with urllib.request.urlopen(lbl_req, timeout=15) as lbl_resp:
+            lbl_data = json.loads(lbl_resp.read().decode("utf-8"))
+            target_labels = lbl_data.get("results", [])
+    except Exception as e:
+        print(f"[IMPORT] Lưu ý: Không thể lấy danh sách nhãn ({e}); giữ nguyên label_id nguồn.")
+
+    if target_labels:
+        valid_label_ids = {l["id"] for l in target_labels}
+        label_map = {}
+        imported_label_ids = {t.get("label_id") for t in clean_tracks if t.get("label_id") is not None}
+        imported_label_ids.update({s.get("label_id") for s in clean_shapes if s.get("label_id") is not None})
+
+        for imp_id in imported_label_ids:
+            if imp_id in valid_label_ids:
+                label_map[imp_id] = imp_id
+                continue
+            # Infer label from attributes and dimensions
+            matched_id = None
+            sample_tracks = [t for t in clean_tracks if t.get("label_id") == imp_id]
+            for tr in sample_tracks:
+                for sh in tr.get("shapes", []):
+                    for attr in sh.get("attributes", []):
+                        val = str(attr.get("value", "")).lower()
+                        if val in ["standing", "sitting", "bending", "child", "adult"]:
+                            matched_id = next((l["id"] for l in target_labels if "pedestrian" in l.get("name", "").lower()), None)
+                            break
+                        if val in ["true", "false"]:
+                            matched_id = next((l["id"] for l in target_labels if any(k in l.get("name", "").lower() for k in ["two-wheel", "cyclist", "motor"])), None)
+                            break
+                        if val in ["car", "truck", "bus", "van", "pickup"]:
+                            matched_id = next((l["id"] for l in target_labels if any(k in l.get("name", "").lower() for k in ["vehicle", "car"])), None)
+                            break
+                    if matched_id:
+                        break
+                    pts = sh.get("points", [])
+                    if len(pts) >= 9:
+                        l, w, h = pts[6], pts[7], pts[8]
+                        if h > 1.2 and l < 0.9 and w < 0.9:
+                            matched_id = next((l["id"] for l in target_labels if "pedestrian" in l.get("name", "").lower()), None)
+                            break
+                        elif 1.2 <= l <= 2.4 and w <= 1.2:
+                            matched_id = next((l["id"] for l in target_labels if any(k in l.get("name", "").lower() for k in ["two-wheel", "cyclist", "motor"])), None)
+                            break
+                        elif l >= 2.5:
+                            matched_id = next((l["id"] for l in target_labels if any(k in l.get("name", "").lower() for k in ["vehicle", "car"])), None)
+                            break
+                if matched_id:
+                    break
+
+            if not matched_id and target_labels:
+                matched_id = target_labels[0]["id"]
+            if matched_id:
+                label_map[imp_id] = matched_id
+                print(f"[IMPORT] Tự động ánh xạ nhãn ngoại lai ID {imp_id} -> ID {matched_id}")
+
+        # Apply label map and attribute sanitization
+        for tr in clean_tracks:
+            if tr.get("label_id") in label_map:
+                tr["label_id"] = label_map[tr["label_id"]]
+            target_label = next((l for l in target_labels if l["id"] == tr.get("label_id")), None)
+            valid_spec_ids = {a["id"] for a in target_label.get("attributes", [])} if target_label else set()
+            for sh in tr.get("shapes", []):
+                cleaned_attrs = []
+                for attr in sh.get("attributes", []):
+                    if attr.get("spec_id") in valid_spec_ids:
+                        cleaned_attrs.append(attr)
+                    else:
+                        val = str(attr.get("value", "")).lower()
+                        matching_attr = next((a for a in target_label.get("attributes", []) if any(str(v).lower() == val for v in a.get("values", [])) or (a.get("input_type") == "checkbox" and val in ["true", "false"])), None) if target_label else None
+                        if matching_attr:
+                            cleaned_attrs.append({"spec_id": matching_attr["id"], "value": attr.get("value")})
+                sh["attributes"] = cleaned_attrs
+
+        for sh in clean_shapes:
+            if sh.get("label_id") in label_map:
+                sh["label_id"] = label_map[sh["label_id"]]
         
     payload = {
         "version": data.get("version", 0),

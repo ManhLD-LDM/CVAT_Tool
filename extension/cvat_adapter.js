@@ -686,8 +686,12 @@
                     const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.confidence};
                 }
                 case 'EXPORT_ALL_ANNOTATIONS': {
-                    validate(payload.ref, false);
-                    const jobId = payload.ref.jobId;
+                    let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;
+                    if (!jobId) {
+                        const m = win.location?.pathname?.match(/\/jobs\/(\d+)/);
+                        if (m) jobId = Number(m[1]);
+                    }
+                    if (!jobId) throw new Error('Không xác định được Job ID từ URL');
                     const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
                         method: 'GET',
                         headers: { 'Accept': '*/*' },
@@ -704,24 +708,160 @@
                     };
                 }
                 case 'IMPORT_ALL_ANNOTATIONS': {
-                    validate(payload.ref, false);
-                    const jobId = payload.ref.jobId;
+                    let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;
+                    if (!jobId) {
+                        const m = win.location?.pathname?.match(/\/jobs\/(\d+)/);
+                        if (m) jobId = Number(m[1]);
+                    }
+                    if (!jobId) throw new Error('Không xác định được Job ID từ URL');
                     const annPayload = payload.payload;
                     if (!annPayload || (!annPayload.tracks && !annPayload.shapes)) {
-                        throw new Error('Payload annotations không hợp lệ (cần tracks/shapes)');
+                        throw new Error('Payload annotations không hợp lệ (cần mảng tracks hoặc shapes)');
                     }
+
+                    // 1. Fetch valid labels of target Job
+                    let targetLabels = [];
+                    try {
+                        const lblRes = await win.fetch(`/api/labels?job_id=${jobId}`, {
+                            headers: { 'Accept': 'application/json' },
+                            credentials: 'same-origin'
+                        });
+                        if (lblRes.ok) {
+                            const lblData = await lblRes.json();
+                            targetLabels = lblData.results || [];
+                        }
+                    } catch (e) {
+                        console.warn('[CVAT 3D TOOL] Could not fetch target labels:', e);
+                    }
+
+                    const validLabelIds = new Set(targetLabels.map(l => l.id));
+                    const defaultLabelId = targetLabels.length > 0 ? targetLabels[0].id : null;
+
+                    // 2. Build label remap dictionary for cross-job imports
+                    const labelMap = new Map();
+                    const importedLabelIds = new Set();
+                    for (const t of (annPayload.tracks || [])) if (t.label_id != null) importedLabelIds.add(t.label_id);
+                    for (const s of (annPayload.shapes || [])) if (s.label_id != null) importedLabelIds.add(s.label_id);
+
+                    for (const importedId of importedLabelIds) {
+                        if (validLabelIds.has(importedId)) {
+                            labelMap.set(importedId, importedId);
+                            continue;
+                        }
+                        // Infer label by scanning tracks with this label_id
+                        let matchedLabel = null;
+                        const sampleTracks = (annPayload.tracks || []).filter(t => t.label_id === importedId);
+                        for (const tr of sampleTracks) {
+                            for (const sh of (tr.shapes || [])) {
+                                const attrs = sh.attributes || [];
+                                for (const a of attrs) {
+                                    const val = String(a.value).toLowerCase();
+                                    if (['standing', 'sitting', 'bending', 'child', 'adult'].includes(val)) {
+                                        matchedLabel = targetLabels.find(l => /pedestrian/i.test(l.name));
+                                        break;
+                                    }
+                                    if (val === 'true' || val === 'false') {
+                                        matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
+                                        break;
+                                    }
+                                    if (['car', 'truck', 'bus', 'van', 'pickup'].includes(val)) {
+                                        matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
+                                        break;
+                                    }
+                                }
+                                if (matchedLabel) break;
+                                const pts = sh.points || [];
+                                if (pts.length >= 9) {
+                                    const l = pts[6], w = pts[7], h = pts[8];
+                                    if (h > 1.2 && l < 0.9 && w < 0.9) {
+                                        matchedLabel = targetLabels.find(l => /pedestrian/i.test(l.name));
+                                        break;
+                                    } else if (l >= 1.2 && l <= 2.4 && w <= 1.2) {
+                                        matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
+                                        break;
+                                    } else if (l >= 2.5) {
+                                        matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
+                                        break;
+                                    }
+                                }
+                            }
+                            if (matchedLabel) break;
+                        }
+
+                        if (!matchedLabel) {
+                            matchedLabel = targetLabels[0] || null;
+                        }
+                        if (matchedLabel) {
+                            labelMap.set(importedId, matchedLabel.id);
+                        }
+                    }
+
+                    // 3. Clean and sanitize tracks and shapes (strip old server IDs, remap labels, filter attributes)
+                    const cleanTracks = (annPayload.tracks || []).map(t => {
+                        const { id, ...trackCopy } = t;
+                        if (trackCopy.label_id != null && labelMap.has(trackCopy.label_id)) {
+                            trackCopy.label_id = labelMap.get(trackCopy.label_id);
+                        } else if (validLabelIds.size > 0 && !validLabelIds.has(trackCopy.label_id)) {
+                            trackCopy.label_id = defaultLabelId;
+                        }
+
+                        const targetLabel = targetLabels.find(l => l.id === trackCopy.label_id);
+                        const validSpecIds = new Set((targetLabel?.attributes || []).map(a => a.id));
+
+                        if (trackCopy.shapes) {
+                            trackCopy.shapes = trackCopy.shapes.map(s => {
+                                const { id: sId, ...shapeCopy } = s;
+                                shapeCopy.keyframe = true;
+                                if (shapeCopy.attributes && shapeCopy.attributes.length > 0) {
+                                    shapeCopy.attributes = shapeCopy.attributes.map(attr => {
+                                        if (validSpecIds.has(attr.spec_id)) return attr;
+                                        const val = String(attr.value).toLowerCase();
+                                        const matchingAttr = (targetLabel?.attributes || []).find(targetAttr => {
+                                            return (targetAttr.values || []).some(v => String(v).toLowerCase() === val) ||
+                                                   (targetAttr.input_type === 'checkbox' && (val === 'true' || val === 'false'));
+                                        });
+                                        if (matchingAttr) return { spec_id: matchingAttr.id, value: attr.value };
+                                        return null;
+                                    }).filter(Boolean);
+                                }
+                                return shapeCopy;
+                            });
+                        }
+                        return trackCopy;
+                    });
+
+                    const cleanShapes = (annPayload.shapes || []).map(s => {
+                        const { id, ...shapeCopy } = s;
+                        if (shapeCopy.label_id != null && labelMap.has(shapeCopy.label_id)) {
+                            shapeCopy.label_id = labelMap.get(shapeCopy.label_id);
+                        } else if (validLabelIds.size > 0 && !validLabelIds.has(shapeCopy.label_id)) {
+                            shapeCopy.label_id = defaultLabelId;
+                        }
+                        return shapeCopy;
+                    });
+
+                    const uploadPayload = {
+                        version: annPayload.version || 0,
+                        tags: annPayload.tags || [],
+                        shapes: cleanShapes,
+                        tracks: cleanTracks
+                    };
+
                     const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         credentials: 'same-origin',
-                        body: JSON.stringify(annPayload)
+                        body: JSON.stringify(uploadPayload)
                     });
-                    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(`HTTP ${res.status}: ${errText.slice(0, 300)}`);
+                    }
                     return {
                         success: true,
                         jobId,
-                        trackCount: annPayload.tracks?.length || 0,
-                        shapeCount: annPayload.shapes?.length || 0
+                        trackCount: uploadPayload.tracks.length,
+                        shapeCount: uploadPayload.shapes.length
                     };
                 }
                 case 'SET_QC_APPEARANCE': return setAppearance(payload.colors || []);
