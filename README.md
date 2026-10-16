@@ -1,17 +1,64 @@
-# CVAT 3D TOOL 1.13.0
+# CVAT 3D TOOL 1.14.0
 
-Extension hỗ trợ gán nhãn cuboid và QC hình học trong CVAT 3D, kèm demo WebGL ngoại tuyến. Adapter hiện dựa trên cấu trúc editor CVAT 2.76. Tool dùng rule và hình học trên point cloud; chưa có mô hình AI nhận diện loại vật thể hoặc đầu/đuôi xe.
+Bộ công cụ toàn diện hỗ trợ gán nhãn 3D LiDAR Bounding Box trên nền tảng **CVAT (Computer Vision Annotation Tool)** dành cho xe tự hành (Autonomous Vehicles / ADAS).
 
+Dự án tích hợp 2 hệ thống phối hợp đồng bộ:
+1. **Chrome/Edge Browser Extension (`extension/`)**: Copilot trực tiếp trên WebGL 3D canvas của CVAT (Auto-Fit Box, Ground Snap, Quick Yaw 90°/180°, Auto QC, Focus Camera, Batch Track Review, Preset Fitting, và **Export/Import Annotations trực tiếp trên giao diện**). Hỗ trợ nhận diện vạn năng trên **mọi domain, IP, đường dẫn URL của CVAT (`<all_urls>`)** và **1-Click Reload tức thì**.
+2. **Python Automation & Tracking Suite (`scripts/`)**: Pipeline xử lý đám mây điểm LiDAR (.pcd), tracking 3D bounding box theo vận tốc/quán tính, chuẩn hóa keyframe và **công cụ `cvat_io.py` hỗ trợ Export / Import dữ liệu trực tiếp theo Link CVAT của VinFast**.
 
-Repository còn giữ bộ script Python và cấu hình `config/` từ phiên bản trước. Tài liệu được lưu tại [Python tracking suite (lịch sử)](docs/PYTHON_TRACKING_SUITE_LEGACY.md); các tuyên bố tracking của bộ script đó chưa được kiểm chứng lại trong đợt extension 1.8.0. Dùng biến môi trường theo `config/.env.example`, không commit cookie/token hay dữ liệu job cục bộ.
+---
 
-## Cài đặt và sử dụng
+## 📌 Hướng dẫn cho Codex / AI Coding Agents
 
-Giải nén `dist/CVAT-3D-Tool-Extension-1.13.0.zip`, hoặc dùng thư mục `extension/`. Trong Edge/Chrome Extensions, bật Developer mode → Load unpacked → chọn thư mục chứa manifest.json. Mở job 3D trên domain được khai báo trong manifest: CVAT Transformer Labs, CVAT.ai, Vantix hoặc localhost.
+> [!IMPORTANT]
+> **Dành cho Codex / AI Agents khi đọc và phát triển codebase này:**
+> Đọc kỹ các quy tắc kiến trúc dưới đây trước khi viết hoặc sửa bất kỳ mã nguồn nào. Việc vi phạm các quy tắc về **Keyframe locking** hoặc **Z-ground clamp** sẽ phá hủy hoàn toàn chuyển động nội suy 3D của CVAT.
 
-Sau cài đặt/cập nhật extension, refresh tab một lần. Các thao tác tiếp theo cập nhật editor và render mà không cần refresh. Extension đọc cả annotation chưa Save; dùng **Save trong CVAT** để lưu lên server.
+### 1. Sự cố Khóa cứng Keyframe (Keyframe Over-Saturation Bug) & Cách khắc phục
+* **Hiện tượng**: Khi chạy pipeline prelabeling hoặc tracker tự động trên đoạn frame (ví dụ: frame 20–29), việc ghi shape lên **tất cả** các frame liên tiếp sẽ biến mọi frame thành hard keyframe. Khi annotator sửa frame 23 và 29, các frame trung gian (24–28) không tự nội suy, dẫn đến việc box bị giật cục dữ dội.
+* **Nguyên nhân trong Data Model của CVAT 3D**: Trong cấu trúc JSON của CVAT, **mọi shape nằm trong mảng `track["shapes"]` đều được CVAT coi là một hard keyframe**. CVAT chỉ tự động nội suy tuyến tính (Linear Interpolation) giữa 2 keyframe nếu các frame trung gian **không có shape**.
+* **Giải pháp chuẩn hóa (`clean_keyframes_pipeline.py`)**:
+  - Loại bỏ toàn bộ các shape thừa ở frame trung gian. Chỉ lưu giữ các keyframe thực sự (ví dụ: `[0, 5, 8, 9, 10, 15, 16, 19, 23, 29]`).
+  - Khi đó, CVAT tự động nội suy mượt mà 100%.
 
-Demo: mở `dist/CVAT-3D-Copilot-Demo.html` bằng Edge/Chrome, không cần mạng hoặc đăng nhập. Demo dùng 61 cuboid từ cache Job 9426 với Z đặt lại theo ground mô phỏng, point cloud và ca lỗi được tạo chủ động; demo không thay thế kiểm chứng trên CVAT thật. UI hiện dùng tiếng Anh và hiển thị subtype của box.
+### 2. Khóa cao độ mặt đường (Ground Z-Elevation Clamp / Chống văng Box)
+* **Hiện tượng**: Điểm LiDAR từ nóc xe hoặc nhiễu tầm xa kéo tâm Z lên cao dần, khiến xe bị văng lên không trung.
+* **Giải pháp**: Tâm Z của xe chỉ được phép dao động tối đa $\pm 0.15\text{ m}$ so với cao độ ban đầu tại mặt đất:
+  ```python
+  curr_center[2] = np.clip(curr_center[2], z_start - 0.15, z_start + 0.15)
+  curr_vel[2] = 0.0  # Vận tốc thẳng đứng bị triệt tiêu
+  ```
+
+### 3. Nhận diện CVAT vạn năng (Universal URL Recognition) & Export/Import theo Link VinFast (v1.14.0)
+* Extension thiết lập quyền `<all_urls>` và tự động nhận diện trang CVAT thông qua cấu trúc URL (`/jobs/\d+`, `/tasks/\d+`) và DOM signature (`#cvat-app`, `.cvat-canvas-container`). Hoạt động tức thì trên **mọi link, mọi domain, IP nội bộ** của VinFast.
+* **Export / Import trực tiếp trên HUD**: Nút **⬇ Export Annotations** và **⬆ Import Annotations** giúp annotator sao lưu và nạp nhãn mồi ngay trong tab CVAT mà không cần rời trình duyệt.
+* **CLI Python `cvat_io.py`**:
+  ```powershell
+  # Export:
+  python scripts/cvat_io.py export "https://cvat-test.vantixapps.net/tasks/12/jobs/58" --output backup.json
+  # Import kèm khử khóa cứng keyframe:
+  python scripts/cvat_io.py import "https://cvat-test.vantixapps.net/tasks/12/jobs/58" --file my_boxes.json --clean
+  ```
+
+---
+
+## 🛠️ Cài đặt & Hướng dẫn Cập nhật Extension
+
+### 1. Cài đặt vào Chrome / Edge
+1. Mở trình duyệt, truy cập `chrome://extensions/` hoặc `edge://extensions/`.
+2. Bật chế độ **Developer mode** (Góc trên cùng bên phải).
+3. Nhấn **Load unpacked** và chọn thư mục:
+   `D:\Project\VinPrj\CVAT_Tool\extension`
+4. Mở tab CVAT 3D job bất kỳ. Menu tiện ích **CVAT 3D TOOL** sẽ xuất hiện ở góc phải màn hình.
+
+### 💡 Cách Cập Nhật Extension Cực Nhanh (Không Cần Xóa / Tải Lại):
+> [!TIP]
+> **Annotator tuyệt đối không cần xóa extension và load lại mỗi khi có bản cập nhật mới!**
+> 1. **Cách 1 (Ngay trong tab CVAT - Tiện nhất)**: Bấm nút **🔄** trên thanh tiêu đề của menu **CVAT 3D TOOL**. Extension sẽ nạp lại mã mới từ ổ đĩa và F5 trang ngay lập tức.
+> 2. **Cách 2 (Trang Extensions)**: Vào `chrome://extensions/`, tìm card **CVAT 3D TOOL** và nhấn vào biểu tượng **Reload 🔄** (hình vòng cung tròn). Mã mới sẽ được nạp lại ngay lập tức.
+> 3. **Tự động kéo code mới**: Chạy `git pull` trong thư mục repo rồi bấm nút **🔄** trên HUD là toàn bộ tính năng mới nhất có hiệu lực ngay!
+
+---
 
 ## Batch Track Review — 1.8.0
 

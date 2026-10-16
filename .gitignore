@@ -65,6 +65,11 @@ data_job*/
 /scripts/*.py
 !/scripts/plot-fit-case.py
 !/scripts/cvat_session_test.py
+!/scripts/cvat_io.py
+!/scripts/build_extension.py
+!/scripts/clean_keyframes_pipeline.py
+!/scripts/tracker_3d_pipeline.py
+!/scripts/cvat_client.py
 
 # Environment files and local credentials must never be published.
 .env

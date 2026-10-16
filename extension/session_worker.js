@@ -1,7 +1,11 @@
 /* Runs only in the extension service worker. No cookie values enter page events. */
 function sessionContext(tab, patterns) {
     const url=new URL(tab.url);
-    if(!patterns.some(p=>{const host=new URL(p.replace('*://','https://').replace(/\/\*$/,'/')).hostname;return host.startsWith('*.')?(url.hostname.endsWith(host.slice(1))):url.hostname===host;}))throw new Error('Unsupported CVAT server');
+    if(!patterns.some(p=>{
+        if(p==='<all_urls>')return true;
+        const host=new URL(p.replace('*://','https://').replace(/\/\*$/,'/')).hostname;
+        return host.startsWith('*.')?(url.hostname.endsWith(host.slice(1))):url.hostname===host;
+    }))throw new Error('Unsupported CVAT server');
     const match=url.pathname.match(/\/jobs\/(\d+)(?:\/|$)/);
     if(!match||!['https:','http:'].includes(url.protocol))throw new Error('Open a CVAT job first');
     return {tabId:tab.id,origin:url.origin,jobId:Number(match[1])};
@@ -9,6 +13,11 @@ function sessionContext(tab, patterns) {
 if(typeof module!=='undefined')module.exports={sessionContext};
 if(typeof chrome!=='undefined'&&chrome.runtime?.onMessage){
  chrome.runtime.onMessage.addListener((message,sender,reply)=>{
+  if(message?.action==='RELOAD_EXTENSION'||message?.type==='RELOAD_EXTENSION'){
+   reply({ok:true});
+   chrome.runtime.reload();
+   return true;
+  }
   (async()=>{
    const patterns=chrome.runtime.getManifest().host_permissions;
    if(message?.type==='C3D_OPEN_SESSION'){

@@ -195,10 +195,16 @@
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
         root.innerHTML=`
-            <header class="c3d-header"><div><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <header class="c3d-header"><div><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><div style="display:flex;align-items:center;gap:4px;"><button id="c3d-btn-reload" class="c3d-btn-icon" title="Reload Extension & Refresh Tab" aria-label="Reload extension">🔄</button><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></div></header>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button><div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
+                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
+                <div class="c3d-action-grid" style="margin-top:4px;">
+                    <button id="c3d-btn-export-ann" class="c3d-btn-secondary" title="Export toàn bộ annotations 3D của Job này ra file JSON">⬇ Export Annotations</button>
+                    <button id="c3d-btn-import-ann" class="c3d-btn-secondary" title="Import file JSON annotations vào Job hiện tại">⬆ Import Annotations</button>
+                </div>
+                <input type="file" id="c3d-file-import" accept=".json" style="display:none" />
+                <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
                 <div class="c3d-toolbar"><button id="c3d-btn-scan" class="c3d-btn-primary">RUN QC NOW <kbd>Alt Shift L</kbd></button><div class="c3d-toggles"><label><input id="c3d-auto" type="checkbox" checked> Auto QC</label><label><input id="c3d-colors" type="checkbox" checked> 3D Error Colors</label></div>
                     <div class="c3d-action-grid"><button id="c3d-btn-ground" class="c3d-btn-secondary" title="Alt+Shift+G">Ground Snap</button><button id="c3d-btn-freecam" class="c3d-btn-secondary" title="Alt+Shift+C">Free Cam</button></div>
                     <div class="c3d-fit-row"><button id="c3d-btn-autofit" class="c3d-btn-primary">AUTO-FIT BOX <kbd></kbd></button><label><input id="c3d-keep-direction" type="checkbox"> Keep direction</label></div>
@@ -225,9 +231,48 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.13.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.14.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
+        el('c3d-btn-reload')?.addEventListener('click', () => {
+            toast('Đang nạp lại Extension & làm mới trang...');
+            try {
+                if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
+                    chrome.runtime.sendMessage({ action: 'RELOAD_EXTENSION' }, () => {
+                        setTimeout(() => window.location.reload(), 400);
+                    });
+                } else {
+                    window.location.reload();
+                }
+            } catch (_) {
+                window.location.reload();
+            }
+        });
+        el('c3d-btn-export-ann')?.addEventListener('click', async () => {
+            try {
+                toast('Đang tải toàn bộ annotations từ CVAT server...');
+                const res = await request('EXPORT_ALL_ANNOTATIONS', { ref: reference() });
+                const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = `cvat-job-${res.jobId}-annotations.json`;
+                document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+                toast(`Export thành công ${res.trackCount} tracks (${res.shapeCount} shapes)!`);
+            } catch (error) { toast('Lỗi export: ' + error.message, true); }
+        });
+        el('c3d-btn-import-ann')?.addEventListener('click', () => { el('c3d-file-import')?.click(); });
+        el('c3d-file-import')?.addEventListener('change', async (event) => {
+            const file = event.target.files?.[0]; if (!file) return; event.target.value = '';
+            try {
+                const text = await file.text(), json = JSON.parse(text);
+                if (!json.tracks && !json.shapes) throw new Error('File không chứa mảng tracks hoặc shapes của CVAT');
+                const trackCount = json.tracks?.length || 0, shapeCount = json.shapes?.length || 0;
+                if (!window.confirm(`Xác nhận nạp ${trackCount} tracks và ${shapeCount} shapes vào Job này?\n(Lưu ý: Thao tác sẽ cập nhật annotations trên server)`)) return;
+                toast('Đang chuẩn hóa và upload annotations lên CVAT...');
+                const res = await request('IMPORT_ALL_ANNOTATIONS', { payload: json, ref: reference() });
+                toast(`Import thành công ${res.trackCount} tracks! Đang tải lại trang...`);
+                setTimeout(() => window.location.reload(), 1500);
+            } catch (error) { toast('Lỗi import: ' + error.message, true); }
+        });
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
         el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
         el('c3d-follow-selected').addEventListener('change',event=>{settings.followSelected=event.target.checked;followSyncKey='';saveSettings();syncFollowCamera();});
@@ -402,7 +447,12 @@
         if(match.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse){toast('Move to mouse unavailable: top-view camera or canvas API missing',true);return;}
         actions[match.id]();
     }
-    function shouldShow(){return /\/jobs\/\d+/.test(window.location.pathname)||document.documentElement.dataset.c3dDemo==='true';}
+    function shouldShow(){
+        if(document.documentElement.dataset.c3dDemo==='true')return true;
+        const path=window.location.pathname;
+        if(/\/jobs\/\d+/.test(path)||/\/tasks\/\d+/.test(path))return true;
+        return !!(document.querySelector('#cvat-app')||document.querySelector('.cvat-canvas-container')||document.querySelector('.cvat-objects-sidebar'));
+    }
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}

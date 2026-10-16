@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CVAT 3D TOOL",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "Minimalist Real-time Quality Linter, Auto Ground Snapping, and 3D Assistant for CVAT",
   "permissions": [
     "activeTab",
@@ -10,20 +10,12 @@
     "downloads"
   ],
   "host_permissions": [
-    "*://cvat.note.transformerlabs.ai/*",
-    "*://*.cvat.ai/*",
-    "*://cvat-test.vantixapps.net/*",
-    "*://*.vantixapps.net/*",
-    "*://localhost/*"
+    "<all_urls>"
   ],
   "content_scripts": [
     {
       "matches": [
-        "*://cvat.note.transformerlabs.ai/*",
-        "*://*.cvat.ai/*",
-        "*://cvat-test.vantixapps.net/*",
-        "*://*.vantixapps.net/*",
-        "*://localhost/*"
+        "<all_urls>"
       ],
       "js": [
         "copilot_main.js"
@@ -33,11 +25,7 @@
     },
     {
       "matches": [
-        "*://cvat.note.transformerlabs.ai/*",
-        "*://*.cvat.ai/*",
-        "*://cvat-test.vantixapps.net/*",
-        "*://*.vantixapps.net/*",
-        "*://localhost/*"
+        "<all_urls>"
       ],
       "js": [
         "copilot_panel.js"
@@ -59,11 +47,7 @@
         "main_world_bridge.js"
       ],
       "matches": [
-        "*://cvat.note.transformerlabs.ai/*",
-        "*://*.cvat.ai/*",
-        "*://cvat-test.vantixapps.net/*",
-        "*://*.vantixapps.net/*",
-        "*://localhost/*"
+        "<all_urls>"
       ]
     }
   ],

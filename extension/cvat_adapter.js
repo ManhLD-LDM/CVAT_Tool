@@ -685,6 +685,45 @@
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
                     const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.confidence};
                 }
+                case 'EXPORT_ALL_ANNOTATIONS': {
+                    validate(payload.ref, false);
+                    const jobId = payload.ref.jobId;
+                    const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
+                        method: 'GET',
+                        headers: { 'Accept': '*/*' },
+                        credentials: 'same-origin'
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                    const data = await res.json();
+                    return {
+                        success: true,
+                        jobId,
+                        data,
+                        trackCount: data.tracks?.length || 0,
+                        shapeCount: data.shapes?.length || 0
+                    };
+                }
+                case 'IMPORT_ALL_ANNOTATIONS': {
+                    validate(payload.ref, false);
+                    const jobId = payload.ref.jobId;
+                    const annPayload = payload.payload;
+                    if (!annPayload || (!annPayload.tracks && !annPayload.shapes)) {
+                        throw new Error('Payload annotations không hợp lệ (cần tracks/shapes)');
+                    }
+                    const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify(annPayload)
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                    return {
+                        success: true,
+                        jobId,
+                        trackCount: annPayload.tracks?.length || 0,
+                        shapeCount: annPayload.shapes?.length || 0
+                    };
+                }
                 case 'SET_QC_APPEARANCE': return setAppearance(payload.colors || []);
                 case 'CLEAR_QC_APPEARANCE': clearAppearance(); return {cleared:true};
                 case 'FREECAM': return setFreeCamera(!!payload.enabled);
