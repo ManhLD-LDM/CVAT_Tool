@@ -195,7 +195,7 @@
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
         root.innerHTML=`
-            <header class="c3d-header"><div><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><div style="display:flex;align-items:center;gap:4px;"><button id="c3d-btn-reload" class="c3d-btn-icon" title="Reload Extension & Refresh Tab" aria-label="Reload extension">🔄</button><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></div></header>
+            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Nạp lại Extension từ ổ cứng & F5 trang" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
                 <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
@@ -236,16 +236,19 @@
         document.body.appendChild(root);
         el('c3d-btn-reload')?.addEventListener('click', () => {
             toast('Đang nạp lại Extension & làm mới trang...');
+            let reloaded = false;
+            const doRefresh = () => { if (reloaded) return; reloaded = true; window.location.reload(); };
             try {
                 if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
                     chrome.runtime.sendMessage({ action: 'RELOAD_EXTENSION' }, () => {
-                        setTimeout(() => window.location.reload(), 400);
+                        setTimeout(doRefresh, 300);
                     });
+                    setTimeout(doRefresh, 800);
                 } else {
-                    window.location.reload();
+                    doRefresh();
                 }
             } catch (_) {
-                window.location.reload();
+                doRefresh();
             }
         });
         el('c3d-btn-export-ann')?.addEventListener('click', async () => {

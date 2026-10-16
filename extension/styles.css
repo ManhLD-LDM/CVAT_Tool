@@ -98,6 +98,34 @@
   color: #F4F4F5;
 }
 
+.c3d-btn-reload {
+  background: #27272A;
+  border: 1px solid #3F3F46;
+  border-radius: 4px;
+  color: #E4E4E7;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.2;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.c3d-btn-reload:hover {
+  background: #2563EB;
+  color: #FFFFFF;
+  border-color: #3B82F6;
+}
+
+.c3d-btn-reload:active {
+  transform: scale(0.96);
+}
+
 /* Config Bar (Collapsible) */
 .c3d-config-bar {
   padding: 8px 14px;
