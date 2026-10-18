@@ -12,7 +12,7 @@
     const dispatch = (type, data) => window.dispatchEvent(new CustomEvent(type, { detail: JSON.stringify(data) }));
     const off = adapter.subscribe(snapshot => dispatch(snapshotEvent, snapshot));
     async function receive(event) {
-        if (disposed || typeof event.detail !== 'string' || event.detail.length > 160000) return;
+        if (disposed || typeof event.detail !== 'string' || event.detail.length > 100000000) return;
         let request;
         try { request = JSON.parse(event.detail); } catch (_) { return; }
         if (request?.protocol !== 2 || typeof request.requestId !== 'string' || request.requestId.length > 100 || typeof request.type !== 'string') return;
@@ -22,7 +22,7 @@
         let response;
         try { response = {requestId:request.requestId,ok:true,result:await adapter.command(request.type,request.payload || {})}; }
         catch (error) { response = {requestId:request.requestId,ok:false,error:error.message || 'Lệnh thất bại'}; }
-        inflight.delete(request.requestId); if(request.type!=='BATCH_FRAME')completed.set(request.requestId,response);
+        inflight.delete(request.requestId); if(request.type!=='BATCH_FRAME' && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
         if (completed.size > 150) completed.delete(completed.keys().next().value);
         if (!disposed) dispatch(responseEvent,response);
     }

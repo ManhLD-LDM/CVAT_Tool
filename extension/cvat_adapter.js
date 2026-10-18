@@ -900,17 +900,23 @@
                     const csrfMatch = cookieStr.match(/(?:^|;\s*)csrftoken=([^;]+)/);
                     const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : '';
 
-                    const putHeaders = {
+                    const reqHeaders = {
                         'Content-Type': 'application/json',
                         'Accept': '*/*'
                     };
                     if (csrfToken) {
-                        putHeaders['X-CSRFToken'] = csrfToken;
+                        reqHeaders['X-CSRFToken'] = csrfToken;
                     }
 
-                    const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
-                        method: 'PUT',
-                        headers: putHeaders,
+                    const mode = payload.mode === 'append' ? 'append' : 'replace';
+                    const endpoint = mode === 'append'
+                        ? `/api/jobs/${jobId}/annotations/?action=create`
+                        : `/api/jobs/${jobId}/annotations`;
+                    const httpMethod = mode === 'append' ? 'PATCH' : 'PUT';
+
+                    const res = await win.fetch(endpoint, {
+                        method: httpMethod,
+                        headers: reqHeaders,
                         credentials: 'same-origin',
                         body: JSON.stringify(uploadPayload)
                     });
@@ -921,6 +927,7 @@
                     return {
                         success: true,
                         jobId,
+                        mode,
                         trackCount: uploadPayload.tracks.length,
                         shapeCount: uploadPayload.shapes.length
                     };

@@ -5391,7 +5391,11 @@ three/build/three.module.js:
     function request(type, payload = {}) {
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
-            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},type.startsWith('BATCH_')?120000:20000);
+            const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS');
+            const timeout = setTimeout(()=>{
+                pending.delete(requestId);
+                reject(new Error(isLong ? 'Thao tác quá thời gian chờ (180s) từ server CVAT' : 'CVAT did not respond; check bridge connection'));
+            }, isLong ? 180000 : 20000);
             pending.set(requestId,{resolve,reject,timeout});
             window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
         });

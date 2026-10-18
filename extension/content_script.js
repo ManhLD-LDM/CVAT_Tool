@@ -118,7 +118,11 @@
     function request(type, payload = {}) {
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
-            const timeout = setTimeout(()=>{pending.delete(requestId);reject(new Error('CVAT did not respond; check bridge connection'));},type.startsWith('BATCH_')?120000:20000);
+            const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS');
+            const timeout = setTimeout(()=>{
+                pending.delete(requestId);
+                reject(new Error(isLong ? 'Thao tác quá thời gian chờ (180s) từ server CVAT' : 'CVAT did not respond; check bridge connection'));
+            }, isLong ? 180000 : 20000);
             pending.set(requestId,{resolve,reject,timeout});
             window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
         });
@@ -205,9 +209,12 @@
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
                 <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
-                <div class="c3d-action-grid" style="margin-top:4px;">
-                    <button id="c3d-btn-export-ann" class="c3d-btn-secondary" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
-                    <button id="c3d-btn-import-ann" class="c3d-btn-secondary" title="Import file JSON annotations vào toàn bộ Job hiện tại">⬆ Import Toàn Bộ Job (.json)</button>
+                <div style="margin-top:4px;">
+                    <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
+                </div>
+                <div class="c3d-action-grid" style="margin-top:2px;">
+                    <button id="c3d-btn-import-replace" class="c3d-btn-secondary" title="Xóa annotations cũ và thay thế toàn bộ bằng file JSON mới">🔄 Import (Ghi Đè / Replace)</button>
+                    <button id="c3d-btn-import-append" class="c3d-btn-secondary" title="Giữ nguyên annotations hiện có và nạp thêm các tracks mới từ file JSON">➕ Import (Thêm Vào / Append)</button>
                 </div>
                 <input type="file" id="c3d-file-import" accept=".json" style="display:none" />
                 <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
@@ -281,18 +288,30 @@
                 toast(`Export thành công ${res.trackCount} tracks (${res.shapeCount} shapes)!`);
             } catch (error) { toast('Lỗi export: ' + error.message, true); }
         });
-        el('c3d-btn-import-ann')?.addEventListener('click', () => { el('c3d-file-import')?.click(); });
+        let currentImportMode = 'replace';
+        el('c3d-btn-import-replace')?.addEventListener('click', () => {
+            currentImportMode = 'replace';
+            el('c3d-file-import')?.click();
+        });
+        el('c3d-btn-import-append')?.addEventListener('click', () => {
+            currentImportMode = 'append';
+            el('c3d-file-import')?.click();
+        });
         el('c3d-file-import')?.addEventListener('change', async (event) => {
             const file = event.target.files?.[0]; if (!file) return; event.target.value = '';
             try {
                 const text = await file.text(), json = JSON.parse(text);
                 if (!json.tracks && !json.shapes) throw new Error('File không chứa mảng tracks hoặc shapes của CVAT');
                 const trackCount = json.tracks?.length || 0, shapeCount = json.shapes?.length || 0;
-                if (!window.confirm(`Xác nhận nạp ${trackCount} tracks và ${shapeCount} shapes vào Job này?\n(Lưu ý: Thao tác sẽ cập nhật annotations trên server)`)) return;
-                toast('Đang chuẩn hóa và upload annotations lên CVAT...');
+                const isReplace = currentImportMode === 'replace';
+                const confirmMsg = isReplace
+                    ? `[GHI ĐÈ / REPLACE]\nXác nhận XÓA toàn bộ annotations cũ và thay thế bằng ${trackCount} tracks (${shapeCount} shapes)?\n(Thao tác sẽ thay thế toàn bộ annotations trên CVAT server)`
+                    : `[THÊM VÀO / APPEND]\nXác nhận THÊM ${trackCount} tracks (${shapeCount} shapes) vào danh sách annotations hiện có?\n(Thao tác sẽ giữ nguyên annotations cũ và tạo thêm tracks mới)`;
+                if (!window.confirm(confirmMsg)) return;
+                toast(isReplace ? 'Đang ghi đè toàn bộ annotations lên CVAT...' : 'Đang thêm mới annotations vào CVAT...');
                 const jobId = getJobId();
-                const res = await request('IMPORT_ALL_ANNOTATIONS', { payload: json, jobId, sessionId: snapshot?.sessionId });
-                toast(`Import thành công ${res.trackCount} tracks! Đang tải lại trang...`);
+                const res = await request('IMPORT_ALL_ANNOTATIONS', { payload: json, jobId, sessionId: snapshot?.sessionId, mode: currentImportMode });
+                toast(`Import (${isReplace ? 'Ghi đè' : 'Thêm mới'}) thành công ${res.trackCount} tracks! Đang tải lại trang...`);
                 setTimeout(() => window.location.reload(), 1500);
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });

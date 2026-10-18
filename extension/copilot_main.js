@@ -5491,17 +5491,23 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const csrfMatch = cookieStr.match(/(?:^|;\s*)csrftoken=([^;]+)/);
                     const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : '';
 
-                    const putHeaders = {
+                    const reqHeaders = {
                         'Content-Type': 'application/json',
                         'Accept': '*/*'
                     };
                     if (csrfToken) {
-                        putHeaders['X-CSRFToken'] = csrfToken;
+                        reqHeaders['X-CSRFToken'] = csrfToken;
                     }
 
-                    const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
-                        method: 'PUT',
-                        headers: putHeaders,
+                    const mode = payload.mode === 'append' ? 'append' : 'replace';
+                    const endpoint = mode === 'append'
+                        ? `/api/jobs/${jobId}/annotations/?action=create`
+                        : `/api/jobs/${jobId}/annotations`;
+                    const httpMethod = mode === 'append' ? 'PATCH' : 'PUT';
+
+                    const res = await win.fetch(endpoint, {
+                        method: httpMethod,
+                        headers: reqHeaders,
                         credentials: 'same-origin',
                         body: JSON.stringify(uploadPayload)
                     });
@@ -5512,6 +5518,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     return {
                         success: true,
                         jobId,
+                        mode,
                         trackCount: uploadPayload.tracks.length,
                         shapeCount: uploadPayload.shapes.length
                     };
@@ -5552,7 +5559,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
     const dispatch = (type, data) => window.dispatchEvent(new CustomEvent(type, { detail: JSON.stringify(data) }));
     const off = adapter.subscribe(snapshot => dispatch(snapshotEvent, snapshot));
     async function receive(event) {
-        if (disposed || typeof event.detail !== 'string' || event.detail.length > 160000) return;
+        if (disposed || typeof event.detail !== 'string' || event.detail.length > 100000000) return;
         let request;
         try { request = JSON.parse(event.detail); } catch (_) { return; }
         if (request?.protocol !== 2 || typeof request.requestId !== 'string' || request.requestId.length > 100 || typeof request.type !== 'string') return;
@@ -5562,7 +5569,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
         let response;
         try { response = {requestId:request.requestId,ok:true,result:await adapter.command(request.type,request.payload || {})}; }
         catch (error) { response = {requestId:request.requestId,ok:false,error:error.message || 'Lệnh thất bại'}; }
-        inflight.delete(request.requestId); if(request.type!=='BATCH_FRAME')completed.set(request.requestId,response);
+        inflight.delete(request.requestId); if(request.type!=='BATCH_FRAME' && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
         if (completed.size > 150) completed.delete(completed.keys().next().value);
         if (!disposed) dispatch(responseEvent,response);
     }

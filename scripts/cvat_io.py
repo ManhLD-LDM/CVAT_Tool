@@ -153,11 +153,19 @@ def clean_keyframe_shapes(tracks: list) -> list:
         clean_tracks.append(t_copy)
     return clean_tracks
 
-def import_annotations(target: str, in_path: Path, clean: bool = True):
+def import_annotations(target: str, in_path: Path, clean: bool = True, mode: str = "replace"):
     """Imports an annotations JSON file into the specified CVAT link or Job ID."""
     base_url, job_id = parse_cvat_url(target)
-    url = f"{base_url}/api/jobs/{job_id}/annotations"
     headers = get_headers(base_url)
+    
+    if mode == "append":
+        url = f"{base_url}/api/jobs/{job_id}/annotations/?action=create"
+        http_method = "PATCH"
+        mode_label = "THÊM VÀO / APPEND"
+    else:
+        url = f"{base_url}/api/jobs/{job_id}/annotations"
+        http_method = "PUT"
+        mode_label = "GHI ĐÈ / REPLACE"
     
     if not in_path.exists():
         print(f"[LỖI] Không tìm thấy file nguồn: {in_path}")
@@ -272,8 +280,8 @@ def import_annotations(target: str, in_path: Path, clean: bool = True):
         "tracks": clean_tracks
     }
     
-    print(f"[IMPORT] Đang nạp lên CVAT: {base_url} (Job {job_id}) via PUT ...")
-    put_headers = {
+    print(f"[IMPORT] Đang nạp lên CVAT: {base_url} (Job {job_id}) chế độ [{mode_label}] via {http_method} ...")
+    req_headers = {
         **headers,
         "Content-Type": "application/json"
     }
@@ -281,8 +289,8 @@ def import_annotations(target: str, in_path: Path, clean: bool = True):
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers=put_headers,
-        method="PUT"
+        headers=req_headers,
+        method=http_method
     )
     
     try:
@@ -295,7 +303,7 @@ def import_annotations(target: str, in_path: Path, clean: bool = True):
         print(f"Chi tiết: {err_msg[:250]}")
         sys.exit(1)
         
-    print(f"\n✅ IMPORT THÀNH CÔNG vào Job {job_id} (Status HTTP {status})!")
+    print(f"\n✅ IMPORT [{mode_label}] THÀNH CÔNG vào Job {job_id} (Status HTTP {status})!")
     print(f" - Đã nạp {len(clean_tracks)} tracks vào hệ thống.")
     print(f" - Truy cập link sau để kiểm tra: {base_url}/tasks/.../jobs/{job_id}")
 
@@ -339,6 +347,7 @@ Ví dụ sử dụng:
     p_import = subparsers.add_parser("import", help="Import annotations vào link hoặc Job ID")
     p_import.add_argument("url", type=str, help="Link CVAT (hoặc Job ID) cần import")
     p_import.add_argument("--file", "-f", type=str, required=True, help="Đường dẫn file .json cần nạp")
+    p_import.add_argument("--mode", "-m", choices=["replace", "append"], default="replace", help="Chế độ import: replace (ghi đè toàn bộ) hoặc append (thêm vào annotations hiện có)")
     p_import.add_argument("--clean", action="store_true", default=True, help="Tự động lọc bỏ ID server cũ và chống khóa cứng nội suy (mặc định bật)")
     p_import.add_argument("--no-clean", action="store_false", dest="clean", help="Không tự động lọc bỏ keyframe thừa")
     
@@ -352,7 +361,7 @@ Ví dụ sử dụng:
         out = Path(args.output) if args.output else None
         export_annotations(args.url, out)
     elif args.action == "import":
-        import_annotations(args.url, Path(args.file), clean=args.clean)
+        import_annotations(args.url, Path(args.file), clean=args.clean, mode=args.mode)
     elif args.action == "inspect":
         inspect_job(args.url)
 
