@@ -1,8 +1,19 @@
-# CVAT 3D TOOL 1.14.1
+# CVAT 3D TOOL 1.14.4
+
+## Selectable ground base — 1.14.4
+
+The **Use origin ground (Z = 0 + offset)** checkbox is available below Auto Adjust Box and is **unchecked by default**. It applies consistently to Ground Snap, Move to mouse, Auto Adjust and Auto-Fit:
+
+- **Unchecked:** use measured surrounding road, including road below Z = 0. The origin offset is ignored. Missing/uncertain local ground cannot silently become the origin plane.
+- **Checked:** use the coordinate-origin plane plus **Origin ground offset (m)**, default 0. Detected surfaces cannot override this explicit selection. Ground Snap can work without a loaded cloud in this mode.
+
+The mode and signed offset persist. The HUD names the selected base; measured ground remains separate for QC. Object centering, direction/face alignment, native Undo and existing large-Z safeguards are preserved. Auto Adjust and Auto-Fit still need object points. Local ground is rechecked at the final footprint after fitting/refinement.
+
+This replaces the temporary always-origin behavior in 1.14.3. The experimental per-frame road-height estimator remains removed.
 
 ## Ground fallback and directional placement — 1.14.1
 
-- Enable **Use origin ground height when local ground is unavailable** to let Ground Snap and Move to mouse use **Fallback ground height (m)**. The default is Z = 0; signed offsets are supported. Local measured ground always takes precedence. Fallback is off by default and does not count as measured ground for QC. Existing 1.5 m adjustment safeguards still apply.
+- **Historical behavior in 1.14.1 (superseded by the selectable ground modes above):** enable **Use origin ground height when local ground is unavailable** to let Ground Snap and Move to mouse use **Fallback ground height (m)**. The default is Z = 0; signed offsets are supported. Local measured ground always takes precedence. Fallback is off by default and does not count as measured ground for QC. Existing 1.5 m adjustment safeguards still apply.
 - Move to mouse has independent **Longitudinal** (None / Push forward / Push backward) and **Lateral** (None / Push left / Push right) selectors. Both default to None and persist with your settings.
 - Directions follow the final box heading (+X forward, +Y left). Forward aligns the rear face to the rearmost detected object points; backward aligns the front face; left aligns the right face; right aligns the left face. Dimensions stay fixed. This uses the selected cluster’s robust bounds, so isolated outliers do not define contact.
 - Placement centers on the selected object, optionally adjusts yaw, aligns selected faces, then checks ground at the final footprint. An oversized span skips that axis; ambiguous or sparse clusters skip alignment. Results explain fallback and skipped adjustments. The whole edit is one native Undo entry; Save CVAT to persist it to the server.

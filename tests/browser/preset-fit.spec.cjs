@@ -13,7 +13,7 @@ test('preset edits persist per class and Auto-Fit uses exact custom dimensions w
     await page.locator('#c3d-btn-autofit').click();await expect(page.locator('#c3d-toast')).toContainText('Auto-Fit updated');
     const fitted=await page.evaluate(()=>__C3D_DEMO_TEST.snapshot().boxes.find(b=>b.id===2).points);
     expect(fitted.slice(6,9)).toEqual([4.8,2,1.8]);
-    const clearance=await page.evaluate(p=>Math.min(...__CVAT_COPILOT_MATH.cuboidVertices(p).map(([x,y,z])=>z-(.015*x+.01*y+.025))),fitted);
+    const clearance=await page.evaluate(p=>Math.min(...__CVAT_COPILOT_MATH.cuboidVertices(p).map(([x,y,z])=>z)),fitted);
     expect(Math.abs(clearance)).toBeLessThan(.06);
     await page.screenshot({path:'docs/verification/preset-fit-1.11.0.png',fullPage:true});
     await page.locator('#demo-undo').click();expect(await page.evaluate(()=>__C3D_DEMO_TEST.snapshot().boxes.find(b=>b.id===2).points)).toEqual(before);

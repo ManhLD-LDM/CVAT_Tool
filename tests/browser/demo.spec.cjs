@@ -77,7 +77,7 @@ test('native selection scopes issues to selected box and clear selection restore
 test('Auto-Fit button and shortcut edit demo geometry with undo and redo',async({page})=>{
     await page.goto('http://127.0.0.1:4173/demo/index.html');
     await page.locator('[data-case="2"]').click();
-    await expect(page.locator('#c3d-road-info')).toContainText('LiDAR ground');
+    await expect(page.locator('#c3d-road-info')).toContainText('Ground base: surrounding road');
     const before=await page.evaluate(()=>__C3D_DEMO_TEST.snapshot().boxes.find(b=>b.id===2).points);
     await page.locator('#c3d-btn-autofit').click();
     await expect(page.locator('#c3d-toast')).toContainText(/Auto-Fit updated|Auto-Fit đã cập nhật/i);

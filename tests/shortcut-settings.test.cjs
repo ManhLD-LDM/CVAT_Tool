@@ -45,9 +45,9 @@ test('new Auto Adjust shortcut preserves existing user assignments during settin
 
 test('placement settings migrate, persist signed heights and normalize invalid values',()=>{
     const defaults=s.normalize({version:1});
-    assert.equal(defaults.originGroundFallback,false);assert.equal(defaults.fallbackGroundHeight,0);assert.equal(defaults.moveLongitudinal,'none');assert.equal(defaults.moveLateral,'none');
-    const saved={...defaults,originGroundFallback:true,fallbackGroundHeight:-.35,moveLongitudinal:'forward',moveLateral:'right'};
-    assert.deepEqual(s.normalize(saved),saved);
+    assert.equal(defaults.originGroundFallback,undefined);assert.equal(defaults.useOriginGround,false);assert.equal(defaults.fallbackGroundHeight,0);assert.equal(defaults.moveLongitudinal,'none');assert.equal(defaults.moveLateral,'none');
+    const saved={...defaults,useOriginGround:true,fallbackGroundHeight:-.35,moveLongitudinal:'forward',moveLateral:'right'};
+    assert.deepEqual(s.normalize({...saved,originGroundFallback:false}),saved);
     const invalid=s.normalize({...saved,fallbackGroundHeight:Infinity,moveLongitudinal:'left',moveLateral:'backward'});
     assert.equal(invalid.fallbackGroundHeight,0);assert.equal(invalid.moveLongitudinal,'none');assert.equal(invalid.moveLateral,'none');
 });

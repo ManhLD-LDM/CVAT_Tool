@@ -1,6 +1,6 @@
 {
   "name": "cvat-3d-copilot",
-  "version": "1.14.1",
+  "version": "1.14.4",
   "private": true,
   "description": "CVAT editor adapter and offline 3D demo",
   "scripts": {

@@ -9,7 +9,7 @@ const camera=new THREE.PerspectiveCamera(50,1,0.1,600);camera.up.set(0,0,1);
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 const controls=new OrbitControls(camera,canvas);controls.enableDamping=true;controls.dampingFactor=0.1;controls.maxDistance=220;
 const labels=[{id:7803,name:'vehicles',color:'#60a5fa'},{id:7802,name:'two-wheels',color:'#a78bfa'},{id:7801,name:'pedestrian',color:'#34d399'},{id:7804,name:'Animal',color:'#fb923c'}];
-const plane=math.makePlane(0.015,0.01,0.025);
+const plane=math.makePlane(0,0,0);
 const seedBoxes=source.map((s,i)=>{
     const points=[...s.points];const snap=math.snapGroundPoints(points,plane);points[2]=snap.newCz;
     return {id:i+1,clientId:i+1,serverId:s.id,frame:29,objectType:'shape',labelId:s.label_id,label_name:s.label_name,
@@ -61,16 +61,21 @@ function update(box,change){history.push({id:box.id,before:structuredClone(box)}
 function focusBox(id){const b=boxes.find(b=>b.id===id);if(!b)return;const [x,y,z]=b.points;const center=new THREE.Vector3(x,y,z),direction=camera.getWorldDirection(new THREE.Vector3()),radius=Math.hypot(...b.points.slice(6,9))/2;
 const vertical=camera.fov*Math.PI/360,angle=Math.min(vertical,Math.atan(Math.tan(vertical)*camera.aspect));
 camera.position.copy(center).addScaledVector(direction,-radius*1.25/Math.sin(angle));controls.target.copy(center);controls.update();}
+function configuredGround(payload){
+    if(!payload.useOriginGround)return groundIndex.estimate(boxes.find(b=>b.id===payload.ref.clientId));
+    const height=payload.fallbackGroundHeight??0;if(!Number.isFinite(height))throw new Error('Invalid origin ground offset');
+    return {...math.makePlane(0,0,height),accepted:true,confidence:1,configured:true,source:'coordinate-origin'};
+}
 async function command(type,payload={}){
     switch(type){
         case 'GET_SNAPSHOT':return snapshot();
         case 'SELECT_OBJECT':{const box=validate(payload.ref);active=box.id;if(payload.focus)focusBox(active);publish();return {selected:active,focused:!!payload.focus};}
         case 'ROTATE':{const box=validate(payload.ref,true);if(![-90,90,180].includes(payload.degrees))throw new Error('Invalid rotation angle');return update(box,{points:math.rotateYawPoints(box.points,payload.degrees)});}
         case 'SET_LABEL':{const box=validate(payload.ref,true),label=labels.find(l=>l.id===payload.labelId);if(!label)throw new Error('Invalid class');return update(box,{labelId:label.id,label_name:label.name,labelColor:label.color});}
-        case 'AUTO_FIT':{const box=validate(payload.ref,true),ground=groundIndex.estimate(box),preset=math.resolveFitPreset(box.label_name,box.subType),selection=math.fitPresetBox(cloudPoints,box.label_name,{points:box.points,ground,keepDirection:payload.keepDirection===true},boxes.filter(b=>b.id!==box.id),payload.presetDimensions??preset?.dimensions);const finalGround=groundIndex.estimate({points:selection.fitted});if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under final preset footprint; box unchanged');const fitted=math.snapGroundPoints(selection.fitted,math.makePlane(finalGround.a,finalGround.b,finalGround.c)).newPoints;return {...update(box,{points:fitted}),preset:selection.preset,warning:selection.warnings.join(' · '),groundFallback:false};}
-        case 'AUTO_ADJUST':{const box=validate(payload.ref,true),ground=groundIndex.estimate(box),adjusted=math.autoAdjustBox(cloudPoints,box,ground,boxes.filter(b=>b.id!==box.id),payload);if(!adjusted.changed)return {unchanged:true};return {...update(box,{points:adjusted.points}),warning:[adjusted.limitedFaces.length?'Some face corrections limited to 0.4m':null,adjusted.retainedFaces.length?'Faces without nearby surface support preserved':null,adjusted.rejectedBoundaryCandidates?'Weak boundary patches ignored':null].filter(Boolean).join(' · ')||null};}
+        case 'AUTO_FIT':{const box=validate(payload.ref,true),ground=configuredGround(payload),preset=math.resolveFitPreset(box.label_name,box.subType),selection=math.fitPresetBox(cloudPoints,box.label_name,{points:box.points,ground,keepDirection:payload.keepDirection===true},boxes.filter(b=>b.id!==box.id),payload.presetDimensions??preset?.dimensions);const finalGround=ground;if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under final preset footprint; box unchanged');const fitted=math.snapGroundPoints(selection.fitted,math.makePlane(finalGround.a,finalGround.b,finalGround.c)).newPoints;return {...update(box,{points:fitted}),preset:selection.preset,warning:selection.warnings.join(' · '),groundFallback:false};}
+        case 'AUTO_ADJUST':{const box=validate(payload.ref,true),ground=configuredGround(payload),adjusted=math.autoAdjustBox(cloudPoints,box,ground,boxes.filter(b=>b.id!==box.id),payload);if(!adjusted.changed)return {unchanged:true};return {...update(box,{points:adjusted.points}),warning:[adjusted.limitedFaces.length?'Some face corrections limited to 0.4m':null,adjusted.retainedFaces.length?'Faces without nearby surface support preserved':null,adjusted.rejectedBoundaryCandidates?'Weak boundary patches ignored':null].filter(Boolean).join(' · ')||null};}
         case 'GET_GROUNDS':{validate(payload.ref);const result={};for(const id of payload.ids||[]){const box=boxes.find(b=>b.id===id);if(!box)continue;const {getTargetZ,...data}=groundIndex.estimate(box);result[id]=data;if(id%5===0)await new Promise(r=>setTimeout(r,0));}return result;}
-        case 'SNAP_GROUND':{const box=validate(payload.ref,true),ground=groundIndex.estimate(box);if(!math.canManuallySnapGround(ground))throw new Error(ground.reason||'Ground plane uncertainty too high');const snap=math.snapGroundPoints(box.points,ground);return {...update(box,{points:snap.newPoints}),deltaZ:snap.deltaZ,confidence:ground.confidence};}
+        case 'SNAP_GROUND':{const box=validate(payload.ref,true),ground=configuredGround(payload);const snap=math.snapGroundPoints(box.points,ground);if(Math.abs(snap.deltaZ)>1.5&&!payload.allowLargeAdjustment)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');return {...update(box,{points:snap.newPoints}),deltaZ:snap.deltaZ,confidence:null,groundSource:ground.source,groundHeight:ground.c};}
         case 'SET_QC_APPEARANCE':colors=new Map((payload.colors||[]).map(c=>[c.id,c.color]));updateMeshes();return {colored:colors.size};
         case 'CLEAR_QC_APPEARANCE':colors.clear();updateMeshes();return {cleared:true};
         case 'FREECAM':setFreeCam(!!payload.enabled);publish();return {enabled:freeCam};

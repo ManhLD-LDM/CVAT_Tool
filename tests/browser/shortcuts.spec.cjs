@@ -106,7 +106,12 @@ test('placement controls persist, validate and reach keyboard command payloads',
     await page.locator('.c3d-title').click();
     await page.keyboard.press('Alt+Shift+G');
     await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='SNAP_GROUND').length)).toBe(1);
-    expect(await page.evaluate(()=>{const p=requests.find(r=>r.type==='SNAP_GROUND').payload;return [p.originGroundFallback,p.fallbackGroundHeight];})).toEqual([true,-.3]);
+    expect(await page.evaluate(()=>{const p=requests.find(r=>r.type==='SNAP_GROUND').payload;return [p.useOriginGround,p.fallbackGroundHeight];})).toEqual([true,-.3]);
+    await expect(page.locator('#c3d-btn-adjust')).toBeEnabled();await page.keyboard.press('Alt+Shift+B');await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_ADJUST').length)).toBe(1);
+    expect(await page.evaluate(()=>requests.find(r=>r.type==='AUTO_ADJUST').payload.fallbackGroundHeight)).toBe(-.3);
+    await expect(page.locator('#c3d-btn-autofit')).toBeEnabled();await page.locator('#c3d-btn-autofit').click();
+    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length)).toBe(1);
+    expect(await page.evaluate(()=>requests.find(r=>r.type==='AUTO_FIT').payload.fallbackGroundHeight)).toBe(-.3);
     await page.reload();await fixture(page);
     await expect(page.locator('#c3d-origin-ground')).toBeChecked();await expect(page.locator('#c3d-ground-height')).toHaveValue('-0.3');
     await expect(page.locator('#c3d-move-longitudinal')).toHaveValue('forward');await expect(page.locator('#c3d-move-lateral')).toHaveValue('right');
