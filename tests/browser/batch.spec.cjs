@@ -1,8 +1,8 @@
 const {test,expect}=require('@playwright/test'),fs=require('node:fs');
-async function setup(page){
+async function setup(page,stop=14){
  await page.setContent('<html data-c3d-demo="true"><body><input role="spinbutton" aria-valuemin="0" aria-valuemax="14" type="number" value="7"></body></html>');
- await page.evaluate(()=>{
-  const shapes=new Map([0,7,14].map(f=>[f,{frame:f,type:'cuboid',outside:false,points:[f*.1,0,.9,0,0,0,1.8,.8,1.6,0,0,0,0,0,0,0]}]));
+ await page.evaluate(stop=>{
+  const shapes=new Map([0,7,stop].map(f=>[f,{frame:f,type:'cuboid',outside:false,points:[f*.1,0,.9,0,0,0,1.8,.8,1.6,0,0,0,0,0,0,0]}]));
   const history=[],listeners=[],label={id:1,name:'two-wheels',color:'#a78bfa',attributes:[]};
   function stateAt(frame){
    const frames=[...shapes.keys()].sort((a,b)=>a-b),a=frames.filter(x=>x<=frame).at(-1),b=frames.find(x=>x>=frame);
@@ -18,7 +18,7 @@ async function setup(page){
    const n=String.fromCharCode(10);
    return new Blob([['VERSION .7','FIELDS x y z','SIZE 4 4 4','TYPE F F F','COUNT 1 1 1','WIDTH '+pts.length,'HEIGHT 1','POINTS '+pts.length,'DATA ascii',...pts.map(p=>p.join(' ')),''].join(n)]);
   }
-  const job={id:601,dimension:'3d',startFrame:0,stopFrame:14,labels:[label],actions:{get:async()=>({undo:history.map(h=>['CHANGED_POINTS',h.frame]),redo:[]})},
+  const job={id:601,dimension:'3d',startFrame:0,stopFrame:stop,labels:[label],actions:{get:async()=>({undo:history.map(h=>['CHANGED_POINTS',h.frame]),redo:[]})},
    annotations:{hasUnsavedChanges:()=>history.length>0,export:async()=>({tracks:[{clientID:5,id:42339,shapes:[...shapes.values()].sort((a,b)=>a.frame-b.frame)}]}),get:async frame=>[stateAt(frame)]},
    frames:{get:async frame=>({deleted:false,data:async()=>({imageData:blob(frame)})})}};
   let state;
@@ -29,7 +29,7 @@ async function setup(page){
   window.__store__={getState:()=>state,subscribe:fn=>{listeners.push(fn);return()=>{};},dispatch(action){if(action.type==='UPDATE_ANNOTATIONS_SUCCESS'){state.annotation.annotations.states=action.payload.states;notify();}}};
   document.querySelector('input[role=spinbutton]').addEventListener('keydown',e=>{if(e.key==='Enter'){state.annotation.player.frame.number=Number(e.target.value);state.annotation.annotations.states=[stateAt(Number(e.target.value))];notify();}});
   window.__batchFixture={shapes,history,job};
- });
+ },stop);
  await page.addStyleTag({content:fs.readFileSync('extension/styles.css','utf8')});
  await page.addScriptTag({content:fs.readFileSync('extension/copilot_main.js','utf8')});
  await page.addScriptTag({content:fs.readFileSync('extension/copilot_panel.js','utf8')});
@@ -86,4 +86,64 @@ test('batch dialog keyboard shortcuts do not trigger normal editor box edits',as
  await page.getByRole('dialog',{name:'Batch Track Review',exact:true}).press('Alt+Shift+A');
  expect(await page.evaluate(()=>window.batchRequests.includes('AUTO_FIT'))).toBe(false);
  expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+});
+
+
+test('60-frame compute retains cross-page selections and never reloads PCD on pagination',async({page})=>{
+ test.setTimeout(120000);
+ await setup(page,60);
+ await page.evaluate(()=>{window.batchReads=[];window.addEventListener('c3d:request:v2',e=>{const r=JSON.parse(e.detail);if(r.type==='BATCH_FRAME')window.batchReads.push(r.payload.frame);});});
+ await page.locator('[data-from]').fill('1');await page.locator('[data-to]').fill('60');
+ await page.locator('[data-action="load"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Computed 60 frames',{timeout:90000});
+ expect(await page.evaluate(()=>batchReads)).toEqual(Array.from({length:60},(_,i)=>i+1));
+ await expect(page.locator('.c3d-batch-card')).toHaveCount(7);
+ await page.locator('[data-accept="3"]').check();
+ await page.locator('[data-action="next"]').click();
+ await page.locator('[data-accept="10"]').check();
+ await expect(page.locator('[data-summary]')).toContainText('Selected 2');
+ await page.locator('[data-action="prev"]').click();
+ await expect(page.locator('[data-accept="3"]')).toBeChecked();
+ for(let i=0;i<8;i++)await page.locator('[data-action="next"]').click();
+ await expect(page.locator('.c3d-batch-card')).toHaveCount(4);
+ await expect(page.locator('.c3d-batch-card[data-frame="60"]')).toBeVisible();
+ for(let i=0;i<8;i++)await page.locator('[data-action="prev"]').click();
+ await expect(page.locator('[data-accept="3"]')).toBeChecked();
+ expect(await page.evaluate(()=>batchReads.length)).toBe(60);
+ const downloaded=page.waitForEvent('download');await page.locator('[data-action="export"]').click();
+ const download=await downloaded,preview=JSON.parse(fs.readFileSync(await download.path(),'utf8'));
+ expect(preview.frames).toHaveLength(60);
+ page.once('dialog',d=>d.accept());await page.locator('[data-action="apply"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Applied: 3, 10');
+ expect(await page.evaluate(()=>__batchFixture.history.map(h=>h.frame))).toEqual([3,10]);
+});
+
+test('inclusive range validation and cancellation never apply partial computation',async({page})=>{
+ await setup(page,60);
+ await page.locator('[data-from]').fill('0');await page.locator('[data-to]').fill('60');
+ await page.locator('[data-action="load"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('at most 60');
+ await page.locator('[data-from]').fill('1');
+ await page.evaluate(()=>{const get=__batchFixture.job.frames.get;__batchFixture.job.frames.get=async f=>{await new Promise(r=>setTimeout(r,100));return get(f);};});
+ await page.locator('[data-action="load"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Computing');
+ await page.locator('[data-action="cancel-compute"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Compute cancelled');
+ await expect(page.locator('[data-action="apply"]')).toBeDisabled();
+ expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+});
+
+
+test('failed computation blocks Apply and a fresh compute recovers',async({page})=>{
+ await setup(page,60);
+ await page.evaluate(()=>{const get=__batchFixture.job.frames.get;window.restoreFrames=()=>__batchFixture.job.frames.get=get;__batchFixture.job.frames.get=async f=>{if(f===10)throw new Error('Injected PCD failure');return get(f);};});
+ await page.locator('[data-from]').fill('1');await page.locator('[data-to]').fill('20');
+ await page.locator('[data-action="load"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Injected PCD failure');
+ await expect(page.locator('[data-action="apply"]')).toBeDisabled();
+ expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+ await page.evaluate(()=>restoreFrames());
+ await page.locator('[data-action="load"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Computed 20 frames');
+ await expect(page.locator('[data-action="apply"]')).toBeEnabled();
 });

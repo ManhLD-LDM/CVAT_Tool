@@ -4502,12 +4502,20 @@ function createBatchController(env){
   clouds.clear();
   const frames=t.shapes.map(x=>x.frame).sort((a,b)=>a-b);
   return {token:session.id,jobId:s.jobId,clientId,serverId:session.serverId,start,stop,keyframes:frames,
-   defaultStart:Math.max(start,frames[0]),defaultStop:Math.min(stop,Math.max(start,...frames.slice(0,3),frames[0]+6)),
+   defaultStart:Math.max(start,frames[0]),defaultStop:Math.min(stop,Math.max(start,frames[0]+6)),
    baseline:JSON.parse(JSON.stringify(t))};
  }
  function token(payload){current();if(payload.token!==session.id)throw new Error('Stale batch token');}
+ async function begin(payload){
+  token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');
+  frameCheck(payload.from);frameCheck(payload.to);
+  if(payload.from>payload.to||payload.to-payload.from+1>60)throw new Error('Select 1–60 frames inclusive');
+  await unchanged();token(payload);session.range=[payload.from,payload.to];session.proposals.clear();clouds.clear();
+  return {from:payload.from,to:payload.to};
+ }
  async function read(payload){
   token(payload);frameCheck(payload.frame);
+  if(session.range&&(payload.frame<session.range[0]||payload.frame>session.range[1]))throw new Error('Frame outside compute range');
   if(running)throw new Error('Batch apply in progress');
   const owned=session;await unchanged();
   const {state,states}=await stateAt(payload.frame);
@@ -4544,7 +4552,7 @@ function createBatchController(env){
  }
  async function apply(payload){
   token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');
-  if(!Array.isArray(payload.frames)||!payload.frames.length||payload.frames.length>20)throw new Error('Select 1–20 proposed frames');
+  if(!Array.isArray(payload.frames)||!payload.frames.length||payload.frames.length>60)throw new Error('Select 1–60 proposed frames');
   const frames=[...new Set(payload.frames)].sort((a,b)=>a-b);
   const plan=[];
   await unchanged();token(payload);
@@ -4560,7 +4568,9 @@ function createBatchController(env){
   running=true;session.consumed=true;env.lock(true);
   const applied=[];let error=null;
   try{
-   for(const item of plan){
+   for(let index=0;index<plan.length;index++){
+    if(index>0&&index%20===0)await new Promise(resolve=>setTimeout(resolve,0));
+    const item=plan[index];
     await unchanged();token(payload);env.assertEditable();
     const {state}=await stateAt(item.frame);token(payload);
     if(state.keyframe||state.lock||state.isGroundTruth)throw new Error('Frame protected during apply');
@@ -4582,7 +4592,7 @@ function createBatchController(env){
   return {appliedFrames:applied,error,partial:!!error,undo:'Each applied frame has its own native Undo entry. Save CVAT to persist.'};
  }
  function cancel(){if(running)throw new Error('Apply already started; wait for result');session=null;clouds.clear();return {cancelled:true};}
- return {open,read,protect,apply,cancel};
+ return {open,begin,read,protect,apply,cancel};
 }
 root.__C3D_CREATE_BATCH_CONTROLLER=createBatchController;
 if(typeof module!=='undefined')module.exports={createBatchController};
@@ -5152,6 +5162,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
             switch (type) {
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
                 case 'BATCH_OPEN': {validate(payload.ref);if(!batchController)throw new Error('Batch module unavailable');return batchController.open(payload.ref.clientId);}
+                case 'BATCH_BEGIN': if(!batchController)throw new Error('Batch module unavailable');return batchController.begin(payload);
                 case 'BATCH_FRAME': if(!batchController)throw new Error('Batch module unavailable');return batchController.read(payload);
                 case 'BATCH_PROTECT': if(!batchController)throw new Error('Batch module unavailable');return batchController.protect(payload);
                 case 'BATCH_APPLY': if(!batchController)throw new Error('Batch module unavailable');return batchController.apply(payload);
@@ -5188,7 +5199,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.14.4',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.14.5',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};

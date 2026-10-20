@@ -1,4 +1,12 @@
-# CVAT 3D TOOL 1.14.4
+# CVAT 3D TOOL 1.14.5
+
+## Batch Track Review — 1.14.5
+
+Compute an inclusive range of up to 60 frames (for example 24–83). Frames are read sequentially; only two full point clouds are cached. All sampled previews are retained and shown seven per page. Pagination does not recompute or clear accepted proposals. Cancel compute stops after the current frame and disables Apply until a full recompute succeeds.
+
+Apply collects reviewed selections across all pages (up to 60), preflights the entire plan, then writes one native edit per frame, yielding between groups of 20. Errors stop remaining edits and report applied frames; this is not an atomic transaction. Applied frames become native keyframes, each with Undo; Save CVAT to persist. Reopen the preview after applying or editing a track.
+
+Position refinement, ground confidence thresholds, dimensions/yaw preservation, neighbor filtering and anchor protection are unchanged. This does not add sensor-motion compensation or semantic tracking.
 
 ## Selectable ground base — 1.14.4
 
@@ -79,7 +87,7 @@ Dự án tích hợp 2 hệ thống phối hợp đồng bộ:
 
 ---
 
-## Batch Track Review — 1.8.0
+## Batch Track Review — workflow (updated 1.14.5)
 
 Bản đầu của quy trình chỉnh cùng một vật thể qua nhiều frame, lấy cảm hứng workflow SUSTechPOINTS và tự triển khai tích hợp CVAT. Chưa phải tracker có bù chuyển động cảm biến.
 
@@ -88,9 +96,9 @@ Bản đầu của quy trình chỉnh cùng một vật thể qua nhiều frame,
 3. Box cam là geometry hiện tại, xanh là đề xuất vị trí. Tool giữ nguyên kích thước, yaw, roll/pitch; tinh chỉnh chỉ hỗ trợ upright box. Nếu ground đủ tin cậy có thể điều chỉnh Z, nếu không thì giữ Z.
 4. Keyframe native hiện có (ví dụ 0,7,14) luôn được bảo vệ. **Protect this frame** chỉ bảo vệ thêm trong phiên batch hiện tại; đóng/mở lại sẽ không giữ bảo vệ tạm này.
 5. Chỉ đề xuất frame nằm giữa hai keyframe có vật thể hiện diện. Không tự suy ra tracking từ sau keyframe cuối hoặc qua outside/che khuất. Point support, mức dịch chuyển và độ lớn cụm được kiểm tra để chặn đề xuất không hợp lý; đây là chỉ báo hình học, không phải xác suất tracker đúng.
-6. Tick **Accept this proposal** cho frame đã xem, rồi **Apply selected position proposals**. Tối đa 20 frame/lần (UI chọn trong trang 7 frame đang xem). Chỉ ghi các frame được chọn; giữ nguyên track ID, keyframe gốc và frame bảo vệ. Mỗi frame là một native Undo entry; không có Undo gộp toàn batch.
+6. Tick **Accept this proposal** cho frame đã xem, rồi **Apply selected position proposals**. Compute tối đa 60 frame tính cả hai đầu; lựa chọn được giữ khi chuyển trang. Apply nhận lựa chọn từ mọi trang và ghi tuần tự, nhường UI sau mỗi nhóm 20 frame. Chỉ ghi các frame được chọn; giữ nguyên track ID, keyframe gốc và frame bảo vệ. Mỗi frame là một native Undo entry; không có Undo gộp toàn batch.
 7. **Open in CVAT** chuyển tới đúng frame/track rồi đóng preview chưa áp dụng. Chỉnh tay một mốc trong CVAT, mở lại batch để tính theo mốc mới.
-8. **Export preview (.json)** xuất baseline, đề xuất và ROI đã lấy mẫu của trang đang xem để chẩn đoán. Không phải định dạng import annotation hoặc full raw point-cloud sequence.
+8. **Export preview (.json)** xuất baseline, đề xuất và ROI đã lấy mẫu của toàn khoảng đã Compute để chẩn đoán. Không phải định dạng import annotation hoặc full raw point-cloud sequence.
 
 Preview không ghi annotation. Apply dùng ObjectState.save và cập nhật editor/history, không REST PATCH hay tự Save server. Track đổi trong lúc preview sẽ bị chặn; workspace review/đang vẽ/box khóa cũng bị chặn khi apply. Lỗi giữa chừng trả danh sách frame đã ghi; kiểm tra Undo/history trước khi thử lại, không tự rollback giả. Sau apply phải đóng/mở lại preview.
 

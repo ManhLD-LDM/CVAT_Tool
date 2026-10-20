@@ -7,8 +7,8 @@ function cloud(frame){
  for(let x=-.9;x<=.91;x+=.1)for(let y=-.4;y<=.41;y+=.1)for(const z of [.35,.7,1.1,1.6])out.push(cx+x,cy+y,z);
  return new Float32Array(out);
 }
-function fixture(){
- const shapes=new Map([0,7,14].map(f=>[f,{frame:f,points:[f*.1,0,.9,0,0,0,1.8,.8,1.6,0,0,0,0,0,0,0],outside:false,type:'cuboid'}]));
+function fixture(stop=14){
+ const shapes=new Map([0,7,stop].map(f=>[f,{frame:f,points:[f*.1,0,.9,0,0,0,1.8,.8,1.6,0,0,0,0,0,0,0],outside:false,type:'cuboid'}]));
  const history=[],snapshot={sessionId:'test',jobId:601,frame:7,boxes:[{id:5,objectType:'track'}]};
  let loads=0,refreshes=0,locked=false,failFrame=null,editable=true;
  const exportTrack=()=>({clientID:5,id:42339,label_id:1,frame:0,shapes:[...shapes.values()].sort((a,b)=>a.frame-b.frame).map(s=>structuredClone(s))});
@@ -19,7 +19,7 @@ function fixture(){
   return {clientID:5,serverID:42339,shapeType:'cuboid',objectType:'track',frame,keyframe:shapes.has(frame),points:p,outside:false,label:{name:'two-wheels'},
    async save(){if(frame===failFrame)throw new Error('injected save failure');history.push(frame);shapes.set(frame,{frame,points:this.points.slice(),outside:false,type:'cuboid'});return this;}};
  }
- const job={id:601,startFrame:0,stopFrame:14,annotations:{export:async()=>({tracks:[exportTrack()]}),get:async f=>[stateAt(f)]},
+ const job={id:601,startFrame:0,stopFrame:stop,annotations:{export:async()=>({tracks:[exportTrack()]}),get:async f=>[stateAt(f)]},
   frames:{get:async f=>({deleted:false,data:async()=>{loads++;return {imageData:new Blob([cloud(f).buffer])};}})}};
  let currentJob=job;
  const controller=createBatchController({math,batchMath,job:()=>currentJob,snapshot:()=>snapshot,parsePCD:buffer=>new Float32Array(buffer),
@@ -98,4 +98,43 @@ test('a track with no following anchor is review-only, never blindly propagated'
  const meta=await f.controller.open(5),card=await f.controller.read({token:meta.token,frame:3});
  assert.equal(card.status,'review');assert.equal(card.proposed,undefined);assert.match(card.flags.join(' '),/bounding keyframes/);
  await assert.rejects(f.controller.apply({token:meta.token,frames:[3]}),/editable proposal/);assert.equal(f.history.length,0);
+});
+
+
+test('compute range reads all 60 frames with bounded clouds, then applies cross-page proposals preserving anchors',async()=>{
+ const f=fixture(60),meta=await f.controller.open(5),anchors=structuredClone(f.exportTrack().shapes);
+ await assert.rejects(f.controller.begin({token:meta.token,from:0,to:60}),/frames inclusive/);
+ await f.controller.begin({token:meta.token,from:1,to:60});
+ const cards=[];
+ for(let frame=1;frame<=60;frame++)cards.push(await f.controller.read({token:meta.token,frame}));
+ assert.equal(cards.length,60);assert.equal(f.loads,60);assert.equal(f.history.length,0);
+ const selected=cards.filter(c=>c.status==='proposal').map(c=>c.frame);
+ assert.ok(selected.length>20);
+ const result=await f.controller.apply({token:meta.token,frames:selected});
+ assert.equal(result.error,null);assert.deepEqual(result.appliedFrames,selected);
+ for(const anchor of anchors)assert.deepEqual(f.shapes.get(anchor.frame),anchor);
+ for(const frame of selected)assert.deepEqual(f.shapes.get(frame).points.slice(3),anchors[0].points.slice(3));
+});
+
+test('begin restricts preview range and stale recompute cannot overwrite proposals',async()=>{
+ const f=fixture(60),meta=await f.controller.open(5);
+ await f.controller.begin({token:meta.token,from:24,to:44});
+ await assert.rejects(f.controller.read({token:meta.token,frame:23}),/compute range/);
+ await f.controller.read({token:meta.token,frame:25});
+ f.shapes.get(7).points[0]+=.1;
+ await assert.rejects(f.controller.begin({token:meta.token,from:1,to:60}),/Track changed/);
+ assert.equal(f.history.length,0);
+});
+
+
+test('apply failure after twenty edits stops remaining frames and retains accurate native history',async()=>{
+ const f=fixture(60),meta=await f.controller.open(5),cards=[];
+ await f.controller.begin({token:meta.token,from:1,to:60});
+ for(let frame=1;frame<=60;frame++)cards.push(await f.controller.read({token:meta.token,frame}));
+ const selected=cards.filter(c=>c.status==='proposal').map(c=>c.frame);
+ assert.ok(selected.length>21);f.fail(selected[21]);
+ const result=await f.controller.apply({token:meta.token,frames:selected});
+ assert.equal(result.partial,true);assert.match(result.error,/save failed/);
+ assert.deepEqual(result.appliedFrames,selected.slice(0,21));assert.deepEqual(f.history,result.appliedFrames);
+ assert.equal(f.locked,false);assert.equal(f.refreshes,1);
 });
