@@ -1,4 +1,17 @@
-# CVAT 3D TOOL 1.16.0
+# CVAT 3D TOOL 1.17.1
+
+
+## Batch Size Update — 1.17.0
+
+Chọn một cuboid **track** → **Batch Size Update** → nhập **Dài × Rộng × Cao (m)** → chọn khoảng frame → **Xem trước** → **Xác nhận áp dụng** → **Save CVAT**. Kích thước ban đầu lấy từ box đang chọn; dùng **Toàn job** để chọn toàn phạm vi (tối đa 1000 frame/lần, tính cả hai đầu: 24–44 là 21 frame).
+
+- Áp dụng cho đúng một track, kể cả keyframe hiện có; giữ clientID/serverID, X/Y và góc xoay từng frame. Đây là thao tác chỉnh tay hàng loạt, độc lập với bảo vệ keyframe của Batch Track Review.
+- Mặc định **giữ cao độ đáy** từng frame (hỗ trợ box nghiêng); có thể đổi sang **giữ tâm XYZ**. Giữ đáy không phải ground snap: đáy đang lệch mặt đường vẫn giữ độ lệch đó.
+- Không tải LiDAR, không đổi class/subtype hay attributes. Frame outside/không có track được bỏ qua; box khóa hoặc ground truth trong vùng sửa/biên cần ghi sẽ chặn toàn thao tác trước khi ghi.
+- Chụp geometry gốc trước khi sửa; thêm keyframe giữ nguyên hình học ở frame ngay trước/sau phạm vi nếu cần, để nội suy không ảnh hưởng frame bên ngoài. Xem trước liệt kê rõ các frame biên. Các frame được sửa trở thành keyframe; Undo native cho từng lần ghi, không gộp cả batch.
+- Phát hiện track/job thay đổi sau preview; ghi tuần tự, nhường UI mỗi 20 lần, kiểm tra geometry sau native save và refresh render. Nếu lỗi giữa chừng, dừng và báo các frame đã xác nhận; không rollback tự động. Cần Save CVAT để lưu server.
+
+Kiểm thử dùng native adapter/controller và browser fixtures; chưa xác nhận thao tác trên job CVAT thật trong đợt này.
 
 ## JSON export/import giữ ID hiển thị — 1.16.0
 
@@ -20,7 +33,7 @@ For this unpacked, outside-store distribution, users still Save CVAT, disable th
 
 ## GitHub updater + save before Reload — 1.15.0
 
-HUD checks the latest stable GitHub Release once when mounted and on Reload; there is no periodic scan. The small status distinguishes current, newer release, local build ahead, and unavailable (offline/private/rate-limited/no release). If a newer release exists, Reload offers **Cập nhật** and **Reload bản hiện tại**; it does not install automatically.
+HUD checks the latest stable GitHub Release once when mounted; there is no periodic scan. Two buttons remain visible: **Update online** checks GitHub again and installs a newer stable release if available; **Reload local** saves pending CVAT edits and reloads the currently installed extension without waiting for GitHub or requiring the Windows updater. Local means the folder currently loaded by the browser, not a Git pull or copying changes from a separate source checkout. Both actions keep the native save/reload guards. The status distinguishes current, newer release, local build ahead, and unavailable (offline/private/rate-limited/no release).
 
 Windows updates require a one-time per-user Native Messaging setup. The original 1.15.0 ZIP installer required Python 3.10+ and manual ID entry; current Setup.exe bundles the runtime and registers the ID automatically. The installer creates `%LOCALAPPDATA%\CVAT-3D-Tool\extension`, separate from the source checkout. Load this unpacked copy and disable the old copy. Moving folders changes an unpacked extension's ID; settings may need to be configured again. See [installer instructions](updater/README.md).
 
@@ -119,7 +132,7 @@ Dự án tích hợp 2 hệ thống phối hợp đồng bộ:
 ### 💡 Cách Cập Nhật Extension Cực Nhanh (Không Cần Xóa / Tải Lại):
 > [!TIP]
 > **Annotator tuyệt đối không cần xóa extension và load lại mỗi khi có bản cập nhật mới!**
-> 1. **Ngay trong CVAT**: Bấm **Reload** để kiểm tra release. Có bản mới thì chọn **Cập nhật** (cần updater Windows); nếu không, tool lưu CVAT rồi nạp lại bản trên máy. Khi GitHub không truy cập được, có thể chọn **Reload bản hiện tại**.
+> 1. **Ngay trong CVAT**: Bấm **Update online** để kiểm tra và cài release mới (cần updater Windows). Bấm **Reload local** để lưu CVAT rồi nạp lại bản đang cài ngay, không chờ kiểm tra GitHub.
 > 2. **Trang Extensions**: Nút Reload của trình duyệt chỉ nạp mã từ ổ đĩa và không đi qua cơ chế lưu của tool. Hãy Save CVAT trước khi dùng.
 > 3. **Dành cho developer**: Tự cập nhật source bằng Git, build lại bundle rồi dùng HUD Reload. Updater Windows không thay đổi source checkout.
 

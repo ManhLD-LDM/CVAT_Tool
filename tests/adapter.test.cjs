@@ -380,6 +380,20 @@ test('focus selects exact clientID and frames all vertices while preserving view
  assert.equal(h.history.length,0);h.adapter.dispose();
 });
 
+test('batch size uses native save, refreshes render and preserves identity without frame cloud APIs',async()=>{
+ const {createBatchSizeController}=require('../extension/batch_size.js');
+ const h=harness({adapterEnv:{batchSizeFactory:createBatchSizeController}}),job=h.state.annotation.job.instance;
+ job.startFrame=29;job.stopFrame=29;const state=h.state.annotation.annotations.states[0];state.objectType='track';state.keyframe=true;
+ job.annotations.export=async()=>({tracks:[{clientID:1,id:99,shapes:[{frame:29,points:state.points.slice(),type:'cuboid',outside:false}]}]});
+ job.annotations.get=async()=>h.state.annotation.annotations.states;
+ assert.equal(h.adapter.getSnapshot().capabilities.batchSize,true);assert.equal(job.frames,undefined);
+ const meta=await h.adapter.command('BATCH_SIZE_OPEN',{ref:h.ref(1)});
+ const plan=await h.adapter.command('BATCH_SIZE_PREVIEW',{token:meta.token,from:29,to:29,dimensions:[4.5,1.8,1.5],anchor:'bottom'});
+ const result=await h.adapter.command('BATCH_SIZE_APPLY',plan);assert.equal(result.error,null);assert.deepEqual(result.appliedFrames,[29]);
+ assert.equal(state.clientID,1);assert.equal(state.serverID,99);assert.deepEqual(state.points.slice(6,9),[4.5,1.8,1.5]);assert.equal(state.points[2],.75);
+ assert.equal(h.adapter.getSnapshot().saveState,'unsaved');assert.ok(h.actions.some(x=>x.type==='UPDATE_ANNOTATIONS_SUCCESS'));h.adapter.dispose();
+});
+
 test('batch commands use native unsaved collection and protect clientID keyframes',async()=>{
  const {createBatchController}=require('../extension/batch_controller.js'),batchMath=require('../extension/batch_math.js');
  const h=harness({adapterEnv:{batchFactory:createBatchController,batchMath,parsePCD:b=>new Float32Array(b)}});

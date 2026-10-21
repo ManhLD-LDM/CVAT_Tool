@@ -2,7 +2,7 @@
 (function(root){
 'use strict';
 function mount(env){
- const runtime=globalThis.chrome?.runtime;if(!runtime?.id)return {dispose(){}};
+ const runtime=globalThis.chrome?.runtime;if(!runtime?.id){for(const button of env.root.querySelectorAll('[data-update-install],[data-update-local]')){button.disabled=true;button.title='Chỉ dùng trong extension';}return {dispose(){}};}
  const node=env.root.querySelector('[data-update-status]'),install=env.root.querySelector('[data-update-install]'),local=env.root.querySelector('[data-update-local]'),setup=env.root.querySelector('[data-update-setup]');
  let disposed=false,busy=false,hold=null,releaseTimer=null;
  async function send(type,rest={}){const response=await runtime.sendMessage({type,...rest});if(!response?.ok)throw new Error(response?.error||'Không liên lạc được updater');return response.result;}
@@ -11,23 +11,25 @@ function mount(env){
   const labels={current:'Đã cập nhật',ahead:'Bản trên máy mới hơn release',available:'Có bản mới '+result.latest,unavailable:'Chưa kiểm tra được cập nhật'};
   node.textContent=labels[result.state]||result.message||'Đang kiểm tra cập nhật…';node.dataset.state=result.state||'checking';
   node.title=result.error||('Đang dùng '+runtime.getManifest().version+' · '+(result.latest?'GitHub '+result.latest:'GitHub Releases'));
-  install.hidden=result.state!=='available';local.hidden=!['available','unavailable'].includes(result.state);
+  install.hidden=false;local.hidden=false;
  }
+ function controls(value){busy=value;if(disposed)return;install.disabled=value;local.disabled=value;}
  async function check(){show({message:'Đang kiểm tra cập nhật…'});const result=await send('C3D_UPDATE_CHECK');show(result);return result;}
  async function run(installUpdate=false){
-  if(busy)return;busy=true;
+  if(busy)return;controls(true);
   try{
    node.textContent=installUpdate?'Đang tải/kiểm tra bản cập nhật…':'Đang lưu CVAT để reload…';
    await env.flush();await send('C3D_SAFE_RELOAD',{install:installUpdate});
   }catch(error){node.textContent=error.message;node.dataset.state='unavailable';setup.hidden=false;local.hidden=false;env.toast(error.message,true);}
-  finally{busy=false;}
+  finally{controls(false);}
  }
- async function reload(){
-  if(busy)return;busy=true;
-  try{const result=await check();if(result.state==='available')env.toast('Có bản '+result.latest+'. Nhấn Cập nhật để cài; CVAT sẽ được lưu trước khi reload.');
-   else if(result.state==='current'||result.state==='ahead'){busy=false;await run(false);}}
+ async function updateOnline(){
+  if(busy)return;controls(true);
+  try{const result=await check();if(disposed)return;
+   if(result.state==='available'){controls(false);await run(true);}
+   else env.toast(result.state==='unavailable'?(result.error||'Chưa kiểm tra được cập nhật'):result.state==='ahead'?'Bản local mới hơn release; giữ nguyên bản đang cài.':'Tool đang ở bản mới nhất.',result.state==='unavailable');}
   catch(error){show({state:'unavailable',error:error.message});}
-  finally{busy=false;}
+  finally{controls(false);}
  }
  async function release(){
   clearTimeout(releaseTimer);hold?.remove();hold=null;
@@ -56,9 +58,9 @@ function mount(env){
   })().then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));return true;
  }
  setup.hidden=false;
- install.onclick=()=>run(true);local.onclick=()=>run(false);setup.onclick=()=>send('C3D_UPDATER_SETUP').catch(error=>env.toast(error.message,true));
+ install.onclick=updateOnline;local.onclick=()=>run(false);setup.onclick=()=>send('C3D_UPDATER_SETUP').catch(error=>env.toast(error.message,true));
  runtime.onMessage.addListener(listener);check().catch(error=>show({state:'unavailable',error:error.message}));
- return {reload,isHolding:()=>!!hold,dispose(){disposed=true;runtime.onMessage.removeListener(listener);release();}};
+ return {reload:()=>run(false),updateOnline,isHolding:()=>!!hold,dispose(){disposed=true;install.onclick=null;local.onclick=null;setup.onclick=null;runtime.onMessage.removeListener(listener);release();}};
 }
 root.__C3D_UPDATE_CLIENT={mount};
 })(typeof window!=='undefined'?window:globalThis);

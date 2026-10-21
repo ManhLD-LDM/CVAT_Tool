@@ -1077,6 +1077,63 @@ root.__C3D_BATCH_UI={mount};
 })(typeof window!=='undefined'?window:globalThis);
 
 ;
+(function(root){
+'use strict';
+function mount(env){
+ const button=env.root.querySelector('#c3d-batch-size');let dialog=null,meta=null,plan=null,busy=false,disposed=false;
+ function status(text){if(dialog)dialog.querySelector('[role=status]').textContent=text;}
+ function invalidate(){plan=null;if(dialog)dialog.querySelector('[data-apply]').disabled=true;}
+ function setBusy(v){busy=v;if(!dialog)return;for(const el of dialog.querySelectorAll('button,input,select'))el.disabled=v;dialog.querySelector('[data-apply]').disabled=v||!plan||!plan.frames.length;}
+ function close(){if(busy)return;dialog?.remove();dialog=null;meta=null;plan=null;env.request('BATCH_SIZE_CANCEL').catch(()=>{});}
+ async function open(){
+  if(dialog||busy||disposed)return;busy=true;
+  try{
+   const s=env.snapshot();meta=await env.request('BATCH_SIZE_OPEN',{ref:env.reference(s.activeBoxId)});
+   if(disposed)return;
+   dialog=document.createElement('dialog');dialog.className='c3d-size-dialog';dialog.setAttribute('aria-label','Batch Size Update');
+   dialog.innerHTML='<header><h2>Batch Size Update</h2><button data-close>Đóng</button></header><p data-info></p>'+
+    '<p>Đồng bộ kích thước một track, kể cả keyframe. Giữ ID, vị trí X/Y và góc xoay từng frame. Không cần tải LiDAR.</p>'+
+    '<div class="c3d-size-fields"><label>Từ frame <input data-from type="number" step="1"></label><label>Đến frame <input data-to type="number" step="1"></label><button data-all>Toàn job</button></div>'+
+    '<div class="c3d-size-fields"><label>Dài L (m) <input data-l type="number" min="0.01" max="100" step="0.01"></label><label>Rộng W (m) <input data-w type="number" min="0.01" max="100" step="0.01"></label><label>Cao H (m) <input data-h type="number" min="0.01" max="100" step="0.01"></label></div>'+
+    '<label>Mốc giữ cố định <select data-anchor><option value="bottom">Giữ cao độ đáy từng frame</option><option value="center">Giữ tâm XYZ từng frame</option></select></label>'+
+    '<p>Giữ đáy chỉ giữ cao độ đáy box hiện có; không tự snap xuống mặt đường. Frame outside được bỏ qua. Track bị khóa / ground truth sẽ chặn thao tác. Tối đa 1000 frame/lần, tính cả hai đầu.</p>'+
+    '<button data-preview>Xem trước</button><p role="status" aria-live="polite"></p>'+
+    '<footer><button data-apply disabled>Xác nhận áp dụng</button><p>Native Undo cho từng lần ghi. Có thể thêm keyframe biên để giữ hình học ngoài khoảng. Các frame được sửa trở thành keyframe. Nhấn Save CVAT để lưu.</p></footer>';
+   document.body.append(dialog);dialog.showModal();dialog.addEventListener('keydown',e=>e.stopPropagation());
+   dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
+   dialog.querySelector('[data-info]').textContent='Job '+meta.jobId+' · Track #'+meta.clientId+' · Frame hiện tại '+meta.frame;
+   for(const name of ['from','to']){const input=dialog.querySelector('[data-'+name+']');input.min=meta.start;input.max=meta.stop;input.value=name==='from'?meta.start:Math.min(meta.stop,meta.start+999);}
+   ['l','w','h'].forEach((n,i)=>dialog.querySelector('[data-'+n+']').value=Number(meta.dimensions[i].toFixed(6)));
+   dialog.querySelector('[data-close]').onclick=close;
+   dialog.querySelector('[data-all]').onclick=()=>{dialog.querySelector('[data-from]').value=meta.start;dialog.querySelector('[data-to]').value=meta.stop;invalidate();status('Đã chọn toàn job. Xem trước để kiểm tra phạm vi.');};
+   for(const el of dialog.querySelectorAll('input,select'))el.addEventListener('input',invalidate);
+   dialog.querySelector('[data-preview]').onclick=preview;
+   dialog.querySelector('[data-apply]').onclick=apply;status('Kích thước khởi đầu lấy từ box đang chọn. Nhập kích thước và xem trước.');
+  }catch(e){env.toast(e.message,true);}finally{setBusy(false);}
+ }
+ async function preview(){
+  invalidate();setBusy(true);status('Đang đọc annotation…');
+  try{
+   plan=await env.request('BATCH_SIZE_PREVIEW',{token:meta.token,from:dialog.querySelector('[data-from]').valueAsNumber,to:dialog.querySelector('[data-to]').valueAsNumber,
+    dimensions:['l','w','h'].map(n=>dialog.querySelector('[data-'+n+']').valueAsNumber),anchor:dialog.querySelector('[data-anchor]').value});
+   status('Track #'+plan.clientId+' · Frame '+plan.from+'–'+plan.to+' · '+plan.dimensions.join(' × ')+' m · '+(plan.anchor==='bottom'?'Giữ đáy':'Giữ tâm')+'\nSẽ sửa '+plan.frames.length+' frame (gồm '+plan.keyframes+' keyframe hiện có). Bỏ qua outside: '+plan.skipped.length+'; đã đúng kích thước: '+plan.unchanged.length+'.\nKeyframe biên giữ nguyên hình học: '+(plan.boundaryFrames.join(', ')||'không cần')+'. Chỉ nhấn xác nhận nếu đúng track và phạm vi.');
+  }catch(e){plan=null;status(e.message);}finally{setBusy(false);}
+ }
+ async function apply(){
+  if(!plan||busy)return;setBusy(true);status('Đang áp dụng qua native CVAT…');
+  try{
+   const result=await env.request('BATCH_SIZE_APPLY',{token:meta.token,planId:plan.planId});
+   status('Đã sửa '+result.appliedFrames.length+' frame; thêm '+result.boundaryFrames.length+' keyframe biên.'+(result.error?'\nDừng: '+result.error:'')+'\n'+(result.saveRequired?'Nhấn Save CVAT để lưu. Native Undo có thể hoàn tác từng lần ghi.':'Không có thay đổi được xác nhận.')+'\nĐóng và mở lại Batch Size Update để thực hiện lượt mới.');
+   plan=null;dialog.querySelector('[data-preview]').hidden=true;
+  }catch(e){plan=null;status(e.message+' · Kiểm tra CVAT trước khi thử lại.');}finally{setBusy(false);}
+ }
+ button?.addEventListener('click',open);
+ return {dispose(){disposed=true;button?.removeEventListener('click',open);dialog?.remove();dialog=null;if(!busy)env.request('BATCH_SIZE_CANCEL').catch(()=>{});}};
+}
+root.__C3D_BATCH_SIZE_UI={mount};
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+;
 /* Isolated content world: same-origin requests retain CVAT's session/CSRF.
  * Runtime-only messages; no API operation or credentials use CustomEvent. */
 function createSessionTransport(env) {
@@ -1220,7 +1277,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
 (function(root){
 'use strict';
 function mount(env){
- const runtime=globalThis.chrome?.runtime;if(!runtime?.id)return {dispose(){}};
+ const runtime=globalThis.chrome?.runtime;if(!runtime?.id){for(const button of env.root.querySelectorAll('[data-update-install],[data-update-local]')){button.disabled=true;button.title='Chỉ dùng trong extension';}return {dispose(){}};}
  const node=env.root.querySelector('[data-update-status]'),install=env.root.querySelector('[data-update-install]'),local=env.root.querySelector('[data-update-local]'),setup=env.root.querySelector('[data-update-setup]');
  let disposed=false,busy=false,hold=null,releaseTimer=null;
  async function send(type,rest={}){const response=await runtime.sendMessage({type,...rest});if(!response?.ok)throw new Error(response?.error||'Không liên lạc được updater');return response.result;}
@@ -1229,23 +1286,25 @@ function mount(env){
   const labels={current:'Đã cập nhật',ahead:'Bản trên máy mới hơn release',available:'Có bản mới '+result.latest,unavailable:'Chưa kiểm tra được cập nhật'};
   node.textContent=labels[result.state]||result.message||'Đang kiểm tra cập nhật…';node.dataset.state=result.state||'checking';
   node.title=result.error||('Đang dùng '+runtime.getManifest().version+' · '+(result.latest?'GitHub '+result.latest:'GitHub Releases'));
-  install.hidden=result.state!=='available';local.hidden=!['available','unavailable'].includes(result.state);
+  install.hidden=false;local.hidden=false;
  }
+ function controls(value){busy=value;if(disposed)return;install.disabled=value;local.disabled=value;}
  async function check(){show({message:'Đang kiểm tra cập nhật…'});const result=await send('C3D_UPDATE_CHECK');show(result);return result;}
  async function run(installUpdate=false){
-  if(busy)return;busy=true;
+  if(busy)return;controls(true);
   try{
    node.textContent=installUpdate?'Đang tải/kiểm tra bản cập nhật…':'Đang lưu CVAT để reload…';
    await env.flush();await send('C3D_SAFE_RELOAD',{install:installUpdate});
   }catch(error){node.textContent=error.message;node.dataset.state='unavailable';setup.hidden=false;local.hidden=false;env.toast(error.message,true);}
-  finally{busy=false;}
+  finally{controls(false);}
  }
- async function reload(){
-  if(busy)return;busy=true;
-  try{const result=await check();if(result.state==='available')env.toast('Có bản '+result.latest+'. Nhấn Cập nhật để cài; CVAT sẽ được lưu trước khi reload.');
-   else if(result.state==='current'||result.state==='ahead'){busy=false;await run(false);}}
+ async function updateOnline(){
+  if(busy)return;controls(true);
+  try{const result=await check();if(disposed)return;
+   if(result.state==='available'){controls(false);await run(true);}
+   else env.toast(result.state==='unavailable'?(result.error||'Chưa kiểm tra được cập nhật'):result.state==='ahead'?'Bản local mới hơn release; giữ nguyên bản đang cài.':'Tool đang ở bản mới nhất.',result.state==='unavailable');}
   catch(error){show({state:'unavailable',error:error.message});}
-  finally{busy=false;}
+  finally{controls(false);}
  }
  async function release(){
   clearTimeout(releaseTimer);hold?.remove();hold=null;
@@ -1274,9 +1333,9 @@ function mount(env){
   })().then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));return true;
  }
  setup.hidden=false;
- install.onclick=()=>run(true);local.onclick=()=>run(false);setup.onclick=()=>send('C3D_UPDATER_SETUP').catch(error=>env.toast(error.message,true));
+ install.onclick=updateOnline;local.onclick=()=>run(false);setup.onclick=()=>send('C3D_UPDATER_SETUP').catch(error=>env.toast(error.message,true));
  runtime.onMessage.addListener(listener);check().catch(error=>show({state:'unavailable',error:error.message}));
- return {reload,isHolding:()=>!!hold,dispose(){disposed=true;runtime.onMessage.removeListener(listener);release();}};
+ return {reload:()=>run(false),updateOnline,isHolding:()=>!!hold,dispose(){disposed=true;install.onclick=null;local.onclick=null;setup.onclick=null;runtime.onMessage.removeListener(listener);release();}};
 }
 root.__C3D_UPDATE_CLIENT={mount};
 })(typeof window!=='undefined'?window:globalThis);
@@ -1446,7 +1505,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
+    let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -1544,11 +1603,11 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
         root.innerHTML=`
-            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Kiểm tra bản mới, lưu CVAT rồi reload" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
-            <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install hidden>Cập nhật</button><button data-update-local hidden>Reload bản hiện tại</button><button data-update-setup hidden>Cài updater</button></div>
+            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install title="Kiểm tra và cài release mới từ GitHub">Update online</button><button data-update-local title="Lưu CVAT và nạp lại bản đang cài, không chờ GitHub">Reload local</button><button data-update-setup hidden>Cài updater</button></div>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
+                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-batch-size" class="c3d-btn-secondary">Batch Size Update</button></div><div class="c3d-action-grid"><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
                 <div style="margin-top:4px;">
                     <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
                 </div>
@@ -1587,13 +1646,10 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.16.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.17.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
-        el('c3d-btn-reload')?.addEventListener('click',()=>{
-            if(updateUI?.reload)updateUI.reload();else toast('Demo không có updater; chỉ cập nhật được trong extension.',true);
-        });
         function getJobId() {
             let id = snapshot?.jobId;
             if (!id) {
@@ -1657,6 +1713,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         el('c3d-preset-save').onclick=()=>editPreset();el('c3d-preset-reset').onclick=()=>editPreset(true);
         // Placement requires hovering the canvas; the button explains its shortcut.
         el('c3d-btn-move').addEventListener('click',()=>toast(`Hover over the object in the top view, then press ${shortcuts.format(settings.bindings.MOVE_TO_MOUSE)}${settings.bindings.MOVE_TO_MOUSE?'':' (assign a shortcut in settings)'}`));
+        batchSizeUI=window.__C3D_BATCH_SIZE_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
         batchUI=window.__C3D_BATCH_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
 
         el('c3d-session').disabled=!globalThis.chrome?.runtime?.id;
@@ -1737,6 +1794,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         el('c3d-btn-move').disabled=!canEdit||!cap.moveToMouse||!settingsReady;
         refreshShortcutHints();
         el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
+        el('c3d-batch-size').disabled=!box||box.objectType!=='track'||!cap.batchSize||!cap.edit||busy;
         el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
         el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
@@ -1825,10 +1883,10 @@ root.__C3D_ANNOTATION_IO_UI={mount};
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){closeSettings();batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }

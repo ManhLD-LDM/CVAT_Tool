@@ -225,6 +225,7 @@
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
+                    batchSize: !!(env.batchSizeFactory||win.__C3D_CREATE_BATCH_SIZE_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get,
                     batch: !!(env.batchFactory||win.__C3D_CREATE_BATCH_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get&&!!job?.frames?.get,
                     moveToMouse: !!topView(), followCamera:!!followView(),
                     ground: !!views?.perspective?.scene, freeCam: !!views?.perspective?.camera && !!views?.perspective?.controls },
@@ -549,6 +550,25 @@
                 publish();
             }
         });
+        const batchSizeController=(env.batchSizeFactory||win.__C3D_CREATE_BATCH_SIZE_CONTROLLER)?.({
+            math,
+            job:()=>editor()?.job?.instance,snapshot:()=>{if(disposed)throw new Error('Adapter stopped');return getSnapshot();},
+            assertEditable:()=>{
+                const snap=getSnapshot();
+                if(!snap.connected||!snap.capabilities.edit||snap.saveState==='saving'||String(editor().workspace).toLowerCase()==='review'||canvas.mode?.()!=='idle')
+                    throw new Error('Batch edit requires editable idle workspace');
+                if([...pendingObjects].some(id=>id!=='batch-size'))throw new Error('Another native edit is pending');
+            },
+            lock:value=>value?pendingObjects.add('batch-size'):pendingObjects.delete('batch-size'),
+            refresh:async(job)=>{
+                const s=getSnapshot();if(disposed||editor()?.job?.instance!==job)return;
+                const states=await job.annotations.get(s.frame,true,[]),history=await job.actions.get();
+                const now=getSnapshot();
+                if(editor()?.job?.instance===job&&now.frame===s.frame)
+                    store.dispatch({type:'UPDATE_ANNOTATIONS_SUCCESS',payload:{states,history}});
+                publish();
+            }
+        });
         const annotationIO=(env.annotationIOFactory||win.__C3D_ANNOTATION_IO?.createAnnotationIO)?.({
             math,origin:()=>win.location?.origin||'',job:()=>editor()?.job?.instance,snapshot:getSnapshot,
             assertEditable:()=>{
@@ -614,6 +634,10 @@
                 }
                 case 'RELEASE_RELOAD': reloadHold=null;pendingObjects.delete('reload');publish();return {released:true};
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
+                case 'BATCH_SIZE_OPEN': {validate(payload.ref,true);if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.open(payload.ref.clientId);}
+                case 'BATCH_SIZE_PREVIEW': if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.preview(payload);
+                case 'BATCH_SIZE_APPLY': if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.apply(payload);
+                case 'BATCH_SIZE_CANCEL': return batchSizeController?.cancel()||{cancelled:true};
                 case 'BATCH_OPEN': {validate(payload.ref);if(!batchController)throw new Error('Batch module unavailable');return batchController.open(payload.ref.clientId);}
                 case 'BATCH_BEGIN': if(!batchController)throw new Error('Batch module unavailable');return batchController.begin(payload);
                 case 'BATCH_FRAME': if(!batchController)throw new Error('Batch module unavailable');return batchController.read(payload);
@@ -652,7 +676,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.16.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.17.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};

@@ -37,6 +37,13 @@ test('save failure blocks commit/reload, releases held tabs, and removes durable
 test('missing native host leaves every CVAT tab untouched',async()=>{
  const f=fixture({nativeFail:true});await assert.rejects(f.service.safeReload(true),/updater Windows/);assert.deepEqual(f.calls,[['native','prepare']]);
 });
+
+test('local reload saves and verifies tabs without GitHub or native updater even when both are unavailable',async()=>{
+ const f=fixture({nativeFail:true,http:404}),result=await f.service.safeReload(false);
+ assert.equal(result.reloading,true);assert.equal(result.updated,false);assert.equal(f.reads,0);
+ assert.deepEqual(f.calls,[[1,'C3D_RELOAD_STATE'],[1,'C3D_RELOAD_HOLD'],[1,'C3D_RELOAD_VERIFY']]);
+ assert.ok(f.stored['c3d.reload.plan']);
+});
 test('two dirty editors of same job block automatic saving to avoid overwriting revisions',async()=>{
  const f=fixture({dirty:true,tabs:[{id:1,url:'https://cvat.test/jobs/3'},{id:2,url:'https://cvat.test/jobs/3'}]});
  await assert.rejects(f.service.safeReload(false),/nhiều tab/);assert.ok(!f.calls.some(c=>c[1]==='C3D_RELOAD_HOLD'));

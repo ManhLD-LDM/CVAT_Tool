@@ -108,7 +108,7 @@
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
+    let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -206,11 +206,11 @@
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
         root.innerHTML=`
-            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Kiểm tra bản mới, lưu CVAT rồi reload" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
-            <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install hidden>Cập nhật</button><button data-update-local hidden>Reload bản hiện tại</button><button data-update-setup hidden>Cài updater</button></div>
+            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install title="Kiểm tra và cài release mới từ GitHub">Update online</button><button data-update-local title="Lưu CVAT và nạp lại bản đang cài, không chờ GitHub">Reload local</button><button data-update-setup hidden>Cài updater</button></div>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
+                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-batch-size" class="c3d-btn-secondary">Batch Size Update</button></div><div class="c3d-action-grid"><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
                 <div style="margin-top:4px;">
                     <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
                 </div>
@@ -249,13 +249,10 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.16.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.17.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
-        el('c3d-btn-reload')?.addEventListener('click',()=>{
-            if(updateUI?.reload)updateUI.reload();else toast('Demo không có updater; chỉ cập nhật được trong extension.',true);
-        });
         function getJobId() {
             let id = snapshot?.jobId;
             if (!id) {
@@ -319,6 +316,7 @@
         el('c3d-preset-save').onclick=()=>editPreset();el('c3d-preset-reset').onclick=()=>editPreset(true);
         // Placement requires hovering the canvas; the button explains its shortcut.
         el('c3d-btn-move').addEventListener('click',()=>toast(`Hover over the object in the top view, then press ${shortcuts.format(settings.bindings.MOVE_TO_MOUSE)}${settings.bindings.MOVE_TO_MOUSE?'':' (assign a shortcut in settings)'}`));
+        batchSizeUI=window.__C3D_BATCH_SIZE_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
         batchUI=window.__C3D_BATCH_UI?.mount({root,request,snapshot:()=>snapshot,reference,toast});
 
         el('c3d-session').disabled=!globalThis.chrome?.runtime?.id;
@@ -399,6 +397,7 @@
         el('c3d-btn-move').disabled=!canEdit||!cap.moveToMouse||!settingsReady;
         refreshShortcutHints();
         el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
+        el('c3d-batch-size').disabled=!box||box.objectType!=='track'||!cap.batchSize||!cap.edit||busy;
         el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
         el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
@@ -487,10 +486,10 @@
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){closeSettings();batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
