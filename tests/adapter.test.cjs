@@ -430,6 +430,26 @@ test('Ground Snap uses origin without cloud and overrides accepted measured road
     const h=adjustmentHarness();const result=await h.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:h.ref(1),fallbackGroundHeight:.8});
     assert.equal(result.groundSource,'coordinate-origin');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-1.8)<1e-6);h.adapter.dispose();
 });
+
+function lidarGroundHarness(local=false){
+ const h=harness(),scene=new THREE.Scene(),coordinates=[];
+ h.state.annotation.annotations.states[0].points[0]=30;h.state.annotation.annotations.states[0].points[2]=.1;
+ h.state.annotation.annotations.states[1].points[0]=60;
+ for(let x=-8;x<=8;x+=.4)for(let y=-8;y<=8;y+=.4)coordinates.push(x,y,-1.7+.02*x);
+ if(local)for(let x=22;x<=38;x+=.4)for(let y=-8;y<=8;y+=.4)coordinates.push(x,y,-1.4);
+ const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};return h;
+}
+test('Ground Snap falls back to measured LiDAR-origin height without contaminating local QC evidence',async()=>{
+ const h=lidarGroundHarness(),before=h.adapter.getSnapshot().boxes[0].points.slice();
+ const qc=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(qc.accepted,false);
+ const r=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)}),p=h.adapter.getSnapshot().boxes[0].points;
+ assert.equal(r.groundSource,'lidar-origin-ground');assert.equal(r.groundFallback,true);assert.ok(Math.abs(p[2]-p[8]/2+1.7)<.02);assert.deepEqual(p.slice(0,2),before.slice(0,2));assert.deepEqual(p.slice(3),before.slice(3));assert.equal(h.history.length,1);
+ const after=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(after.accepted,false);assert.equal(after.source,'point-cloud');h.adapter.dispose();
+});
+test('Ground Snap prefers local road to origin fallback and still blocks excessive vertical shifts',async()=>{
+ const h=lidarGroundHarness(true),r=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)});assert.equal(r.groundFallback,false);assert.equal(r.groundSource,'point-cloud');assert.ok(Math.abs(r.groundHeight+1.4)<.02);h.adapter.dispose();
+ const far=lidarGroundHarness();far.state.annotation.annotations.states[0].points[2]=10;await assert.rejects(far.adapter.command('SNAP_GROUND',{ref:far.ref(1)}),/1.5m/);assert.equal(far.history.length,0);far.adapter.dispose();
+});
 test('mouse alignment and final ground resolve in one native save',async()=>{
     const h=topHarness(),scene=new THREE.Scene(),coords=[];
     h.state.annotation.annotations.states[1].points[0]=30;

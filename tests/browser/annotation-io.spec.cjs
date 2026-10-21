@@ -1,42 +1,85 @@
 const {test,expect}=require('@playwright/test');
-async function setup(page,mode='replace'){
+async function setup(page,mode='edit',unmatched=false){
  await page.setContent('<html><body></body></html>');await page.addStyleTag({path:'extension/styles.css'});
- await page.evaluate(()=>{window.requests=[];window.changed=false;window.preview={token:'import-fixture',rows:[
+ await page.evaluate(unmatched=>{window.requests=[];window.changed=false;window.preview={token:'import-fixture',rows:[
   {key:'tracks:0',sourceClientId:38,sourceServerId:48950,targetClientId:38,matched:true,label:'pedestrian',frames:60},
   {key:'tracks:1',sourceClientId:63,sourceServerId:48975,targetClientId:63,matched:true,label:'pedestrian',frames:60},
-  {key:'tracks:2',sourceClientId:79,sourceServerId:72716,targetClientId:79,matched:true,label:'vehicles',frames:3}]};});
+  {key:'tracks:2',sourceClientId:79,sourceServerId:72716,targetClientId:79,matched:true,label:'vehicles',frames:3}]};
+  if(unmatched){preview.targets=preview.rows.map((r,i)=>({kind:'tracks',clientID:r.targetClientId,serverID:90000+i,label:r.label,frame:0}));preview.rows.forEach((r,i)=>{r.kind='tracks';r.sourceClientId=null;r.sourceServerId=70115+i;r.matched=false;r.targetClientId=null;});}
+ },unmatched);
  await page.addScriptTag({path:'extension/annotation_io_ui.js'});
  await page.evaluate(async mode=>{
   window.ui=__C3D_ANNOTATION_IO_UI.mount({jobId:1224,sessionId:'fixture',mode,data:{tracks:[]},toast:()=>{},request:async(type,payload)=>{
-   requests.push({type,payload});if(type==='PREVIEW_ANNOTATION_IMPORT')return preview;changed=true;return {changed:mode==='replace'?[38,63]:[],added:mode==='append'?[{clientID:80}]:[],removed:[],message:'Editor updated; Save CVAT to persist.'};}});await ui.open();
+   requests.push({type,payload});if(type==='PREVIEW_ANNOTATION_IMPORT')return preview;changed=true;return {changed:[38,63],added:[],removed:[],message:'Editor updated; Save CVAT to persist.'};}});await ui.open();
  },mode);
 }
 test('Replace selection applies exactly chosen #38 and #63 after explicit confirmation, with no page reload',async({page})=>{
  await setup(page);await expect(page.getByRole('dialog',{name:'Chọn ID import'})).toContainText('CVAT #38');
  await page.locator('[data-import-key="tracks:2"]').uncheck();
- await page.getByRole('button',{name:'Áp dụng Replace',exact:true}).click();expect(await page.evaluate(()=>changed)).toBe(false);
+ await page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true}).click();expect(await page.evaluate(()=>changed)).toBe(false);
  await expect(page.getByRole('status')).toContainText('Đánh dấu xác nhận');
- await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();await page.getByRole('button',{name:'Áp dụng Replace',exact:true}).click();
- expect(await page.evaluate(()=>requests.at(-1).payload)).toEqual({jobId:1224,sessionId:'fixture',token:'import-fixture',keys:['tracks:0','tracks:1'],scope:'selected'});
+ await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();await page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true}).click();
+ expect(await page.evaluate(()=>requests.at(-1).payload)).toEqual({jobId:1224,sessionId:'fixture',token:'import-fixture',keys:['tracks:0','tracks:1']});
  await expect(page.getByRole('status')).toContainText('Đã sửa #38, #63');expect(await page.evaluate(()=>changed)).toBe(true);
 });
-test('Replace entire job selects every file ID and clearly warns about omitted IDs',async({page})=>{
- await setup(page);await page.getByRole('button',{name:'Bỏ chọn',exact:true}).click();
- await page.getByRole('combobox',{name:'Phạm vi replace'}).selectOption('all');
- await expect(page.getByRole('status')).toContainText('3 / 3');await expect(page.getByRole('status')).toContainText('sẽ bị xóa');
- await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();await page.getByRole('button',{name:'Áp dụng Replace',exact:true}).click();
- expect(await page.evaluate(()=>requests.at(-1).payload.scope)).toBe('all');
+test('one edit workflow has no add/replace scope selector and selecting all preserves explicit ID selection',async({page})=>{
+ await setup(page);await expect(page.getByRole('heading')).toHaveText('Chỉnh ID đã chọn theo file');
+ await expect(page.getByRole('combobox',{name:'Phạm vi replace'})).toHaveCount(0);
+ await expect(page.getByRole('dialog')).toContainText('không tạo hoặc xóa box');
+ await page.getByRole('button',{name:'Bỏ chọn',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true})).toBeDisabled();
+ await page.getByRole('button',{name:'Chọn tất cả',exact:true}).click();
+ await expect(page.getByRole('status')).toContainText('3 / 3');
+ await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();await page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true}).click();
+ expect(await page.evaluate(()=>requests.at(-1).payload)).toEqual({jobId:1224,sessionId:'fixture',token:'import-fixture',keys:['tracks:0','tracks:1','tracks:2']});
+ expect(await page.evaluate(()=>requests[0].payload.mode)).toBe('edit');
 });
-test('Add exposes checkboxes per source ID, allows one object, and reports newly allocated ID',async({page})=>{
- await setup(page,'append');await expect(page.getByRole('dialog')).toContainText('CVAT cấp ID mới');
- await expect(page.getByRole('combobox')).toHaveCount(0);await page.getByRole('button',{name:'Bỏ chọn',exact:true}).click();
- await page.locator('[data-import-key="tracks:1"]').check();await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();
- await page.getByRole('button',{name:'Áp dụng Add',exact:true}).click();
- expect(await page.evaluate(()=>requests.at(-1).payload.keys)).toEqual(['tracks:1']);await expect(page.getByRole('status')).toContainText('Đã thêm #80');
-});
+
 test('filtering ID list preserves selections and closing preview makes no edits',async({page})=>{
  await setup(page);await page.getByRole('button',{name:'Bỏ chọn',exact:true}).click();
  await page.locator('[data-import-key="tracks:1"]').check();await page.getByRole('searchbox',{name:'Tìm ID import'}).fill('vehicles');
  await expect(page.locator('[data-import-key="tracks:1"]')).not.toBeVisible();await expect(page.getByRole('status')).toContainText('1 / 3');
  await page.getByRole('button',{name:'Đóng',exact:true}).click();expect(await page.evaluate(()=>changed)).toBe(false);
+});
+
+test('unmatched raw IDs require explicit current CVAT targets and block duplicate mappings',async({page})=>{
+ await setup(page,'replace',true);
+ await expect(page.getByRole('dialog')).toContainText('DB 70115 → không tìm thấy ID đích');
+ await page.getByRole('button',{name:'Chọn tất cả',exact:true}).click();await expect(page.getByRole('status')).toContainText('3 ID chưa có đích');
+ await expect(page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true})).toBeDisabled();
+ await page.locator('[data-target-key="tracks:0"]').selectOption('63');await page.locator('[data-target-key="tracks:1"]').selectOption('63');await page.locator('[data-import-key="tracks:2"]').uncheck();
+ await expect(page.getByRole('status')).toContainText('Trùng ID đích');await expect(page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true})).toBeDisabled();
+ await page.locator('[data-target-key="tracks:1"]').selectOption('38');await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();
+ await expect(page.getByRole('dialog')).toContainText('DB 70116 → CVAT #38 (đích đã chọn)');
+ await page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true}).click();
+ expect(await page.evaluate(()=>requests.at(-1).payload.mapping)).toEqual({'tracks:0':63,'tracks:1':38});
+});
+
+test('changing or clearing explicit target clears prior confirmation and never creates objects',async({page})=>{
+ await setup(page,'replace',true);await page.locator('[data-target-key="tracks:0"]').selectOption('63');await page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'}).check();
+ await page.locator('[data-target-key="tracks:0"]').selectOption('38');await expect(page.getByRole('checkbox',{name:'Xác nhận thay đổi annotation'})).not.toBeChecked();
+ expect(await page.evaluate(()=>changed)).toBe(false);
+ await page.locator('[data-target-key="tracks:0"]').selectOption('');await expect(page.locator('[data-import-key="tracks:0"]')).not.toBeChecked();await expect(page.locator('[data-target-key="tracks:0"]')).toHaveValue('');
+});
+
+test('a different start frame does not disable the target ID and full job range is visible',async({page})=>{
+ await page.setContent('<body></body>');await page.addScriptTag({path:'extension/annotation_io_ui.js'});
+ await page.evaluate(async()=>{
+  __C3D_ANNOTATION_IO_UI.mount({jobId:1224,sessionId:'fixture',data:{},toast(){},request:async()=>({token:'t',frameRange:{start:0,stop:59},rows:[{key:'tracks:0',kind:'tracks',sourceClientId:38,targetClientId:38,matched:true,startFrame:8,label:'vehicles',frames:52}],targets:[{kind:'tracks',clientID:38,serverID:48950,frame:0,label:'vehicles'}]})}).open();
+ });
+ await expect(page.getByRole('dialog')).toContainText('Toàn bộ job: frame 0–59');
+ await expect(page.locator('[data-target-key="tracks:0"] option[value="38"]')).toBeEnabled();
+ await expect(page.locator('[data-target-key="tracks:0"]')).toHaveValue('38');
+ await expect(page.getByRole('button',{name:'Áp dụng chỉnh sửa',exact:true})).toBeEnabled();
+ await expect(page.getByRole('dialog')).not.toContainText('khác frame bắt đầu');
+});
+
+test('preview makes clientID identity explicit even when source and destination database IDs differ',async({page})=>{
+ await page.setContent('<body></body>');await page.addScriptTag({path:'extension/annotation_io_ui.js'});
+ await page.evaluate(async()=>{
+  window.__C3D_ANNOTATION_IO_UI.mount({jobId:1224,sessionId:'fixture',mode:'replace',data:{},toast(){},request:async()=>({token:'t',rows:[{key:'tracks:0',kind:'tracks',sourceClientId:38,sourceServerId:70115,targetClientId:38,targetServerId:48950,dbDiffers:true,matched:true,label:'vehicles',frames:60}],targets:[{kind:'tracks',clientID:38,serverID:48950,label:'vehicles'}]})}).open();
+ });
+ await expect(page.getByRole('dialog')).toContainText('Chỉnh khớp theo #clientID hiển thị, không theo DB ID');
+ await expect(page.getByRole('dialog')).toContainText('DB khác; vẫn sửa theo #clientID, giữ DB đích 48950');
+ await expect(page.locator('[data-target-key="tracks:0"]')).toHaveValue('38');
 });

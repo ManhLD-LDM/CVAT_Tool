@@ -299,6 +299,18 @@
             const radius = Math.min(15, Math.max(8, Math.hypot(g.length, g.width) / 2 + 3));
             return estimateLocalGround(this.query(g.center[0], g.center[1], radius), box, radius);
         }
+        estimateLidarGround() {
+            // CVAT sensor-frame data: XY origin is assumed to be the LiDAR vehicle.
+            // Exclude its central footprint; estimate road from surrounding returns.
+            const measured=this.estimate({points:[0,0,0,0,0,0,2,2,1,0,0,0,0,0,0,0]});
+            if(!canManuallySnapGround(measured))return {...measured,source:'lidar-origin-ground',accepted:false};
+            if(measured.c>0.25)return {...measured,accepted:false,confidence:0,source:'lidar-origin-ground',reason:'Ground above the assumed sensor origin; cannot use sensor-height fallback'};
+            // Transfer only the road height at the sensor. A remote slope is unknown.
+            return {...measured,a:0,b:0,source:'lidar-origin-ground',approximate:true,referenceXY:[0,0],
+                referencePlane:{a:measured.a,b:measured.b,c:measured.c},
+                reason:'Fallback road height near LiDAR XY origin; remote terrain is not measured',
+                getTargetZ(){return measured.c;}};
+        }
     }
 
     function extractBoxROI(points, currentBox, margin = 0.4) {

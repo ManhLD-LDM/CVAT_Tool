@@ -676,7 +676,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.17.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.17.5',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -778,11 +778,16 @@
                 case 'SNAP_GROUND': {
                     const options=placementOptions(payload);
                     validate(payload.ref,true);
-                    const ground=await operationGround(payload.ref,payload);
-                    if (!math.canManuallySnapGround(ground)) throw new Error('No sufficient quality ground plane to snap');
+                    let ground=await operationGround(payload.ref,payload),localGroundReason=null;
+                    if(!options.useOriginGround&&!math.canManuallySnapGround(ground)){
+                        localGroundReason=ground?.reason||'Ground below box is unreliable';
+                        const index=await ensureCloud();validate(payload.ref,true);
+                        ground=index.estimateLidarGround();
+                    }
+                    if (!math.canManuallySnapGround(ground)) throw new Error('Không tìm được mặt đất đủ tin cậy dưới box hoặc gần gốc LiDAR');
                     const { target } = validate(payload.ref,true), plane = math.makePlane(ground.a,ground.b,ground.c), snap = math.snapGroundPoints(target.points,plane);
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
-                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud'};
+                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud',groundFallback:ground.source==='lidar-origin-ground',localGroundReason,referenceXY:ground.referenceXY||null};
                 }
                 case 'EXPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.exported(payload);
                 case 'PREVIEW_ANNOTATION_IMPORT': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.preview(payload);

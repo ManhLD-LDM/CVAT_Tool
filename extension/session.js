@@ -85,8 +85,9 @@ el('formats').onclick=()=>run(async()=>{
 });
 el('export').onclick=()=>run(()=>exportFile());
 el('export-native').onclick=()=>run(async()=>{
- status('Đang đọc annotation đã Save từ API…');
+ status('Đang đọc annotation và ID từ editor CVAT…');
  const data=await api('native-export');
+ if(!data.annotations?.c3d||!['tracks','shapes'].every(k=>(data.annotations[k]||[]).every(t=>Number.isInteger(t.clientID))))throw new Error('Export không có ID editor. Reload extension và tab CVAT rồi thử lại; không tải file thiếu ID.');
  await save(Array.from(new TextEncoder().encode(JSON.stringify(data,null,2))),'cvat-job'+context.jobId+'-native-'+Date.now()+'.json','application/json');
  status('Đã tải JSON native từ editor, gồm số ID hiển thị và chỉnh sửa chưa Save. Dùng Import JSON trên HUD để chọn ID; đây không phải ZIP dataset.');
 });

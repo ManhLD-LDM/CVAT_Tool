@@ -580,6 +580,7 @@
 .c3d-import-dialog::backdrop{background:#0009}.c3d-import-dialog button,.c3d-import-dialog select,.c3d-import-dialog input[type=search]{background:#303039;color:#eee;border:1px solid #52525b;padding:7px;border-radius:4px;margin:5px}
 .c3d-import-rows{max-height:45vh;overflow:auto;scrollbar-width:thin;scrollbar-color:#52525b #18181d;margin:10px 0}
 .c3d-import-rows label{display:block;padding:8px;border-bottom:1px solid #333}.c3d-import-rows label[hidden]{display:none}
+.c3d-import-rows select{max-width:100%;margin:6px 0 0}.c3d-import-dialog button:disabled{opacity:.5;cursor:default}
 .c3d-size-dialog{color-scheme:dark;background:#18181d;color:#e4e4e7;border:1px solid #52525b;border-radius:8px;width:min(650px,90vw);max-height:85vh;overflow:auto;padding:22px;font:13px system-ui;scrollbar-width:thin;scrollbar-color:#52525b #18181d}
 .c3d-size-dialog::backdrop{background:#0009}.c3d-size-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px}.c3d-size-dialog h2{font-size:18px;margin:0}
 .c3d-size-dialog button,.c3d-size-dialog input,.c3d-size-dialog select{background:#28282f;color:#eee;border:1px solid #52525b;padding:8px;border-radius:4px;font:inherit}.c3d-size-dialog button{cursor:pointer}.c3d-size-dialog button:disabled{opacity:.45;cursor:default}

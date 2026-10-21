@@ -194,3 +194,13 @@ test('seeded fit respects neighboring annotation interiors and preserves overlap
  assert.equal(overlapping.excludedNeighborPoints,0);
  assert.ok(r.cluster.some(p=>seed.has(p)));
 });
+// Sensor ground is a measured fallback, never an assumed Z=0 plane.
+test('LiDAR-origin fallback uses measured road height and transfers it flat rather than extrapolating slope',()=>{
+ const road=[];for(let x=-8;x<=8;x+=.4)for(let y=-8;y<=8;y+=.4)road.push([x,y,-1.7+.02*x]);
+ const g=new m.GroundIndex(road).estimateLidarGround();assert.equal(g.accepted,true);assert.equal(g.source,'lidar-origin-ground');assert.ok(Math.abs(g.c+1.7)<.02);assert.equal(g.a,0);assert.equal(g.b,0);assert.ok(Math.abs(g.getTargetZ(70,0)+1.7)<.02);assert.ok(Math.abs(g.referencePlane.a-.02)<.001);
+});
+test('LiDAR-origin fallback refuses missing or one-sided ground evidence',()=>{
+ assert.equal(new m.GroundIndex([]).estimateLidarGround().accepted,false);
+ const road=[];for(let x=2;x<8;x+=.4)for(let y=2;y<8;y+=.4)road.push([x,y,-1.7]);assert.equal(new m.GroundIndex(road).estimateLidarGround().accepted,false);
+ const roof=[];for(let x=-8;x<=8;x+=.4)for(let y=-8;y<=8;y+=.4)roof.push([x,y,1.5]);assert.equal(new m.GroundIndex(roof).estimateLidarGround().accepted,false);
+});

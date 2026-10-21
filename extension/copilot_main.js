@@ -300,6 +300,18 @@
             const radius = Math.min(15, Math.max(8, Math.hypot(g.length, g.width) / 2 + 3));
             return estimateLocalGround(this.query(g.center[0], g.center[1], radius), box, radius);
         }
+        estimateLidarGround() {
+            // CVAT sensor-frame data: XY origin is assumed to be the LiDAR vehicle.
+            // Exclude its central footprint; estimate road from surrounding returns.
+            const measured=this.estimate({points:[0,0,0,0,0,0,2,2,1,0,0,0,0,0,0,0]});
+            if(!canManuallySnapGround(measured))return {...measured,source:'lidar-origin-ground',accepted:false};
+            if(measured.c>0.25)return {...measured,accepted:false,confidence:0,source:'lidar-origin-ground',reason:'Ground above the assumed sensor origin; cannot use sensor-height fallback'};
+            // Transfer only the road height at the sensor. A remote slope is unknown.
+            return {...measured,a:0,b:0,source:'lidar-origin-ground',approximate:true,referenceXY:[0,0],
+                referencePlane:{a:measured.a,b:measured.b,c:measured.c},
+                reason:'Fallback road height near LiDAR XY origin; remote terrain is not measured',
+                getTargetZ(){return measured.c;}};
+        }
     }
 
     function extractBoxROI(points, currentBox, margin = 0.4) {
@@ -4741,7 +4753,9 @@ function createAnnotationIO(env){
  async function exported(payload){
   if(running)throw new Error('Wait for annotation import before exporting');
   const {s,job}=context(payload),data=clone(await job.annotations.export());context({jobId:s.jobId,sessionId:s.sessionId});
-  data.c3d={schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,identity:'clientID is the CVAT display ID in this editor; id is the database ID',source:'native-editor-including-unsaved'};
+  const identities=kinds.flatMap(kind=>(data[kind]||[]).map(t=>t.clientID));
+  if(identities.some(id=>!Number.isInteger(id))||new Set(identities).size!==identities.length)throw new Error('Native export lacks unique display IDs; reload extension and the CVAT tab before exporting');
+  data.c3d={toolVersion:'1.17.5',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
   data.labels_manifest=clone(job.labels||[]);
   return {success:true,jobId:s.jobId,data,trackCount:data.tracks?.length||0,shapeCount:data.shapes?.length||0};
  }
@@ -4771,29 +4785,37 @@ function createAnnotationIO(env){
    if(s.outside!=null&&typeof s.outside!=='boolean'||s.occluded!=null&&typeof s.occluded!=='boolean')throw new Error('Invalid visibility flags');
    frames.add(s.frame);
   }
-  if(kind==='tracks'&&item.frame!==Math.min(...frames))throw new Error('Track frame must equal its first keyframe');
+  // Native Track.frame is creation metadata; edits can move the first keyframe.
+  // Visibility/interpolation are defined by shapes, not this metadata anchor.
+  if(kind==='tracks')item.frame=Math.min(...frames);
   if(item.group!=null&&(!Number.isInteger(item.group)||item.group<0))throw new Error('Invalid group');
  }
  async function preview(payload){
-  editable();const {s,job}=context(payload),data=payload.payload;
+  editable();if(payload.mode&& !['replace','edit'].includes(payload.mode))throw new Error('Only edit existing IDs is supported; no creation or deletion');
+  const {s,job}=context(payload),wrapper=payload.payload?.annotations?payload.payload:null,data=clone(wrapper?.annotations||payload.payload);
+  if(wrapper?.jobId!=null){
+   if(data.c3d&&(data.c3d.jobId!==wrapper.jobId||wrapper.origin&&data.c3d.origin!==wrapper.origin))throw new Error('Conflicting file job/server metadata');
+   if(!data.c3d)data.c3d={jobId:wrapper.jobId,origin:wrapper.origin||env.origin()};
+  }
   if(!data||!Array.isArray(data.tracks||[])||!Array.isArray(data.shapes||[]))throw new Error('Invalid annotation file');
   if((data.tags||[]).length||(data.intervals||[]).length)throw new Error('This 3D import supports cuboid tracks/shapes only; tags/intervals are not silently discarded');
-  if(data.c3d&&(data.c3d.jobId!==s.jobId||data.c3d.origin!==env.origin())&&payload.mode!=='append')throw new Error('File belongs to another job/server. Use Add; Replace cannot reuse foreign IDs');
-  const current=clone(await job.annotations.export()),rows=[],seen=new Set(),mode=payload.mode==='append'?'append':'replace';
+  if(data.c3d&&(data.c3d.jobId!==s.jobId||data.c3d.origin!==env.origin()))throw new Error('File belongs to another job/server. Choose a file for this job; edit cannot reuse foreign IDs');
+  const current=clone(await job.annotations.export()),rows=[],seen=new Set(),mode='edit';
   for(const kind of kinds)for(let i=0;i<(data[kind]||[]).length;i++){
    const original=data[kind][i],key=kind+':'+i,item=remap(original,job,data);validate(item,kind,job);
-   // Server IDs map raw exports safely. Display IDs are only trusted with same-job metadata.
-   const target=(current[kind]||[]).find(t=>Number.isInteger(item.id)&&t.id===item.id)||
-    (data.c3d?.sessionId===s.sessionId&&item.id==null&&Number.isInteger(item.clientID)&&(current[kind]||[]).find(t=>t.clientID===item.clientID));
-   if(mode==='replace'&&target){const identity=kind+':'+target.clientID;if(seen.has(identity))throw new Error('Duplicate target ID in file');seen.add(identity);}
+   // User-facing identity is #clientID. Never substitute database ID or array order.
+   const target=Number.isInteger(item.clientID)?(current[kind]||[]).find(t=>t.clientID===item.clientID):null;
+   if(target){const identity=kind+':'+target.clientID;if(seen.has(identity))throw new Error('Duplicate target ID in file');seen.add(identity);}
    rows.push({key,kind,item,target,sourceClientId:original.clientID??null,sourceServerId:original.id??null,
-    targetClientId:target?.clientID??null,label:job.labels.find(l=>l.id===item.label_id).name,frames:kind==='tracks'?item.shapes.length:1});
+    targetClientId:target?.clientID??null,targetServerId:target?.id??null,dbDiffers:!!target&&item.id!=null&&target.id!==item.id,startFrame:item.frame,label:job.labels.find(l=>l.id===item.label_id).name,frames:kind==='tracks'?item.shapes.length:1});
   }
   if(!rows.length)throw new Error('No cuboid objects in file');
   editable();context({jobId:s.jobId,sessionId:s.sessionId});
   plan={token:'io-'+(++seq),job,s,mode,current,signature:JSON.stringify(current),rows};
   return {token:plan.token,mode,jobId:s.jobId,existing:kinds.reduce((n,k)=>n+(current[k]?.length||0),0),
-   rows:rows.map(({item,target,...r})=>({...r,matched:!!target})),note:mode==='append'?'Add creates new CVAT IDs. Source IDs are shown for selection only.':'Replace keeps existing display/database IDs; selected tracks are replaced across all their keyframes.'};
+   source:{jobId:data.c3d?.jobId??null,toolVersion:data.c3d?.toolVersion??null,hasDisplayIds:rows.every(r=>Number.isInteger(r.sourceClientId))},
+   targets:kinds.flatMap(kind=>(current[kind]||[]).map(t=>({kind,clientID:t.clientID,serverID:t.id??null,frame:t.frame,label:job.labels.find(l=>l.id===t.label_id)?.name||String(t.label_id)}))),
+   rows:rows.map(({item,target,...r})=>({...r,matched:!!target})),frameRange:{start:job.startFrame,stop:job.stopFrame},note:'Edit existing #clientIDs across the entire job using the file keyframes and native interpolation. No object creation or deletion.'};
  }
  async function getState(job,kind,item){
   const frame=kind==='tracks'?Math.min(...item.shapes.map(s=>s.frame)):item.frame;
@@ -4803,43 +4825,39 @@ function createAnnotationIO(env){
   editable();const {s,job}=context(payload),p=plan;
   if(!p||p.token!==payload.token||p.job!==job||p.s.sessionId!==s.sessionId)throw new Error('Import preview expired');
   if(!Array.isArray(payload.keys)||!payload.keys.length||new Set(payload.keys).size!==payload.keys.length)throw new Error('Choose at least one ID');
-  const selected=payload.keys.map(key=>p.rows.find(row=>row.key===key));if(selected.some(r=>!r))throw new Error('Unknown file selection');
+  let selected=payload.keys.map(key=>p.rows.find(row=>row.key===key));if(selected.some(r=>!r))throw new Error('Unknown file selection');
+  const mapping=payload.mapping??{};
+  if(!mapping||typeof mapping!=='object'||Array.isArray(mapping)||Object.keys(mapping).some(key=>!payload.keys.includes(key)))throw new Error('Invalid explicit ID mapping');
+  if(payload.scope&&payload.scope!=='selected')throw new Error('Only edit selected existing IDs is supported; no creation or deletion');
+  selected=selected.map(row=>{
+   if(!Object.hasOwn(mapping,row.key))return {...row};
+   const id=mapping[row.key];if(!Number.isInteger(id))throw new Error('Target display ID must be an integer');
+   const target=(p.current[row.kind]||[]).find(t=>t.clientID===id);
+   if(!target)throw new Error('Target CVAT #'+id+' not found for '+row.kind);
+   return {...row,target};
+  });
+  const targetIds=selected.filter(r=>r.target).map(r=>r.kind+':'+r.target.clientID);
+  if(new Set(targetIds).size!==targetIds.length)throw new Error('Duplicate target ID: two source objects cannot edit the same CVAT object');
   if(JSON.stringify(await job.annotations.export())!==p.signature)throw new Error('Annotations changed after preview; reopen file');
-  const scope=payload.scope==='all'?'all':'selected';
-  if(scope==='all'&&(selected.length!==p.rows.length||p.mode!=='replace'))throw new Error('Replace all requires all file IDs');
-  const removals={tracks:[],shapes:[]};
-  if(p.mode==='replace'){
-   if(selected.some(r=>!r.target))throw new Error('Selected replacement ID not found. Use Add for new objects; no automatic new IDs during Replace');
-   for(const row of selected){
-    if(row.kind==='tracks'&&row.item.frame!==row.target.frame||row.kind==='shapes'&&row.item.frame!==row.target.frame)throw new Error('Moving an object start frame is unsupported without changing identity; import stopped');
-    if((row.item.group||0)!==(row.target.group||0)&&!job.annotations.group)throw new Error('Group changed but native grouping API is unavailable');
-    const state=await getState(job,row.kind,row.target);if(!state||typeof state.save!=='function'||state.lock||state.isGroundTruth)throw new Error('Target ID #'+row.target.clientID+' is missing/locked/read-only');
-    if(row.kind==='tracks')for(const shape of row.item.shapes){const state=(await job.annotations.get(shape.frame,true,[])).find(x=>x.clientID===row.target.clientID);if(!state||state.lock||state.isGroundTruth)throw new Error('A target frame is protected');}
-   }
-   if(scope==='all'){
-    if((p.current.tags||[]).length||(p.current.intervals||[]).length)throw new Error('Replace all would remove tags/intervals; use selected IDs');
-    for(const kind of kinds)for(const target of p.current[kind]||[])if(!selected.some(r=>r.kind===kind&&r.target.clientID===target.clientID)){
-     const state=await getState(job,kind,target);if(!state||state.lock||state.isGroundTruth)throw new Error('An omitted ID is locked/missing; cannot Replace all');removals[kind].push(target);
-    }
+  const updating=selected;
+  if(selected.some(r=>!r.target))throw new Error('Selected clientID not found; missing objects are never created');
+  for(const row of updating){
+   if(row.kind==='shapes'&&row.item.frame!==row.target.frame)throw new Error('A standalone shape cannot move frames; use a track for multi-frame edits');
+   if((row.item.group||0)!==(row.target.group||0)&&!job.annotations.group)throw new Error('Group changed but native grouping API is unavailable');
+   const state=await getState(job,row.kind,row.target);if(!state||typeof state.save!=='function'||state.lock||state.isGroundTruth)throw new Error('Target ID #'+row.target.clientID+' is missing/locked/read-only');
+   // Preflight both incoming and obsolete keyframes before any native write.
+   if(row.kind==='tracks')for(const frame of new Set([...row.item.shapes,...row.target.shapes].map(x=>x.frame))){
+    const state=(await job.annotations.get(frame,true,[])).find(x=>x.clientID===row.target.clientID);
+    if(!state||typeof state.save!=='function'||state.lock||state.isGroundTruth)throw new Error('A target frame is protected');
    }
   }
-  if((p.mode==='append'||kinds.some(k=>removals[k].length))&&typeof job.annotations.commit!=='function')throw new Error('Native commit API unavailable');
   if(JSON.stringify(await job.annotations.export())!==p.signature)throw new Error('Annotations changed during preflight');
   context({jobId:s.jobId,sessionId:s.sessionId});env.assertEditable();
   if(running||plan!==p)throw new Error('Import preview was consumed or replaced');
-  if(p.mode==='append'&&selected.some(r=>r.item.group)&&!job.annotations.group)throw new Error('Grouped Add requires native grouping API');
   running=true;plan=null;env.lock(true);const changed=[],added=[],removed=[],groups=[];let error=null,edits=0;
   try{
-   if(p.mode==='append'){
-    const clean=(item)=>{const out=clone(item);delete out.id;delete out.clientID;out.group=0;for(const shape of out.shapes||[]){delete shape.id;delete shape.clientID;}return out;};
-    const add={tracks:[],shapes:[]};for(const row of selected)add[row.kind].push(clean(row.item));
-    await job.annotations.commit(add,{},s.frame);
-    const after=await job.annotations.export();
-    for(const kind of kinds)for(const item of after[kind]||[])if(!(p.current[kind]||[]).some(x=>x.clientID===item.clientID))added.push({kind,clientID:item.clientID});
-    if(added.length!==selected.length)throw new Error('Native Add count was not confirmed; inspect Undo');
-    for(const kind of kinds){const rows=selected.filter(r=>r.kind===kind),created=added.filter(r=>r.kind===kind);rows.forEach((r,i)=>r.addedId=created[i].clientID);}
-   }else{
-    for(const row of selected){
+   {
+    for(const row of updating){
      env.assertEditable();context({jobId:s.jobId,sessionId:s.sessionId});
      const shapes=row.kind==='tracks'?row.item.shapes.slice().sort((a,b)=>a.frame-b.frame):[row.item];
      const label=job.labels.find(l=>l.id===row.item.label_id),defaults=Object.fromEntries((label.attributes||[]).map(a=>[a.id,a.defaultValue??a.default_value??a.values?.[0]??'']));
@@ -4857,37 +4875,31 @@ function createAnnotationIO(env){
      }
      if(row.kind==='tracks')for(const old of row.target.shapes)if(!row.item.shapes.some(x=>x.frame===old.frame)){
       const state=(await job.annotations.get(old.frame,true,[])).find(x=>x.clientID===row.target.clientID);state.keyframe=false;await state.save();
+      if(++edits%20===0)await new Promise(resolve=>setTimeout(resolve,0));
      }
      const actual=(await job.annotations.export())[row.kind].find(x=>x.clientID===row.target.clientID);
-     if(!actual||actual.id!==row.target.id||actual.label_id!==row.item.label_id)throw new Error('Replacement identity/label changed; inspect Undo');
+     if(!actual||actual.id!==row.target.id||actual.label_id!==row.item.label_id)throw new Error('Edit identity/label changed; inspect Undo');
      const actualShapes=row.kind==='tracks'?actual.shapes:[actual];
-     if(actualShapes.length!==shapes.length||shapes.some(shape=>{const found=actualShapes.find(x=>x.frame===shape.frame);return !found||!!found.outside!==!!shape.outside||!!found.occluded!==!!shape.occluded||(found.z_order||0)!==(shape.z_order||0)||Math.abs((found.rotation||0)-(shape.rotation||0))>1e-4||found.points.slice(0,9).some((v,i)=>Math.abs(i>=3&&i<=5?Math.atan2(Math.sin(v-shape.points[i]),Math.cos(v-shape.points[i])):v-shape.points[i])>1e-4);} ))throw new Error('Replacement geometry/keyframe set not confirmed; inspect Undo');
+     if(actualShapes.length!==shapes.length||shapes.some(shape=>{const found=actualShapes.find(x=>x.frame===shape.frame);return !found||!!found.outside!==!!shape.outside||!!found.occluded!==!!shape.occluded||(found.z_order||0)!==(shape.z_order||0)||Math.abs((found.rotation||0)-(shape.rotation||0))>1e-4||found.points.slice(0,9).some((v,i)=>Math.abs(i>=3&&i<=5?Math.atan2(Math.sin(v-shape.points[i]),Math.cos(v-shape.points[i])):v-shape.points[i])>1e-4);} ))throw new Error('Edit geometry/keyframe set not confirmed; inspect Undo');
      let expectedAttrs={...defaults,...attrs(row.item.attributes)};
      for(const shape of shapes){
       expectedAttrs={...expectedAttrs,...attrs(shape.attributes)};
       const saved=actualShapes.find(x=>x.frame===shape.frame),actualAttrs={...attrs(actual.attributes),...attrs(saved.attributes)};
-      if((label.attributes||[]).some(a=>String(actualAttrs[a.id])!==String(expectedAttrs[a.id])))throw new Error('Replacement attributes not confirmed; inspect Undo');
+      if((label.attributes||[]).some(a=>String(actualAttrs[a.id])!==String(expectedAttrs[a.id])))throw new Error('Edit attributes not confirmed; inspect Undo');
      }
     }
    }
    // Group numbers are local to a collection. Recreate changed grouping among
    // selected objects only; never attach them to unrelated existing members.
-   const changedGroups=new Set(selected.filter(r=>p.mode==='append'?!!r.item.group:(r.item.group||0)!==(r.target.group||0)).map(r=>r.item.group||0));
+   const changedGroups=new Set(selected.filter(r=>(r.item.group||0)!==(r.target.group||0)).map(r=>r.item.group||0));
    for(const sourceGroup of changedGroups){
     context({jobId:s.jobId,sessionId:s.sessionId});env.assertEditable();
     const rows=selected.filter(r=>(r.item.group||0)===sourceGroup),states=[];
     const after=await job.annotations.export();
-    for(const row of rows){const actual=after[row.kind].find(t=>t.clientID===(p.mode==='append'?row.addedId:row.target.clientID));states.push(await getState(job,row.kind,actual));}
+    for(const row of rows){const actual=after[row.kind].find(t=>t.clientID===row.target.clientID);states.push(await getState(job,row.kind,actual));}
     const assigned=await job.annotations.group(states,sourceGroup===0);groups.push({source:sourceGroup,assigned});
     const grouped=await job.annotations.export();
-    if(rows.some(row=>{const actual=grouped[row.kind].find(t=>t.clientID===(p.mode==='append'?row.addedId:row.target.clientID));return !actual||(actual.group||0)!==assigned;}))throw new Error('Native grouping not confirmed');
-   }
-   if(p.mode==='replace'&&kinds.some(k=>removals[k].length)){
-     context({jobId:s.jobId,sessionId:s.sessionId});env.assertEditable();
-     await job.annotations.commit({},removals,s.frame);
-     const after=await job.annotations.export();
-     for(const kind of kinds)for(const target of removals[kind])if(!(after[kind]||[]).some(x=>x.clientID===target.clientID))removed.push(target.clientID);
-     if(removed.length!==kinds.reduce((n,k)=>n+removals[k].length,0))throw new Error('Deletion not fully confirmed; inspect Undo');
+    if(rows.some(row=>{const actual=grouped[row.kind].find(t=>t.clientID===row.target.clientID);return !actual||(actual.group||0)!==assigned;}))throw new Error('Native grouping not confirmed');
    }
   }catch(e){error=e.message;}
   finally{try{await env.refresh(job);}catch(e){error=(error?error+'; ':'')+'Render refresh failed: '+e.message;}env.lock(false);running=false;}
@@ -5578,7 +5590,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.17.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.17.5',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -5680,11 +5692,16 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                 case 'SNAP_GROUND': {
                     const options=placementOptions(payload);
                     validate(payload.ref,true);
-                    const ground=await operationGround(payload.ref,payload);
-                    if (!math.canManuallySnapGround(ground)) throw new Error('No sufficient quality ground plane to snap');
+                    let ground=await operationGround(payload.ref,payload),localGroundReason=null;
+                    if(!options.useOriginGround&&!math.canManuallySnapGround(ground)){
+                        localGroundReason=ground?.reason||'Ground below box is unreliable';
+                        const index=await ensureCloud();validate(payload.ref,true);
+                        ground=index.estimateLidarGround();
+                    }
+                    if (!math.canManuallySnapGround(ground)) throw new Error('Không tìm được mặt đất đủ tin cậy dưới box hoặc gần gốc LiDAR');
                     const { target } = validate(payload.ref,true), plane = math.makePlane(ground.a,ground.b,ground.c), snap = math.snapGroundPoints(target.points,plane);
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
-                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud'};
+                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud',groundFallback:ground.source==='lidar-origin-ground',localGroundReason,referenceXY:ground.referenceXY||null};
                 }
                 case 'EXPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.exported(payload);
                 case 'PREVIEW_ANNOTATION_IMPORT': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.preview(payload);

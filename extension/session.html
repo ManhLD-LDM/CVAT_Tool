@@ -27,8 +27,8 @@
 <label>Định dạng export / dự phòng <select id="export-format"></select></label>
 <button id="export">Export annotation</button>
 <p>Job 3D chỉ hiển thị định dạng 3D server hỗ trợ; ưu tiên Datumaro 3D 1.0 (ZIP cuboid/attributes/track_id). Không kèm PCD/ảnh. Export ZIP có thể cần quyền owner/admin tùy server.</p>
-<button id="export-native">Export JSON native (API đọc)</button>
-<p>JSON native đọc annotation đã Save, giữ cấu trúc tracks/keyframes từ API; có thêm server/job và bảng label ID/tên cơ bản. Không phải bản backup đầy đủ task hoặc định dạng dataset để Upload annotations trực tiếp. JSON chẩn đoán Auto-Fit và preview batch cũng không phải dataset export.</p>
+<button id="export-native">Export JSON editor (giữ ID)</button>
+<p>JSON editor gồm chỉnh sửa chưa Save, tracks/keyframes, ID hiển thị, ID database, server/job, phiên bản tool và schema nhãn. Dùng Import JSON trên HUD để chỉnh trực tiếp các #clientID đã chọn trên toàn bộ frame theo file, giữ đối tượng và ID hiện có. Không phải ZIP dataset để Upload annotations trực tiếp. JSON chẩn đoán Auto-Fit và preview batch cũng không phải dataset export.</p>
 <label>Định dạng import <select id="import-format"></select></label>
 <label>File annotation <input id="file" type="file"></label>
 <p>Import có thể thay thế annotation đã lưu của job. Không có Undo native cho thao tác server này. Tool tải bản export dự phòng trước khi upload; giữ file dự phòng để khôi phục thủ công nếu cần.</p>

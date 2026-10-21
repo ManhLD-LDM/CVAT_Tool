@@ -173,7 +173,7 @@
             else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${Object.values(result.alignment||{}).some(v=>v!=='none')?' · face aligned: '+Object.values(result.alignment).filter(v=>v!=='none').join(' + '):''}${result.groundSource==='coordinate-origin'?' · origin ground Z '+payload.fallbackGroundHeight.toFixed(2)+'m':result.groundSource?' · snapped to ground':''}${result.warning?' · '+result.warning:''} · Save CVAT`);
             else if(type==='AUTO_ADJUST')toast(result.previousFrame?result.message:result.unchanged?`Auto Adjust: no supported local correction${result.warning?' · '+result.warning:''}`:`Auto Adjust updated sides/top · direction preserved · bottom on ${result.groundSource==='coordinate-origin'?'origin ground':'local road'}${result.warning?' · '+result.warning:''} · review box and Save CVAT`);
             else if(type==='ROTATE'||type==='SNAP_GROUND'||type==='SET_LABEL') {
-                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${result.groundSource==='coordinate-origin'?'coordinate origin + offset':'ground'} · ΔZ ${result.deltaZ.toFixed(2)}m · save via Save CVAT` : 'Editor updated · save via Save CVAT');
+                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${result.groundSource==='coordinate-origin'?'coordinate origin + offset':result.groundFallback?'road near LiDAR XY origin (fallback; verify remote terrain)':'local ground'} · ΔZ ${result.deltaZ.toFixed(2)}m · save via Save CVAT` : 'Editor updated · save via Save CVAT');
             } else if(type==='FREECAM')toast(result.enabled?'Free Cam: WASD/QE · Shift fast · right-click drag to look · Esc exit':'Returned camera control to CVAT');
             acceptSnapshot(await request('GET_SNAPSHOT'));
             status('Ready');
@@ -215,8 +215,7 @@
                     <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
                 </div>
                 <div class="c3d-action-grid" style="margin-top:2px;">
-                    <button id="c3d-btn-import-replace" class="c3d-btn-secondary" title="Xóa annotations cũ và thay thế toàn bộ bằng file JSON mới">🔄 Import (Ghi Đè / Replace)</button>
-                    <button id="c3d-btn-import-append" class="c3d-btn-secondary" title="Giữ nguyên annotations hiện có và nạp thêm các tracks mới từ file JSON">➕ Import (Thêm Vào / Append)</button>
+                    <button id="c3d-btn-import-replace" class="c3d-btn-secondary" title="Chỉnh đối tượng đang có theo #clientID trên toàn bộ frame trong file, giữ ID">Chỉnh ID theo file JSON</button>
                 </div>
                 <input type="file" id="c3d-file-import" accept=".json" style="display:none" />
                 <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
@@ -249,7 +248,7 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.17.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.17.5 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
@@ -267,22 +266,15 @@
                 toast('Đang đọc annotation và ID từ editor CVAT...');
                 const jobId = getJobId();
                 const res = await request('EXPORT_ALL_ANNOTATIONS', { jobId, sessionId: snapshot?.sessionId });
+                if(!res.data?.c3d?.toolVersion||!['tracks','shapes'].every(k=>(res.data[k]||[]).every(t=>Number.isInteger(t.clientID))))throw new Error('Export thiếu ID/phiên bản editor. Reload extension và tab CVAT rồi thử lại; không tải file raw thiếu định danh.');
                 const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
-                const a = document.createElement('a'); a.href = url; a.download = `cvat-job-${res.jobId}-annotations.json`;
+                const a = document.createElement('a'); a.href = url; a.download = `cvat-job-${res.jobId}-editor-v${res.data.c3d.toolVersion}-annotations.json`;
                 document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
                 toast(`Export thành công ${res.trackCount} tracks (${res.shapeCount} shapes)!`);
             } catch (error) { toast('Lỗi export: ' + error.message, true); }
         });
-        let currentImportMode = 'replace';
-        el('c3d-btn-import-replace')?.addEventListener('click', () => {
-            currentImportMode = 'replace';
-            el('c3d-file-import')?.click();
-        });
-        el('c3d-btn-import-append')?.addEventListener('click', () => {
-            currentImportMode = 'append';
-            el('c3d-file-import')?.click();
-        });
+        el('c3d-btn-import-replace')?.addEventListener('click', () => el('c3d-file-import')?.click());
         el('c3d-file-import')?.addEventListener('change', async (event) => {
             const file = event.target.files?.[0]; if (!file) return; event.target.value = '';
             try {
@@ -291,7 +283,7 @@
                 if (!json.tracks && !json.shapes) throw new Error('File không chứa mảng tracks hoặc shapes của CVAT');
                 if(!window.__C3D_ANNOTATION_IO_UI)throw new Error('Import selection UI unavailable; reload extension');
                 importUI?.dispose();
-                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:currentImportMode,data:json});
+                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:'edit',data:parsed});
                 await importUI.open();
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });
@@ -390,7 +382,8 @@
         el('c3d-select-class').title=box?.label_name==='vehicles' ? (box.subType ? `Vehicle (${box.subType})` : 'Vehicle profile') : '';
         const canEdit=!!box&&!box.locked&&!box.groundTruth&&cap.edit&&!busy;
         for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
-        const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!settingsReady||(!settings.useOriginGround&&!math?.canManuallySnapGround(ground));
+        const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!settingsReady||(!settings.useOriginGround&&!cap.ground);
+        el('c3d-btn-ground').title='Snap xuống mặt đất cục bộ; nếu thiếu điểm, dùng cao độ đường đo gần gốc LiDAR XY (0,0). Giả định hệ tọa độ theo xe LiDAR; cần kiểm tra địa hình xa xe.';
         el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
         el('c3d-btn-autofit').disabled ||= !settingsReady;
         el('c3d-btn-adjust').disabled=!canEdit||!cap.ground||!settingsReady;

@@ -300,6 +300,18 @@
             const radius = Math.min(15, Math.max(8, Math.hypot(g.length, g.width) / 2 + 3));
             return estimateLocalGround(this.query(g.center[0], g.center[1], radius), box, radius);
         }
+        estimateLidarGround() {
+            // CVAT sensor-frame data: XY origin is assumed to be the LiDAR vehicle.
+            // Exclude its central footprint; estimate road from surrounding returns.
+            const measured=this.estimate({points:[0,0,0,0,0,0,2,2,1,0,0,0,0,0,0,0]});
+            if(!canManuallySnapGround(measured))return {...measured,source:'lidar-origin-ground',accepted:false};
+            if(measured.c>0.25)return {...measured,accepted:false,confidence:0,source:'lidar-origin-ground',reason:'Ground above the assumed sensor origin; cannot use sensor-height fallback'};
+            // Transfer only the road height at the sensor. A remote slope is unknown.
+            return {...measured,a:0,b:0,source:'lidar-origin-ground',approximate:true,referenceXY:[0,0],
+                referencePlane:{a:measured.a,b:measured.b,c:measured.c},
+                reason:'Fallback road height near LiDAR XY origin; remote terrain is not measured',
+                getTargetZ(){return measured.c;}};
+        }
     }
 
     function extractBoxROI(points, currentBox, margin = 0.4) {
@@ -1346,32 +1358,49 @@ root.__C3D_UPDATE_CLIENT={mount};
 function mount(env){
  let dialog=null,working=false;
  async function open(){
-  const preview=await env.request('PREVIEW_ANNOTATION_IMPORT',{jobId:env.jobId,sessionId:env.sessionId,payload:env.data,mode:env.mode});
+  const preview=await env.request('PREVIEW_ANNOTATION_IMPORT',{jobId:env.jobId,sessionId:env.sessionId,payload:env.data,mode:'edit'});
   dialog=document.createElement('dialog');dialog.className='c3d-import-dialog';dialog.setAttribute('aria-label','Chọn ID import');
-  const title=document.createElement('h2');title.textContent=env.mode==='replace'?'Replace annotation theo ID':'Add ID từ file JSON';dialog.append(title);
-  const note=document.createElement('p');note.textContent=(env.mode==='replace'?'Replace sửa đúng đối tượng đang có và giữ số ID hiển thị. Toàn bộ keyframe của mỗi ID được chọn sẽ được thay bằng file.':'Add giữ nguyên dữ liệu hiện tại và tạo đối tượng mới. Số ID nguồn chỉ để chọn; CVAT cấp ID mới, không ghi đè ID đang tồn tại.')+' Group thay đổi trong file được tạo lại giữa các ID đã chọn; số group có thể đổi, không ghép vào đối tượng ngoài lựa chọn.';dialog.append(note);
-  const scopeLabel=document.createElement('label'),scope=document.createElement('select');scope.setAttribute('aria-label','Phạm vi replace');
-  if(env.mode==='replace'){
-   for(const [value,text] of [['selected','Chỉ replace ID đã chọn'],['all','Replace toàn bộ job bằng toàn bộ ID trong file']]){const option=document.createElement('option');option.value=value;option.textContent=text;scope.append(option);}
-   scopeLabel.append(scope);dialog.append(scopeLabel);
-  }
+  const title=document.createElement('h2');title.textContent='Chỉnh ID đã chọn theo file';dialog.append(title);
+  if(preview.source){const source=document.createElement('p');source.textContent='Nguồn: '+(preview.source.toolVersion?'tool v'+preview.source.toolVersion:'không có phiên bản tool')+' · '+(preview.source.jobId!=null?'Job '+preview.source.jobId:'không có metadata job')+' · '+(preview.source.hasDisplayIds?'có ID hiển thị':'thiếu ID hiển thị')+'. Đích hiện tại: Job '+env.jobId+'.';dialog.append(source);}
+  const note=document.createElement('p');note.textContent='File là mẫu cho toàn bộ frame của mỗi #clientID đã chọn: vị trí, kích thước, góc xoay, thuộc tính và xuất hiện/biến mất. Keyframe được chép đầy đủ; frame ở giữa dùng nội suy CVAT. Giữ đối tượng và ID hiện tại, không tạo hoặc xóa box. ID ngoài lựa chọn được giữ nguyên.';dialog.append(note);
+  if(preview.frameRange){const range=document.createElement('p');range.textContent='Toàn bộ job: frame '+preview.frameRange.start+'–'+preview.frameRange.stop+' (bao gồm hai đầu). Khác frame bắt đầu vẫn chỉnh được.';dialog.append(range);}
   const filter=document.createElement('input');filter.type='search';filter.placeholder='Tìm số ID hoặc class';filter.setAttribute('aria-label','Tìm ID import');dialog.append(filter);
   const all=document.createElement('button');all.textContent='Chọn tất cả';const none=document.createElement('button');none.textContent='Bỏ chọn';dialog.append(all,none);
   const summary=document.createElement('p');summary.setAttribute('role','status');dialog.append(summary);
   const table=document.createElement('div');table.className='c3d-import-rows';dialog.append(table);
   const selections=new Map();
-  const update=()=>{const selected=[...selections.values()].filter(x=>x.check.checked).length;summary.textContent=selected+' / '+preview.rows.length+' ID được chọn · Job '+env.jobId+(env.mode==='replace'&&scope.value==='all'?' · ID hiện tại không có trong file sẽ bị xóa.':'');};
+  const targets=preview.targets||preview.rows.filter(r=>r.matched).map(r=>({kind:r.kind,clientID:r.targetClientId,label:r.label}));
+  const mappingNote=document.createElement('p');
+   mappingNote.textContent='Chỉnh khớp theo #clientID hiển thị, không theo DB ID. Ví dụ nguồn #38 sẽ sửa trực tiếp CVAT #38, giữ ID của box đang có. File thiếu clientID phải chọn #ID đích thủ công. ClientID có thể đổi khi nạp lại editor: kiểm tra đúng box trong preview. Không đoán từ thứ tự file.';
+   table.before(mappingNote);
+  const update=()=>{
+   const chosen=[...selections.values()].filter(x=>x.check.checked),missing=chosen.filter(x=>!x.target.value).length;
+   const ids=chosen.filter(x=>x.target.value).map(x=>(x.row.kind||'')+':'+x.target.value),duplicates=new Set(ids).size!==ids.length;
+   summary.textContent=chosen.length+' / '+preview.rows.length+' ID được chọn · Job '+env.jobId+(missing?' · '+missing+' ID chưa có đích — chọn CVAT #ID ở từng dòng; không tạo ID mới.':'')+(duplicates?' · Trùng ID đích — mỗi nguồn phải có đích riêng.':'');
+   apply.disabled=!chosen.length||!!missing||duplicates;
+  };
   for(const row of preview.rows){
-   const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=env.mode==='append'||row.matched;check.dataset.importKey=row.key;
+   const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=!!row.matched;check.dataset.importKey=row.key;
    const source=row.sourceClientId==null?'không có số hiển thị':'#'+row.sourceClientId;
-   const text='Nguồn '+source+' · DB '+(row.sourceServerId??'chưa lưu')+' → '+(env.mode==='append'?'ID mới':row.matched?'CVAT #'+row.targetClientId:'không tìm thấy ID đích')+' · '+row.label+' · '+row.frames+' keyframe';
-   label.append(check,document.createTextNode(text));label.dataset.search=text.toLowerCase();table.append(label);selections.set(row.key,{check,label,row});check.onchange=update;
+   const text='Nguồn '+source+' · DB '+(row.sourceServerId??'chưa lưu')+' → '+(row.matched?'CVAT #'+row.targetClientId:'không tìm thấy ID đích')+(row.dbDiffers?' · DB khác; vẫn sửa theo #clientID, giữ DB đích '+(row.targetServerId??'chưa lưu'):'')+' · '+row.label+' · '+row.frames+' keyframe';
+   const description=document.createElement('span');description.textContent=text;
+   label.append(check,description);label.dataset.search=text.toLowerCase();table.append(label);
+   const target=document.createElement('select');target.setAttribute('aria-label','CVAT ID đích '+row.key);target.dataset.targetKey=row.key;
+    const empty=document.createElement('option');empty.value='';empty.textContent='Chọn CVAT #ID đích…';target.append(empty);
+    for(const item of targets.filter(t=>!row.kind||t.kind===row.kind)){
+     const option=document.createElement('option');option.value=String(item.clientID);option.textContent='CVAT #'+item.clientID+' · '+item.label+' · DB '+(item.serverID??'chưa lưu');
+     target.append(option);
+    }
+    target.value=row.matched?String(row.targetClientId):'';label.append(document.createElement('br'),target);
+    target.onchange=()=>{check.checked=!!target.value;confirm.checked=false;
+     description.textContent='Nguồn '+source+' · DB '+(row.sourceServerId??'chưa lưu')+' → '+(target.value?'CVAT #'+target.value+' (đích đã chọn)':'chưa chọn #ID đích')+' · '+row.label+' · '+row.frames+' keyframe';
+     label.dataset.search=description.textContent.toLowerCase();update();};
+   selections.set(row.key,{check,label,row,target});check.onchange=()=>{confirm.checked=false;update();};
   }
   filter.oninput=()=>{for(const {label} of selections.values())label.hidden=!label.dataset.search.includes(filter.value.toLowerCase());};
-  all.onclick=()=>{for(const {check} of selections.values())check.checked=true;update();};none.onclick=()=>{for(const {check} of selections.values())check.checked=false;update();};
-  scope.onchange=()=>{if(scope.value==='all')for(const {check} of selections.values())check.checked=true;update();};
+  all.onclick=()=>{for(const {check} of selections.values())check.checked=true;confirm.checked=false;update();};none.onclick=()=>{for(const {check} of selections.values())check.checked=false;confirm.checked=false;update();};
   const warning=document.createElement('label'),confirm=document.createElement('input');confirm.type='checkbox';confirm.setAttribute('aria-label','Xác nhận thay đổi annotation');warning.append(confirm,document.createTextNode(' Tôi đã kiểm tra ID/phạm vi ở trên. Áp dụng vào editor; Save CVAT để lưu server.'));dialog.append(warning);
-  const apply=document.createElement('button');apply.textContent=env.mode==='replace'?'Áp dụng Replace':'Áp dụng Add';dialog.append(apply);
+  const apply=document.createElement('button');apply.textContent='Áp dụng chỉnh sửa';dialog.append(apply);
   const close=document.createElement('button');close.textContent='Đóng';dialog.append(close);
   close.onclick=()=>{if(!working){dialog.remove();dialog=null;}};
   dialog.addEventListener('cancel',event=>{if(working)event.preventDefault();});dialog.addEventListener('keydown',event=>event.stopPropagation());
@@ -1381,8 +1410,9 @@ function mount(env){
    if(!keys.length){summary.textContent='Chọn ít nhất một ID.';return;}
    working=true;dialog.querySelectorAll('input,button,select').forEach(n=>n.disabled=true);summary.textContent='Đang cập nhật native editor…';
    try{
-    const result=await env.request('IMPORT_ALL_ANNOTATIONS',{jobId:env.jobId,sessionId:env.sessionId,token:preview.token,keys,scope:scope.value||'selected'});
-    summary.textContent=(result.error?'Dừng: '+result.error+' · ':'')+'Đã sửa #'+result.changed.join(', #')+' · Đã thêm #'+result.added.map(x=>x.clientID).join(', #')+' · Đã xóa #'+result.removed.join(', #')+'. '+result.message;
+    const mapping={};for(const key of keys){const x=selections.get(key);if(x.target?.value&&(!x.row.matched||Number(x.target.value)!==x.row.targetClientId))mapping[key]=Number(x.target.value);}
+    const result=await env.request('IMPORT_ALL_ANNOTATIONS',{jobId:env.jobId,sessionId:env.sessionId,token:preview.token,keys,...(Object.keys(mapping).length?{mapping}:{})});
+    summary.textContent=(result.error?'Dừng: '+result.error+' · ':'')+'Đã sửa #'+result.changed.join(', #')+'. '+result.message;
     env.toast(result.error||'Editor đã cập nhật. Save CVAT để lưu; không cần reload.',!!result.error);apply.hidden=true;
    }catch(error){summary.textContent=error.message;env.toast(error.message,true);apply.hidden=true;}
    finally{working=false;close.disabled=false;}
@@ -1570,7 +1600,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${Object.values(result.alignment||{}).some(v=>v!=='none')?' · face aligned: '+Object.values(result.alignment).filter(v=>v!=='none').join(' + '):''}${result.groundSource==='coordinate-origin'?' · origin ground Z '+payload.fallbackGroundHeight.toFixed(2)+'m':result.groundSource?' · snapped to ground':''}${result.warning?' · '+result.warning:''} · Save CVAT`);
             else if(type==='AUTO_ADJUST')toast(result.previousFrame?result.message:result.unchanged?`Auto Adjust: no supported local correction${result.warning?' · '+result.warning:''}`:`Auto Adjust updated sides/top · direction preserved · bottom on ${result.groundSource==='coordinate-origin'?'origin ground':'local road'}${result.warning?' · '+result.warning:''} · review box and Save CVAT`);
             else if(type==='ROTATE'||type==='SNAP_GROUND'||type==='SET_LABEL') {
-                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${result.groundSource==='coordinate-origin'?'coordinate origin + offset':'ground'} · ΔZ ${result.deltaZ.toFixed(2)}m · save via Save CVAT` : 'Editor updated · save via Save CVAT');
+                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${result.groundSource==='coordinate-origin'?'coordinate origin + offset':result.groundFallback?'road near LiDAR XY origin (fallback; verify remote terrain)':'local ground'} · ΔZ ${result.deltaZ.toFixed(2)}m · save via Save CVAT` : 'Editor updated · save via Save CVAT');
             } else if(type==='FREECAM')toast(result.enabled?'Free Cam: WASD/QE · Shift fast · right-click drag to look · Esc exit':'Returned camera control to CVAT');
             acceptSnapshot(await request('GET_SNAPSHOT'));
             status('Ready');
@@ -1612,8 +1642,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                     <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
                 </div>
                 <div class="c3d-action-grid" style="margin-top:2px;">
-                    <button id="c3d-btn-import-replace" class="c3d-btn-secondary" title="Xóa annotations cũ và thay thế toàn bộ bằng file JSON mới">🔄 Import (Ghi Đè / Replace)</button>
-                    <button id="c3d-btn-import-append" class="c3d-btn-secondary" title="Giữ nguyên annotations hiện có và nạp thêm các tracks mới từ file JSON">➕ Import (Thêm Vào / Append)</button>
+                    <button id="c3d-btn-import-replace" class="c3d-btn-secondary" title="Chỉnh đối tượng đang có theo #clientID trên toàn bộ frame trong file, giữ ID">Chỉnh ID theo file JSON</button>
                 </div>
                 <input type="file" id="c3d-file-import" accept=".json" style="display:none" />
                 <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
@@ -1646,7 +1675,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.17.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.17.5 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
@@ -1664,22 +1693,15 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 toast('Đang đọc annotation và ID từ editor CVAT...');
                 const jobId = getJobId();
                 const res = await request('EXPORT_ALL_ANNOTATIONS', { jobId, sessionId: snapshot?.sessionId });
+                if(!res.data?.c3d?.toolVersion||!['tracks','shapes'].every(k=>(res.data[k]||[]).every(t=>Number.isInteger(t.clientID))))throw new Error('Export thiếu ID/phiên bản editor. Reload extension và tab CVAT rồi thử lại; không tải file raw thiếu định danh.');
                 const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
-                const a = document.createElement('a'); a.href = url; a.download = `cvat-job-${res.jobId}-annotations.json`;
+                const a = document.createElement('a'); a.href = url; a.download = `cvat-job-${res.jobId}-editor-v${res.data.c3d.toolVersion}-annotations.json`;
                 document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
                 toast(`Export thành công ${res.trackCount} tracks (${res.shapeCount} shapes)!`);
             } catch (error) { toast('Lỗi export: ' + error.message, true); }
         });
-        let currentImportMode = 'replace';
-        el('c3d-btn-import-replace')?.addEventListener('click', () => {
-            currentImportMode = 'replace';
-            el('c3d-file-import')?.click();
-        });
-        el('c3d-btn-import-append')?.addEventListener('click', () => {
-            currentImportMode = 'append';
-            el('c3d-file-import')?.click();
-        });
+        el('c3d-btn-import-replace')?.addEventListener('click', () => el('c3d-file-import')?.click());
         el('c3d-file-import')?.addEventListener('change', async (event) => {
             const file = event.target.files?.[0]; if (!file) return; event.target.value = '';
             try {
@@ -1688,7 +1710,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 if (!json.tracks && !json.shapes) throw new Error('File không chứa mảng tracks hoặc shapes của CVAT');
                 if(!window.__C3D_ANNOTATION_IO_UI)throw new Error('Import selection UI unavailable; reload extension');
                 importUI?.dispose();
-                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:currentImportMode,data:json});
+                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:'edit',data:parsed});
                 await importUI.open();
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });
@@ -1787,7 +1809,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         el('c3d-select-class').title=box?.label_name==='vehicles' ? (box.subType ? `Vehicle (${box.subType})` : 'Vehicle profile') : '';
         const canEdit=!!box&&!box.locked&&!box.groundTruth&&cap.edit&&!busy;
         for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
-        const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!settingsReady||(!settings.useOriginGround&&!math?.canManuallySnapGround(ground));
+        const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!settingsReady||(!settings.useOriginGround&&!cap.ground);
+        el('c3d-btn-ground').title='Snap xuống mặt đất cục bộ; nếu thiếu điểm, dùng cao độ đường đo gần gốc LiDAR XY (0,0). Giả định hệ tọa độ theo xe LiDAR; cần kiểm tra địa hình xa xe.';
         el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
         el('c3d-btn-autofit').disabled ||= !settingsReady;
         el('c3d-btn-adjust').disabled=!canEdit||!cap.ground||!settingsReady;

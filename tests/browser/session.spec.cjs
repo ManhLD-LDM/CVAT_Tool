@@ -10,7 +10,7 @@ test.beforeEach(async({page})=>{
    const responses={formats:{exporters:[{name:'Datumaro 3D 1.0',dimension:'3d',enabled:true}],importers:[{name:'CVAT 3D',enabled:true}]},
    user:{username:'test-annotator'},export:{rq_id:'export-test'},import:{rq_id:'import-test'},
    status:{status:'finished',result_url:'https://app.cvat.ai/api/jobs/17/dataset/export?download=true'},
-   'native-export':{schema:'cvat-3d-tool-native-annotations/v1',jobId:17,annotations:{tags:[],shapes:[],tracks:[{id:1,shapes:[{frame:0},{frame:7},{frame:14}]}]}},download:{bytes:[80,75,3,4]}};
+   'native-export':{schema:'cvat-3d-tool-native-annotations/v2',jobId:17,annotations:{c3d:{jobId:17,toolVersion:'1.17.3'},tags:[],shapes:[],tracks:[{id:1,clientID:38,shapes:[{frame:0},{frame:7},{frame:14}]}]}},download:{bytes:[80,75,3,4]}};
    return {ok:true,result:responses[q.operation]};
   }}};
   Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>window.clipboardText=text},configurable:true});
@@ -68,6 +68,11 @@ test('native JSON export uses annotation-read operation and never requests raw c
  await expect(page.locator('#status')).toContainText('Đã tải JSON native');
  expect(await page.evaluate(()=>window.apiCalls.map(q=>q.operation))).toEqual(['native-export']);
  expect(await page.evaluate(()=>window.cookieReads)).toBe(0);expect(await page.evaluate(()=>window.downloads)).toBe(1);
+});
+
+test('native export refuses a raw API response without editor display IDs and metadata',async({page})=>{
+ await page.evaluate(()=>{chrome.tabs.sendMessage=async()=>({ok:true,result:{annotations:{tracks:[{id:70115}],shapes:[],tags:[]}}});});
+ await page.locator('#export-native').click();await expect(page.locator('#status')).toContainText('không có ID editor');expect(await page.evaluate(()=>downloads)).toBe(0);
 });
 
 test('dataset export refusal reports permission error; backup failure never uploads annotations',async({page})=>{
