@@ -108,7 +108,7 @@
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchUI=null,updateUI=null,serverImportPending=false;
+    let batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -116,7 +116,7 @@
     const text = (id, value) => { const node=el(id); if(node) node.textContent=value; };
     const scopeKey = s => s ? `${s.sessionId}:${s.jobId}:${s.frame}` : '';
     function request(type, payload = {}) {
-        if(type==='IMPORT_ALL_ANNOTATIONS')serverImportPending=true;
+        if(serverImportPending&&['EXPORT_ALL_ANNOTATIONS','PREVIEW_ANNOTATION_IMPORT','IMPORT_ALL_ANNOTATIONS'].includes(type))return Promise.reject(new Error('Đã gửi import server; nạp lại kết quả trước khi dùng editor JSON'));
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
             const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS') || type==='PREPARE_RELOAD';
@@ -249,7 +249,7 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.15.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.16.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
@@ -267,7 +267,7 @@
         }
         el('c3d-btn-export-ann')?.addEventListener('click', async () => {
             try {
-                toast('Đang tải toàn bộ annotations từ CVAT server...');
+                toast('Đang đọc annotation và ID từ editor CVAT...');
                 const jobId = getJobId();
                 const res = await request('EXPORT_ALL_ANNOTATIONS', { jobId, sessionId: snapshot?.sessionId });
                 const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
@@ -289,19 +289,13 @@
         el('c3d-file-import')?.addEventListener('change', async (event) => {
             const file = event.target.files?.[0]; if (!file) return; event.target.value = '';
             try {
-                const text = await file.text(), json = JSON.parse(text);
+                if(file.size>32*1024*1024)throw new Error('JSON vượt 32 MiB; chia nhỏ file trước khi import');
+                const text = await file.text(), parsed = JSON.parse(text),json=parsed.annotations||parsed;
                 if (!json.tracks && !json.shapes) throw new Error('File không chứa mảng tracks hoặc shapes của CVAT');
-                const trackCount = json.tracks?.length || 0, shapeCount = json.shapes?.length || 0;
-                const isReplace = currentImportMode === 'replace';
-                const confirmMsg = isReplace
-                    ? `[GHI ĐÈ / REPLACE]\nXác nhận XÓA toàn bộ annotations cũ và thay thế bằng ${trackCount} tracks (${shapeCount} shapes)?\n(Thao tác sẽ thay thế toàn bộ annotations trên CVAT server)`
-                    : `[THÊM VÀO / APPEND]\nXác nhận THÊM ${trackCount} tracks (${shapeCount} shapes) vào danh sách annotations hiện có?\n(Thao tác sẽ giữ nguyên annotations cũ và tạo thêm tracks mới)`;
-                if (!window.confirm(confirmMsg)) return;
-                toast(isReplace ? 'Đang ghi đè toàn bộ annotations lên CVAT...' : 'Đang thêm mới annotations vào CVAT...');
-                const jobId = getJobId();
-                const res = await request('IMPORT_ALL_ANNOTATIONS', { payload: json, jobId, sessionId: snapshot?.sessionId, mode: currentImportMode });
-                toast(`Import (${isReplace ? 'Ghi đè' : 'Thêm mới'}) thành công ${res.trackCount} tracks! Đang tải lại trang...`);
-                setTimeout(() => window.location.reload(), 1500);
+                if(!window.__C3D_ANNOTATION_IO_UI)throw new Error('Import selection UI unavailable; reload extension');
+                importUI?.dispose();
+                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:currentImportMode,data:json});
+                await importUI.open();
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
@@ -496,7 +490,7 @@
         else if(root){closeSettings();batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;updateUI?.dispose();updateUI=null;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
@@ -505,6 +499,11 @@
         if(message?.type!=='C3D_SESSION_API')return;
         if(sender.id!==globalThis.chrome?.runtime?.id||sender.url?.split('?')[0]!==chrome.runtime.getURL('session.html'))return;
         if(updateUI?.isHolding?.()){reply({ok:false,error:'Đang lưu/cập nhật extension; chờ reload xong trước khi dùng phiên CVAT'});return true;}
+        if(message.operation==='native-export'){
+            if(serverImportPending){reply({ok:false,error:'Đã gửi import; reload kết quả import trước khi export editor'});return true;}
+            if(message.jobId!==snapshot?.jobId||message.origin!==location.origin){reply({ok:false,error:'Job/server changed'});return true;}
+            request('EXPORT_ALL_ANNOTATIONS',{jobId:message.jobId,sessionId:snapshot.sessionId}).then(result=>reply({ok:true,result:{schema:'cvat-3d-tool-native-annotations/v2',jobId:result.jobId,source:'native-editor-including-unsaved',annotations:result.data}}),error=>reply({ok:false,error:error.message}));return true;
+        }
         sessionTransport(message).then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));
         return true;
     }

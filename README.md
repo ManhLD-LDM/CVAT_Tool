@@ -1,4 +1,16 @@
-# CVAT 3D TOOL 1.15.1
+# CVAT 3D TOOL 1.16.0
+
+## JSON export/import giữ ID hiển thị — 1.16.0
+
+Export JSON trên HUD (và JSON native trong trang Phiên) lấy dữ liệu native editor, gồm chỉnh sửa chưa Save, `clientID` là số hiển thị và `id` là ID database. File có metadata server/job và schema nhãn. JSON cũ chỉ có ID database được đối chiếu ID đó trong job hiện tại; không dùng số thứ tự mảng để đoán số box.
+
+Import Replace mở danh sách cho chọn từng ID, tìm theo ID/class, hoặc chọn **Replace toàn bộ job**. Thay một ID nghĩa là thay toàn bộ keyframe, geometry, nhãn, attributes và visibility của track đó; keyframe cũ vắng trong file được bỏ. Đối tượng đang có được sửa bằng native ObjectState.save(), không bị xóa/tạo lại, nên giữ `clientID` và ID database trong editor hiện tại. Replace toàn bộ xóa ID đích không có trong file; chế độ chọn ID giữ nguyên các ID ngoài lựa chọn. Nếu ID không tồn tại, Replace dừng và yêu cầu dùng Add; không tự biến Replace thành tạo ID mới.
+
+Import Add cũng mở danh sách chọn ID nguồn. Nó tạo đúng những đối tượng đã chọn, giữ nguyên đối tượng đang có; CVAT cấp ID mới và UI báo ID mới sau khi thêm. Không thể Add một đối tượng thứ hai dùng trùng số ID của đối tượng đã tồn tại. Group thay đổi được tạo lại giữa các ID đã chọn, không ghép ngoài ý muốn với thành viên không được chọn; số group có thể đổi.
+
+Import áp dụng vào editor và cập nhật render, có native Undo theo thao tác. **Save CVAT để lưu server; không tự reload.** Kế hoạch hết hạn khi editor thay đổi; preflight chặn target khóa, dữ liệu lỗi, label/attribute không ánh xạ chính xác. Hiện hỗ trợ cuboid track/shape; tags/intervals/skeleton hoặc đổi frame bắt đầu của đối tượng bị chặn rõ ràng. Luồng native có thể dừng sau một số thao tác nếu lỗi; UI báo phần đã sửa và yêu cầu kiểm tra Undo, không tuyên bố rollback nguyên tử.
+
+Số `clientID` thuộc phiên editor, CVAT có thể cấp lại khi tải mới job; extension không ép bộ đếm native hoặc sửa CVAT core để cố định số qua mọi phiên. Đảm bảo ở đây là Replace không tái tạo đối tượng hoặc tăng nó thành #80… trong phiên hiện tại. ID database của đối tượng được giữ khi Save bằng native CVAT. Import ZIP dataset và CLI là luồng server khác, không có bảo đảm ID của luồng JSON HUD. Kết quả kiểm thử ngoại tuyến không thay cho nghiệm thu import/export job thật.
 
 ## Windows double-click installer — 1.15.1
 
@@ -144,8 +156,8 @@ Bấm **Phiên CVAT & Import/Export** trên HUD để mở trang riêng của ex
 - **Lấy thông tin phiên:** kiểm tra người dùng bằng API users/self, chỉ đọc cookie sessionid/CSRF khi bấm nút. Giá trị mặc định che; có nút hiện/copy/xóa. Cookie HttpOnly được đọc bằng service worker, chỉ trả về trang extension, không chuyển qua bridge CustomEvent hay DOM của CVAT. Rời tab sẽ xóa giá trị hiển thị; không lưu vào storage/log/file chẩn đoán. Cookie đã copy vẫn có thể còn trong clipboard.
 - **Copy mẫu Python:** dùng biến môi trường CVAT_SESSIONID/CVAT_CSRFTOKEN, URL server và job hiện tại; không nhúng cookie thật. Mẫu kiểm tra đăng nhập và ghi chú endpoint import/export, chưa là CLI import/export đầy đủ.
 - **Export ZIP 3D:** đọc và lọc định dạng 3D được bật trên server, ưu tiên Datumaro 3D 1.0. POST dataset/export với save_images=false → theo dõi rq_id → tải result_url. Không kèm PCD/ảnh. Không cần đọc sessionID trước. Kiểm tra signature ZIP và báo lỗi quyền rõ ràng. Trên tài khoản kiểm thử job601, native export bị từ chối quyền; owner/admin cần kiểm tra quyền nếu muốn ZIP dataset.
-- **Export JSON native (API đọc) — 1.11.1:** đọc annotation đã Save từ API, giữ nguyên tracks và các mốc frame/keyframe mà API trả về, thêm server/job và bảng label cơ bản. Dùng quyền đọc annotation hiện có; không phải full task backup, không kèm PCD hay toàn bộ schema attributes và không Upload annotations trực tiếp như ZIP dataset. Không tự thay thế bản ZIP dự phòng trước import.
-- **Import:** chọn file/định dạng, nhập job ID và xác nhận tác động. Tool export bản dự phòng theo định dạng export đã chọn và chờ download hoàn tất trước khi upload. Import có thể thay thế annotation server, không có Undo native. File và download tối đa **8 MiB**; dữ liệu lớn hơn dùng giao diện native CVAT. Save editor trước khi bắt đầu.
+- **Export JSON native — 1.16.0:** đọc native editor (gồm chưa Save), giữ cả clientID hiển thị và ID database. Dùng Import JSON trên HUD để chọn ID Replace/Add. Không phải ZIP dataset và không kèm PCD.
+- **Import ZIP dataset (khác JSON HUD):** chọn file/định dạng, nhập job ID và xác nhận tác động. Tool export bản dự phòng theo định dạng export đã chọn và chờ download hoàn tất trước khi upload. Import có thể thay thế annotation server, không có Undo native. File và download tối đa **8 MiB**; dữ liệu lớn hơn dùng giao diện native CVAT. Save editor trước khi bắt đầu.
 - Sau import, bấm **Nạp lại tab CVAT** trước khi tiếp tục sửa. Không Save editor cũ. Bản này dùng reload có chủ đích để đồng bộ dữ liệu import; Auto-Fit/QC và các thao tác box vẫn cập nhật realtime.
 - Khi đã gửi import, transport chặn import/export mới đến khi tab CVAT reload. Nếu timeout/đóng trang, tác vụ server có thể vẫn chạy: kiểm tra Requests trước khi thử lại.
 - Chỉ làm việc với tab/job đã mở; đổi server/job sẽ chặn thao tác. Phiên adapter nội bộ không phải sessionid đăng nhập. SSO/token-only hoặc cookie có tên tùy biến chưa có chức năng copy tương ứng; API vẫn dùng cookie phiên trình duyệt nếu server hỗ trợ.

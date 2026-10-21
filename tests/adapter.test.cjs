@@ -472,53 +472,14 @@ test('unchecked Ground Snap refuses missing road evidence; checking origin works
     await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true});assert.equal(h.history.length,1);h.adapter.dispose();
 });
 
-test('EXPORT_ALL_ANNOTATIONS fetches annotations and includes labels_manifest',async()=>{
-    const win={
-        location:{pathname:'/tasks/2837/jobs/9426'},
-        CustomEvent:class{constructor(type,init){this.type=type;this.detail=init.detail;}},
-        setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){},
-        document:{cookie:'csrftoken=test-csrf-token-123'},
-        fetch:async(url,opts)=>{
-            if(url.includes('/api/jobs/9426/annotations'))return{ok:true,json:async()=>({version:1,tracks:[],shapes:[]})};
-            if(url.includes('/api/labels?job_id=9426'))return{ok:true,json:async()=>({results:[{id:10,name:'vehicles'}]})};
-            throw new Error('Unexpected URL: '+url);
-        }
-    };
-    const h=harness({adapterEnv:{window:win}});
-    const res=await h.adapter.command('EXPORT_ALL_ANNOTATIONS',{jobId:9426});
-    assert.equal(res.success,true);assert.equal(res.jobId,9426);
-    assert.deepEqual(res.data.labels_manifest,[{id:10,name:'vehicles'}]);
-    h.adapter.dispose();
+test('native annotation IO commands route through the dedicated module without REST recreation',async()=>{
+ const calls=[],factory=env=>({exported:async p=>{calls.push(['export',p]);return {success:true};},preview:async p=>{calls.push(['preview',p]);return {token:'x'};},apply:async p=>{calls.push(['apply',p]);return {success:true};}});
+ const h=harness({adapterEnv:{annotationIOFactory:factory}});
+ await h.adapter.command('EXPORT_ALL_ANNOTATIONS',{jobId:9426});
+ await h.adapter.command('PREVIEW_ANNOTATION_IMPORT',{jobId:9426});
+ await h.adapter.command('IMPORT_ALL_ANNOTATIONS',{token:'x'});
+ assert.deepEqual(calls.map(x=>x[0]),['export','preview','apply']);h.adapter.dispose();
 });
-
-test('IMPORT_ALL_ANNOTATIONS uses labels_manifest for mapping and attaches X-CSRFToken',async()=>{
-    let capturedHeaders=null,putBody=null;
-    const win={
-        location:{pathname:'/tasks/2837/jobs/9426'},
-        CustomEvent:class{constructor(type,init){this.type=type;this.detail=init.detail;}},
-        setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){},
-        document:{cookie:'sessionid=xyz; csrftoken=secret-token-456; other=1'},
-        fetch:async(url,opts)=>{
-            if(url.includes('/api/labels?job_id=9426'))return{ok:true,json:async()=>({results:[{id:55,name:'vehicles',attributes:[]}]})};
-            if(url.includes('/api/jobs/9426/annotations')){capturedHeaders=opts.headers;putBody=JSON.parse(opts.body);return{ok:true,text:async()=>''};}
-            throw new Error('Unexpected URL: '+url);
-        }
-    };
-    const h=harness({adapterEnv:{window:win}});
-    const importPayload={
-        version:1,
-        labels_manifest:[{id:999,name:'vehicles'}],
-        tracks:[{id:1,label_id:999,shapes:[{id:2,points:[0,0,0,0,0,0,1,1,1]}]}],
-        shapes:[]
-    };
-    const res=await h.adapter.command('IMPORT_ALL_ANNOTATIONS',{jobId:9426,payload:importPayload});
-    assert.equal(res.success,true);
-    assert.equal(capturedHeaders['X-CSRFToken'],'secret-token-456');
-    assert.equal(putBody.tracks[0].label_id,55);
-    h.adapter.dispose();
-});
-
-
 
 test('native confirmation accepts float buffer precision and equivalent wrapped Euler angles',async()=>{
  const h=harness(),target=h.state.annotation.annotations.states[0],save=target.save;

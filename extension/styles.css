@@ -575,3 +575,7 @@
 .c3d-update-row button{background:#28282d;color:#ddd;border:1px solid #45454d;border-radius:3px;font:inherit;padding:2px 5px;cursor:pointer}
 .c3d-reload-hold{color-scheme:dark;background:#18181d;color:#eee;border:1px solid #52525b;border-radius:8px;padding:24px;font:14px system-ui;max-width:400px}
 .c3d-reload-hold::backdrop{background:#0009}
+.c3d-import-dialog{color-scheme:dark;background:#18181d;color:#e4e4e7;border:1px solid #52525b;border-radius:8px;width:min(900px,90vw);max-height:90vh;overflow:auto;padding:22px;font:13px system-ui}
+.c3d-import-dialog::backdrop{background:#0009}.c3d-import-dialog button,.c3d-import-dialog select,.c3d-import-dialog input[type=search]{background:#303039;color:#eee;border:1px solid #52525b;padding:7px;border-radius:4px;margin:5px}
+.c3d-import-rows{max-height:45vh;overflow:auto;scrollbar-width:thin;scrollbar-color:#52525b #18181d;margin:10px 0}
+.c3d-import-rows label{display:block;padding:8px;border-bottom:1px solid #333}.c3d-import-rows label[hidden]{display:none}

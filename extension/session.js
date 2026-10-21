@@ -88,7 +88,7 @@ el('export-native').onclick=()=>run(async()=>{
  status('Đang đọc annotation đã Save từ API…');
  const data=await api('native-export');
  await save(Array.from(new TextEncoder().encode(JSON.stringify(data,null,2))),'cvat-job'+context.jobId+'-native-'+Date.now()+'.json','application/json');
- status('Đã tải JSON native của annotation đã Save (tracks/keyframes). Đây không phải ZIP dataset để Upload annotations trực tiếp trong CVAT.');
+ status('Đã tải JSON native từ editor, gồm số ID hiển thị và chỉnh sửa chưa Save. Dùng Import JSON trên HUD để chọn ID; đây không phải ZIP dataset.');
 });
 el('import').onclick=()=>run(async()=>{
  await refresh();

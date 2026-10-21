@@ -4614,6 +4614,182 @@ if(typeof module!=='undefined')module.exports={createBatchController};
 })(typeof window!=='undefined'?window:globalThis);
 
 ;
+/* Native 3D JSON round-trip. Existing objects are edited, never recreated. */
+(function(root){
+'use strict';
+const clone=value=>JSON.parse(JSON.stringify(value)),kinds=['tracks','shapes'];
+const attrs=list=>Object.fromEntries((list||[]).map(a=>[a.spec_id,String(a.value)]));
+function createAnnotationIO(env){
+ let plan=null,seq=0,running=false;
+ function context(payload={}){
+  const s=env.snapshot(),job=env.job();
+  if(!s.connected||payload.jobId!=null&&payload.jobId!==s.jobId||payload.sessionId!=null&&payload.sessionId!==s.sessionId)throw new Error('Job/session changed; reopen import');
+  if(!job?.annotations?.export||!job.annotations.get)throw new Error('Native annotation APIs unavailable');
+  return {s,job};
+ }
+ function editable(){env.assertEditable();if(running)throw new Error('Annotation import already in progress');}
+ async function exported(payload){
+  if(running)throw new Error('Wait for annotation import before exporting');
+  const {s,job}=context(payload),data=clone(await job.annotations.export());context({jobId:s.jobId,sessionId:s.sessionId});
+  data.c3d={schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,identity:'clientID is the CVAT display ID in this editor; id is the database ID',source:'native-editor-including-unsaved'};
+  data.labels_manifest=clone(job.labels||[]);
+  return {success:true,jobId:s.jobId,data,trackCount:data.tracks?.length||0,shapeCount:data.shapes?.length||0};
+ }
+ function remap(input,job,data){
+  const labels=job.labels||[],source=data.labels_manifest||[],item=clone(input),src=source.find(l=>l.id===item.label_id);
+  const label=src?labels.find(l=>l.name===src.name):labels.find(l=>l.id===item.label_id);
+  if(!label)throw new Error('Cannot map label '+item.label_id+' exactly; labels_manifest required');
+  const targetAttrs=label.attributes||[];
+  function mapAttrs(values){
+   return (values||[]).map(a=>{
+    const from=src?.attributes?.find(x=>x.id===a.spec_id),to=from?targetAttrs.find(x=>x.name===from.name&&x.mutable===from.mutable):targetAttrs.find(x=>x.id===a.spec_id);
+    if(!to)throw new Error('Cannot map attribute '+a.spec_id+' exactly; import stopped');
+    return {spec_id:to.id,value:String(a.value)};
+   });
+  }
+  item.label_id=label.id;item.attributes=mapAttrs(item.attributes);
+  for(const shape of item.shapes||[])shape.attributes=mapAttrs(shape.attributes);
+  return item;
+ }
+ function validate(item,kind,job){
+  if(item.elements?.length)throw new Error('Skeleton import is not supported by 3D ID-preserving import');
+  const shapes=kind==='tracks'?item.shapes:[item];
+  if(!Array.isArray(shapes)||!shapes.length)throw new Error('Track must contain keyframes');
+  const frames=new Set();
+  for(const s of shapes){
+   if(s.type!=='cuboid'||!env.math.parseCVAT16Points(s.points)||!Number.isInteger(s.frame)||s.frame<job.startFrame||s.frame>job.stopFrame||frames.has(s.frame))throw new Error('Invalid/duplicate/out-of-job cuboid frame');
+   if(s.outside!=null&&typeof s.outside!=='boolean'||s.occluded!=null&&typeof s.occluded!=='boolean')throw new Error('Invalid visibility flags');
+   frames.add(s.frame);
+  }
+  if(kind==='tracks'&&item.frame!==Math.min(...frames))throw new Error('Track frame must equal its first keyframe');
+  if(item.group!=null&&(!Number.isInteger(item.group)||item.group<0))throw new Error('Invalid group');
+ }
+ async function preview(payload){
+  editable();const {s,job}=context(payload),data=payload.payload;
+  if(!data||!Array.isArray(data.tracks||[])||!Array.isArray(data.shapes||[]))throw new Error('Invalid annotation file');
+  if((data.tags||[]).length||(data.intervals||[]).length)throw new Error('This 3D import supports cuboid tracks/shapes only; tags/intervals are not silently discarded');
+  if(data.c3d&&(data.c3d.jobId!==s.jobId||data.c3d.origin!==env.origin())&&payload.mode!=='append')throw new Error('File belongs to another job/server. Use Add; Replace cannot reuse foreign IDs');
+  const current=clone(await job.annotations.export()),rows=[],seen=new Set(),mode=payload.mode==='append'?'append':'replace';
+  for(const kind of kinds)for(let i=0;i<(data[kind]||[]).length;i++){
+   const original=data[kind][i],key=kind+':'+i,item=remap(original,job,data);validate(item,kind,job);
+   // Server IDs map raw exports safely. Display IDs are only trusted with same-job metadata.
+   const target=(current[kind]||[]).find(t=>Number.isInteger(item.id)&&t.id===item.id)||
+    (data.c3d?.sessionId===s.sessionId&&item.id==null&&Number.isInteger(item.clientID)&&(current[kind]||[]).find(t=>t.clientID===item.clientID));
+   if(mode==='replace'&&target){const identity=kind+':'+target.clientID;if(seen.has(identity))throw new Error('Duplicate target ID in file');seen.add(identity);}
+   rows.push({key,kind,item,target,sourceClientId:original.clientID??null,sourceServerId:original.id??null,
+    targetClientId:target?.clientID??null,label:job.labels.find(l=>l.id===item.label_id).name,frames:kind==='tracks'?item.shapes.length:1});
+  }
+  if(!rows.length)throw new Error('No cuboid objects in file');
+  editable();context({jobId:s.jobId,sessionId:s.sessionId});
+  plan={token:'io-'+(++seq),job,s,mode,current,signature:JSON.stringify(current),rows};
+  return {token:plan.token,mode,jobId:s.jobId,existing:kinds.reduce((n,k)=>n+(current[k]?.length||0),0),
+   rows:rows.map(({item,target,...r})=>({...r,matched:!!target})),note:mode==='append'?'Add creates new CVAT IDs. Source IDs are shown for selection only.':'Replace keeps existing display/database IDs; selected tracks are replaced across all their keyframes.'};
+ }
+ async function getState(job,kind,item){
+  const frame=kind==='tracks'?Math.min(...item.shapes.map(s=>s.frame)):item.frame;
+  return (await job.annotations.get(frame,true,[])).find(s=>s.clientID===item.clientID&&s.objectType===(kind==='tracks'?'track':'shape'));
+ }
+ async function apply(payload){
+  editable();const {s,job}=context(payload),p=plan;
+  if(!p||p.token!==payload.token||p.job!==job||p.s.sessionId!==s.sessionId)throw new Error('Import preview expired');
+  if(!Array.isArray(payload.keys)||!payload.keys.length||new Set(payload.keys).size!==payload.keys.length)throw new Error('Choose at least one ID');
+  const selected=payload.keys.map(key=>p.rows.find(row=>row.key===key));if(selected.some(r=>!r))throw new Error('Unknown file selection');
+  if(JSON.stringify(await job.annotations.export())!==p.signature)throw new Error('Annotations changed after preview; reopen file');
+  const scope=payload.scope==='all'?'all':'selected';
+  if(scope==='all'&&(selected.length!==p.rows.length||p.mode!=='replace'))throw new Error('Replace all requires all file IDs');
+  const removals={tracks:[],shapes:[]};
+  if(p.mode==='replace'){
+   if(selected.some(r=>!r.target))throw new Error('Selected replacement ID not found. Use Add for new objects; no automatic new IDs during Replace');
+   for(const row of selected){
+    if(row.kind==='tracks'&&row.item.frame!==row.target.frame||row.kind==='shapes'&&row.item.frame!==row.target.frame)throw new Error('Moving an object start frame is unsupported without changing identity; import stopped');
+    if((row.item.group||0)!==(row.target.group||0)&&!job.annotations.group)throw new Error('Group changed but native grouping API is unavailable');
+    const state=await getState(job,row.kind,row.target);if(!state||typeof state.save!=='function'||state.lock||state.isGroundTruth)throw new Error('Target ID #'+row.target.clientID+' is missing/locked/read-only');
+    if(row.kind==='tracks')for(const shape of row.item.shapes){const state=(await job.annotations.get(shape.frame,true,[])).find(x=>x.clientID===row.target.clientID);if(!state||state.lock||state.isGroundTruth)throw new Error('A target frame is protected');}
+   }
+   if(scope==='all'){
+    if((p.current.tags||[]).length||(p.current.intervals||[]).length)throw new Error('Replace all would remove tags/intervals; use selected IDs');
+    for(const kind of kinds)for(const target of p.current[kind]||[])if(!selected.some(r=>r.kind===kind&&r.target.clientID===target.clientID)){
+     const state=await getState(job,kind,target);if(!state||state.lock||state.isGroundTruth)throw new Error('An omitted ID is locked/missing; cannot Replace all');removals[kind].push(target);
+    }
+   }
+  }
+  if((p.mode==='append'||kinds.some(k=>removals[k].length))&&typeof job.annotations.commit!=='function')throw new Error('Native commit API unavailable');
+  if(JSON.stringify(await job.annotations.export())!==p.signature)throw new Error('Annotations changed during preflight');
+  context({jobId:s.jobId,sessionId:s.sessionId});env.assertEditable();
+  if(running||plan!==p)throw new Error('Import preview was consumed or replaced');
+  if(p.mode==='append'&&selected.some(r=>r.item.group)&&!job.annotations.group)throw new Error('Grouped Add requires native grouping API');
+  running=true;plan=null;env.lock(true);const changed=[],added=[],removed=[],groups=[];let error=null,edits=0;
+  try{
+   if(p.mode==='append'){
+    const clean=(item)=>{const out=clone(item);delete out.id;delete out.clientID;out.group=0;for(const shape of out.shapes||[]){delete shape.id;delete shape.clientID;}return out;};
+    const add={tracks:[],shapes:[]};for(const row of selected)add[row.kind].push(clean(row.item));
+    await job.annotations.commit(add,{},s.frame);
+    const after=await job.annotations.export();
+    for(const kind of kinds)for(const item of after[kind]||[])if(!(p.current[kind]||[]).some(x=>x.clientID===item.clientID))added.push({kind,clientID:item.clientID});
+    if(added.length!==selected.length)throw new Error('Native Add count was not confirmed; inspect Undo');
+    for(const kind of kinds){const rows=selected.filter(r=>r.kind===kind),created=added.filter(r=>r.kind===kind);rows.forEach((r,i)=>r.addedId=created[i].clientID);}
+   }else{
+    for(const row of selected){
+     env.assertEditable();context({jobId:s.jobId,sessionId:s.sessionId});
+     const shapes=row.kind==='tracks'?row.item.shapes.slice().sort((a,b)=>a.frame-b.frame):[row.item];
+     const label=job.labels.find(l=>l.id===row.item.label_id),defaults=Object.fromEntries((label.attributes||[]).map(a=>[a.id,a.defaultValue??a.default_value??a.values?.[0]??'']));
+     let resolvedAttributes={...defaults,...attrs(row.item.attributes)};
+     for(const shape of shapes){
+      const state=(await job.annotations.get(shape.frame,true,[])).find(x=>x.clientID===row.target.clientID);
+      if(!state||state.lock||state.isGroundTruth)throw new Error('Target became protected during import');
+      state.label=label;state.points=shape.points.slice();
+      state.rotation=shape.rotation||0;state.outside=shape.outside||false;state.occluded=shape.occluded||false;state.zOrder=shape.z_order||0;
+      // ObjectState merges attributes; pass every schema field to clear stale values.
+      resolvedAttributes={...resolvedAttributes,...attrs(shape.attributes)};state.attributes={...resolvedAttributes};
+      if(row.kind==='tracks')state.keyframe=true;
+      await state.save();if(!changed.includes(row.target.clientID))changed.push(row.target.clientID);
+      if(++edits%20===0)await new Promise(resolve=>setTimeout(resolve,0));
+     }
+     if(row.kind==='tracks')for(const old of row.target.shapes)if(!row.item.shapes.some(x=>x.frame===old.frame)){
+      const state=(await job.annotations.get(old.frame,true,[])).find(x=>x.clientID===row.target.clientID);state.keyframe=false;await state.save();
+     }
+     const actual=(await job.annotations.export())[row.kind].find(x=>x.clientID===row.target.clientID);
+     if(!actual||actual.id!==row.target.id||actual.label_id!==row.item.label_id)throw new Error('Replacement identity/label changed; inspect Undo');
+     const actualShapes=row.kind==='tracks'?actual.shapes:[actual];
+     if(actualShapes.length!==shapes.length||shapes.some(shape=>{const found=actualShapes.find(x=>x.frame===shape.frame);return !found||!!found.outside!==!!shape.outside||!!found.occluded!==!!shape.occluded||(found.z_order||0)!==(shape.z_order||0)||Math.abs((found.rotation||0)-(shape.rotation||0))>1e-4||found.points.slice(0,9).some((v,i)=>Math.abs(i>=3&&i<=5?Math.atan2(Math.sin(v-shape.points[i]),Math.cos(v-shape.points[i])):v-shape.points[i])>1e-4);} ))throw new Error('Replacement geometry/keyframe set not confirmed; inspect Undo');
+     let expectedAttrs={...defaults,...attrs(row.item.attributes)};
+     for(const shape of shapes){
+      expectedAttrs={...expectedAttrs,...attrs(shape.attributes)};
+      const saved=actualShapes.find(x=>x.frame===shape.frame),actualAttrs={...attrs(actual.attributes),...attrs(saved.attributes)};
+      if((label.attributes||[]).some(a=>String(actualAttrs[a.id])!==String(expectedAttrs[a.id])))throw new Error('Replacement attributes not confirmed; inspect Undo');
+     }
+    }
+   }
+   // Group numbers are local to a collection. Recreate changed grouping among
+   // selected objects only; never attach them to unrelated existing members.
+   const changedGroups=new Set(selected.filter(r=>p.mode==='append'?!!r.item.group:(r.item.group||0)!==(r.target.group||0)).map(r=>r.item.group||0));
+   for(const sourceGroup of changedGroups){
+    context({jobId:s.jobId,sessionId:s.sessionId});env.assertEditable();
+    const rows=selected.filter(r=>(r.item.group||0)===sourceGroup),states=[];
+    const after=await job.annotations.export();
+    for(const row of rows){const actual=after[row.kind].find(t=>t.clientID===(p.mode==='append'?row.addedId:row.target.clientID));states.push(await getState(job,row.kind,actual));}
+    const assigned=await job.annotations.group(states,sourceGroup===0);groups.push({source:sourceGroup,assigned});
+    const grouped=await job.annotations.export();
+    if(rows.some(row=>{const actual=grouped[row.kind].find(t=>t.clientID===(p.mode==='append'?row.addedId:row.target.clientID));return !actual||(actual.group||0)!==assigned;}))throw new Error('Native grouping not confirmed');
+   }
+   if(p.mode==='replace'&&kinds.some(k=>removals[k].length)){
+     context({jobId:s.jobId,sessionId:s.sessionId});env.assertEditable();
+     await job.annotations.commit({},removals,s.frame);
+     const after=await job.annotations.export();
+     for(const kind of kinds)for(const target of removals[kind])if(!(after[kind]||[]).some(x=>x.clientID===target.clientID))removed.push(target.clientID);
+     if(removed.length!==kinds.reduce((n,k)=>n+removals[k].length,0))throw new Error('Deletion not fully confirmed; inspect Undo');
+   }
+  }catch(e){error=e.message;}
+  finally{try{await env.refresh(job);}catch(e){error=(error?error+'; ':'')+'Render refresh failed: '+e.message;}env.lock(false);running=false;}
+  return {success:!error,error,changed,added,removed,groups,saveRequired:true,
+   message:error?'Import stopped; earlier native edits may remain. Inspect Undo before retrying.':'Editor updated. Save CVAT to persist; no page reload needed.'};
+ }
+ return {exported,preview,apply};
+}
+root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')module.exports={createAnnotationIO};
+})(typeof window!=='undefined'?window:globalThis);
+
+;
 /* CVAT 2.76 adapter. Uses ObjectState.save + native Redux update/history.
  * No REST writes, server/client ID guessing or position-based mesh matching.
  */
@@ -5165,6 +5341,22 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                 publish();
             }
         });
+        const annotationIO=(env.annotationIOFactory||win.__C3D_ANNOTATION_IO?.createAnnotationIO)?.({
+            math,origin:()=>win.location?.origin||'',job:()=>editor()?.job?.instance,snapshot:getSnapshot,
+            assertEditable:()=>{
+                const s=getSnapshot();
+                const nativeReady=s.capabilities.edit||!!editor()?.job?.instance?.annotations?.commit;
+                if(!s.connected||!nativeReady||String(editor().workspace).toLowerCase()==='review'||canvas?.mode?.()!=='idle'||s.saveState==='saving')throw new Error('Import requires editable idle CVAT');
+                if([...pendingObjects].some(id=>id!=='annotation-io'))throw new Error('Another native edit is pending');
+            },
+            lock:value=>value?pendingObjects.add('annotation-io'):pendingObjects.delete('annotation-io'),
+            refresh:async job=>{
+                const s=getSnapshot();if(editor()?.job?.instance!==job)throw new Error('Job changed; reopen editor');
+                const states=await job.annotations.get(s.frame,true,[]),history=await job.actions.get();
+                if(editor()?.job?.instance===job&&getSnapshot().frame===s.frame)store.dispatch({type:'UPDATE_ANNOTATIONS_SUCCESS',payload:{states,history}});
+                publish();
+            }
+        });
         function placementOptions(payload){
             const fallbackGroundHeight=payload.fallbackGroundHeight??0,useOriginGround=payload.useOriginGround??false;
             const moveLongitudinal=payload.moveLongitudinal??'none',moveLateral=payload.moveLateral??'none';
@@ -5252,7 +5444,7 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.15.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.16.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -5360,235 +5552,9 @@ if(typeof module!=='undefined')module.exports={createBatchController};
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
                     const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud'};
                 }
-                case 'EXPORT_ALL_ANNOTATIONS': {
-                    let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;
-                    if (!jobId) {
-                        const m = win.location?.pathname?.match(/\/jobs\/(\d+)/);
-                        if (m) jobId = Number(m[1]);
-                    }
-                    if (!jobId) throw new Error('Không xác định được Job ID từ URL');
-                    const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
-                        method: 'GET',
-                        headers: { 'Accept': '*/*' },
-                        credentials: 'same-origin'
-                    });
-                    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-                    const data = await res.json();
-                    try {
-                        const lblRes = await win.fetch(`/api/labels?job_id=${jobId}`, {
-                            headers: { 'Accept': 'application/json' },
-                            credentials: 'same-origin'
-                        });
-                        if (lblRes.ok) {
-                            const lblData = await lblRes.json();
-                            data.labels_manifest = lblData.results || [];
-                        }
-                    } catch (_) {}
-                    return {
-                        success: true,
-                        jobId,
-                        data,
-                        trackCount: data.tracks?.length || 0,
-                        shapeCount: data.shapes?.length || 0
-                    };
-                }
-                case 'IMPORT_ALL_ANNOTATIONS': {
-                    let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;
-                    if (!jobId) {
-                        const m = win.location?.pathname?.match(/\/jobs\/(\d+)/);
-                        if (m) jobId = Number(m[1]);
-                    }
-                    if (!jobId) throw new Error('Không xác định được Job ID từ URL');
-                    const annPayload = payload.payload;
-                    if (!annPayload || (!annPayload.tracks && !annPayload.shapes)) {
-                        throw new Error('Payload annotations không hợp lệ (cần mảng tracks hoặc shapes)');
-                    }
-
-                    // 1. Fetch valid labels of target Job
-                    let targetLabels = [];
-                    try {
-                        const lblRes = await win.fetch(`/api/labels?job_id=${jobId}`, {
-                            headers: { 'Accept': 'application/json' },
-                            credentials: 'same-origin'
-                        });
-                        if (lblRes.ok) {
-                            const lblData = await lblRes.json();
-                            targetLabels = lblData.results || [];
-                        }
-                    } catch (e) {
-                        console.warn('[CVAT 3D TOOL] Could not fetch target labels:', e);
-                    }
-
-                    const validLabelIds = new Set(targetLabels.map(l => l.id));
-                    const defaultLabelId = targetLabels.length > 0 ? targetLabels[0].id : null;
-
-                    // 2. Build label remap dictionary for cross-job imports
-                    const labelMap = new Map();
-                    const importedLabelIds = new Set();
-                    for (const t of (annPayload.tracks || [])) if (t.label_id != null) importedLabelIds.add(t.label_id);
-                    for (const s of (annPayload.shapes || [])) if (s.label_id != null) importedLabelIds.add(s.label_id);
-
-                    // A. Exact name matching if labels_manifest is present
-                    if (annPayload.labels_manifest && Array.isArray(annPayload.labels_manifest)) {
-                        const manifestMap = new Map(annPayload.labels_manifest.map(l => [l.id, l]));
-                        for (const importedId of importedLabelIds) {
-                            const srcLabel = manifestMap.get(importedId);
-                            if (srcLabel && srcLabel.name) {
-                                const targetLabel = targetLabels.find(l => l.name.toLowerCase() === srcLabel.name.toLowerCase());
-                                if (targetLabel) labelMap.set(importedId, targetLabel.id);
-                            }
-                        }
-                    }
-
-                    // B. Heuristic / attribute / geometry inference for raw exports
-                    for (const importedId of importedLabelIds) {
-                        if (labelMap.has(importedId)) continue;
-                        if (validLabelIds.has(importedId)) {
-                            labelMap.set(importedId, importedId);
-                            continue;
-                        }
-                        let matchedLabel = null;
-                        const sampleTracks = (annPayload.tracks || []).filter(t => t.label_id === importedId);
-                        for (const tr of sampleTracks) {
-                            for (const sh of (tr.shapes || [])) {
-                                const attrs = sh.attributes || [];
-                                for (const a of attrs) {
-                                    const val = String(a.value).toLowerCase();
-                                    if (['standing', 'sitting', 'bending', 'child', 'adult'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /pedestrian/i.test(l.name));
-                                        break;
-                                    }
-                                    if (val === 'true' || val === 'false') {
-                                        matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
-                                        break;
-                                    }
-                                    if (['car', 'truck', 'bus', 'van', 'pickup', 'contruction', 'trailer', 'tricycle', 'stroller', 'wheelchair'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
-                                        break;
-                                    }
-                                    if (['cat', 'dog', 'cow', 'buffalow', 'buffalo', 'horse'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /animal/i.test(l.name));
-                                        break;
-                                    }
-                                    if (['brick', 'traffic barrier', 'traffic cone', 'sack', 'trash_bag', 'container', 'metal_sheet', 'wood', 'pole', 'charging_point'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /obstacle/i.test(l.name));
-                                        break;
-                                    }
-                                }
-                                if (matchedLabel) break;
-                                const pts = sh.points || [];
-                                if (pts.length >= 9) {
-                                    const l = pts[6], w = pts[7], h = pts[8];
-                                    if (h > 1.2 && l < 0.9 && w < 0.9) {
-                                        matchedLabel = targetLabels.find(l => /pedestrian/i.test(l.name));
-                                        break;
-                                    } else if (l >= 1.2 && l <= 2.4 && w <= 1.2) {
-                                        matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
-                                        break;
-                                    } else if (l >= 2.5) {
-                                        matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
-                                        break;
-                                    }
-                                }
-                            }
-                            if (matchedLabel) break;
-                        }
-
-                        if (!matchedLabel) {
-                            matchedLabel = targetLabels[0] || null;
-                        }
-                        if (matchedLabel) {
-                            labelMap.set(importedId, matchedLabel.id);
-                        }
-                    }
-
-                    // 3. Clean and sanitize tracks and shapes (strip old server IDs, remap labels, filter attributes)
-                    const cleanTracks = (annPayload.tracks || []).map(t => {
-                        const { id, ...trackCopy } = t;
-                        if (trackCopy.label_id != null && labelMap.has(trackCopy.label_id)) {
-                            trackCopy.label_id = labelMap.get(trackCopy.label_id);
-                        } else if (validLabelIds.size > 0 && !validLabelIds.has(trackCopy.label_id)) {
-                            trackCopy.label_id = defaultLabelId;
-                        }
-
-                        const targetLabel = targetLabels.find(l => l.id === trackCopy.label_id);
-                        const validSpecIds = new Set((targetLabel?.attributes || []).map(a => a.id));
-
-                        if (trackCopy.shapes) {
-                            trackCopy.shapes = trackCopy.shapes.map(s => {
-                                const { id: sId, ...shapeCopy } = s;
-                                shapeCopy.keyframe = true;
-                                if (shapeCopy.attributes && shapeCopy.attributes.length > 0) {
-                                    shapeCopy.attributes = shapeCopy.attributes.map(attr => {
-                                        if (validSpecIds.has(attr.spec_id)) return attr;
-                                        const val = String(attr.value).toLowerCase();
-                                        const matchingAttr = (targetLabel?.attributes || []).find(targetAttr => {
-                                            return (targetAttr.values || []).some(v => String(v).toLowerCase() === val) ||
-                                                   (targetAttr.input_type === 'checkbox' && (val === 'true' || val === 'false'));
-                                        });
-                                        if (matchingAttr) return { spec_id: matchingAttr.id, value: attr.value };
-                                        return null;
-                                    }).filter(Boolean);
-                                }
-                                return shapeCopy;
-                            });
-                        }
-                        return trackCopy;
-                    });
-
-                    const cleanShapes = (annPayload.shapes || []).map(s => {
-                        const { id, ...shapeCopy } = s;
-                        if (shapeCopy.label_id != null && labelMap.has(shapeCopy.label_id)) {
-                            shapeCopy.label_id = labelMap.get(shapeCopy.label_id);
-                        } else if (validLabelIds.size > 0 && !validLabelIds.has(shapeCopy.label_id)) {
-                            shapeCopy.label_id = defaultLabelId;
-                        }
-                        return shapeCopy;
-                    });
-
-                    const uploadPayload = {
-                        version: annPayload.version || 0,
-                        tags: annPayload.tags || [],
-                        shapes: cleanShapes,
-                        tracks: cleanTracks
-                    };
-
-                    const cookieStr = (win.document?.cookie || doc?.cookie || '');
-                    const csrfMatch = cookieStr.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-                    const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : '';
-
-                    const reqHeaders = {
-                        'Content-Type': 'application/json',
-                        'Accept': '*/*'
-                    };
-                    if (csrfToken) {
-                        reqHeaders['X-CSRFToken'] = csrfToken;
-                    }
-
-                    const mode = payload.mode === 'append' ? 'append' : 'replace';
-                    const endpoint = mode === 'append'
-                        ? `/api/jobs/${jobId}/annotations/?action=create`
-                        : `/api/jobs/${jobId}/annotations`;
-                    const httpMethod = mode === 'append' ? 'PATCH' : 'PUT';
-
-                    const res = await win.fetch(endpoint, {
-                        method: httpMethod,
-                        headers: reqHeaders,
-                        credentials: 'same-origin',
-                        body: JSON.stringify(uploadPayload)
-                    });
-                    if (!res.ok) {
-                        const errText = await res.text();
-                        throw new Error(`HTTP ${res.status}: ${errText.slice(0, 300)}`);
-                    }
-                    return {
-                        success: true,
-                        jobId,
-                        mode,
-                        trackCount: uploadPayload.tracks.length,
-                        shapeCount: uploadPayload.shapes.length
-                    };
-                }
+                case 'EXPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.exported(payload);
+                case 'PREVIEW_ANNOTATION_IMPORT': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.preview(payload);
+                case 'IMPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.apply(payload);
                 case 'SET_QC_APPEARANCE': return setAppearance(payload.colors || []);
                 case 'CLEAR_QC_APPEARANCE': clearAppearance(); return {cleared:true};
                 case 'FREECAM': return setFreeCamera(!!payload.enabled);

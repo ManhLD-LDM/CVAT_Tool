@@ -549,6 +549,22 @@
                 publish();
             }
         });
+        const annotationIO=(env.annotationIOFactory||win.__C3D_ANNOTATION_IO?.createAnnotationIO)?.({
+            math,origin:()=>win.location?.origin||'',job:()=>editor()?.job?.instance,snapshot:getSnapshot,
+            assertEditable:()=>{
+                const s=getSnapshot();
+                const nativeReady=s.capabilities.edit||!!editor()?.job?.instance?.annotations?.commit;
+                if(!s.connected||!nativeReady||String(editor().workspace).toLowerCase()==='review'||canvas?.mode?.()!=='idle'||s.saveState==='saving')throw new Error('Import requires editable idle CVAT');
+                if([...pendingObjects].some(id=>id!=='annotation-io'))throw new Error('Another native edit is pending');
+            },
+            lock:value=>value?pendingObjects.add('annotation-io'):pendingObjects.delete('annotation-io'),
+            refresh:async job=>{
+                const s=getSnapshot();if(editor()?.job?.instance!==job)throw new Error('Job changed; reopen editor');
+                const states=await job.annotations.get(s.frame,true,[]),history=await job.actions.get();
+                if(editor()?.job?.instance===job&&getSnapshot().frame===s.frame)store.dispatch({type:'UPDATE_ANNOTATIONS_SUCCESS',payload:{states,history}});
+                publish();
+            }
+        });
         function placementOptions(payload){
             const fallbackGroundHeight=payload.fallbackGroundHeight??0,useOriginGround=payload.useOriginGround??false;
             const moveLongitudinal=payload.moveLongitudinal??'none',moveLateral=payload.moveLateral??'none';
@@ -636,7 +652,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.15.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.16.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -744,235 +760,9 @@
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
                     const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud'};
                 }
-                case 'EXPORT_ALL_ANNOTATIONS': {
-                    let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;
-                    if (!jobId) {
-                        const m = win.location?.pathname?.match(/\/jobs\/(\d+)/);
-                        if (m) jobId = Number(m[1]);
-                    }
-                    if (!jobId) throw new Error('Không xác định được Job ID từ URL');
-                    const res = await win.fetch(`/api/jobs/${jobId}/annotations`, {
-                        method: 'GET',
-                        headers: { 'Accept': '*/*' },
-                        credentials: 'same-origin'
-                    });
-                    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-                    const data = await res.json();
-                    try {
-                        const lblRes = await win.fetch(`/api/labels?job_id=${jobId}`, {
-                            headers: { 'Accept': 'application/json' },
-                            credentials: 'same-origin'
-                        });
-                        if (lblRes.ok) {
-                            const lblData = await lblRes.json();
-                            data.labels_manifest = lblData.results || [];
-                        }
-                    } catch (_) {}
-                    return {
-                        success: true,
-                        jobId,
-                        data,
-                        trackCount: data.tracks?.length || 0,
-                        shapeCount: data.shapes?.length || 0
-                    };
-                }
-                case 'IMPORT_ALL_ANNOTATIONS': {
-                    let jobId = payload.jobId || payload.ref?.jobId || getSnapshot()?.jobId;
-                    if (!jobId) {
-                        const m = win.location?.pathname?.match(/\/jobs\/(\d+)/);
-                        if (m) jobId = Number(m[1]);
-                    }
-                    if (!jobId) throw new Error('Không xác định được Job ID từ URL');
-                    const annPayload = payload.payload;
-                    if (!annPayload || (!annPayload.tracks && !annPayload.shapes)) {
-                        throw new Error('Payload annotations không hợp lệ (cần mảng tracks hoặc shapes)');
-                    }
-
-                    // 1. Fetch valid labels of target Job
-                    let targetLabels = [];
-                    try {
-                        const lblRes = await win.fetch(`/api/labels?job_id=${jobId}`, {
-                            headers: { 'Accept': 'application/json' },
-                            credentials: 'same-origin'
-                        });
-                        if (lblRes.ok) {
-                            const lblData = await lblRes.json();
-                            targetLabels = lblData.results || [];
-                        }
-                    } catch (e) {
-                        console.warn('[CVAT 3D TOOL] Could not fetch target labels:', e);
-                    }
-
-                    const validLabelIds = new Set(targetLabels.map(l => l.id));
-                    const defaultLabelId = targetLabels.length > 0 ? targetLabels[0].id : null;
-
-                    // 2. Build label remap dictionary for cross-job imports
-                    const labelMap = new Map();
-                    const importedLabelIds = new Set();
-                    for (const t of (annPayload.tracks || [])) if (t.label_id != null) importedLabelIds.add(t.label_id);
-                    for (const s of (annPayload.shapes || [])) if (s.label_id != null) importedLabelIds.add(s.label_id);
-
-                    // A. Exact name matching if labels_manifest is present
-                    if (annPayload.labels_manifest && Array.isArray(annPayload.labels_manifest)) {
-                        const manifestMap = new Map(annPayload.labels_manifest.map(l => [l.id, l]));
-                        for (const importedId of importedLabelIds) {
-                            const srcLabel = manifestMap.get(importedId);
-                            if (srcLabel && srcLabel.name) {
-                                const targetLabel = targetLabels.find(l => l.name.toLowerCase() === srcLabel.name.toLowerCase());
-                                if (targetLabel) labelMap.set(importedId, targetLabel.id);
-                            }
-                        }
-                    }
-
-                    // B. Heuristic / attribute / geometry inference for raw exports
-                    for (const importedId of importedLabelIds) {
-                        if (labelMap.has(importedId)) continue;
-                        if (validLabelIds.has(importedId)) {
-                            labelMap.set(importedId, importedId);
-                            continue;
-                        }
-                        let matchedLabel = null;
-                        const sampleTracks = (annPayload.tracks || []).filter(t => t.label_id === importedId);
-                        for (const tr of sampleTracks) {
-                            for (const sh of (tr.shapes || [])) {
-                                const attrs = sh.attributes || [];
-                                for (const a of attrs) {
-                                    const val = String(a.value).toLowerCase();
-                                    if (['standing', 'sitting', 'bending', 'child', 'adult'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /pedestrian/i.test(l.name));
-                                        break;
-                                    }
-                                    if (val === 'true' || val === 'false') {
-                                        matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
-                                        break;
-                                    }
-                                    if (['car', 'truck', 'bus', 'van', 'pickup', 'contruction', 'trailer', 'tricycle', 'stroller', 'wheelchair'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
-                                        break;
-                                    }
-                                    if (['cat', 'dog', 'cow', 'buffalow', 'buffalo', 'horse'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /animal/i.test(l.name));
-                                        break;
-                                    }
-                                    if (['brick', 'traffic barrier', 'traffic cone', 'sack', 'trash_bag', 'container', 'metal_sheet', 'wood', 'pole', 'charging_point'].includes(val)) {
-                                        matchedLabel = targetLabels.find(l => /obstacle/i.test(l.name));
-                                        break;
-                                    }
-                                }
-                                if (matchedLabel) break;
-                                const pts = sh.points || [];
-                                if (pts.length >= 9) {
-                                    const l = pts[6], w = pts[7], h = pts[8];
-                                    if (h > 1.2 && l < 0.9 && w < 0.9) {
-                                        matchedLabel = targetLabels.find(l => /pedestrian/i.test(l.name));
-                                        break;
-                                    } else if (l >= 1.2 && l <= 2.4 && w <= 1.2) {
-                                        matchedLabel = targetLabels.find(l => /two-wheel|cyclist|motor/i.test(l.name));
-                                        break;
-                                    } else if (l >= 2.5) {
-                                        matchedLabel = targetLabels.find(l => /vehicle|car/i.test(l.name));
-                                        break;
-                                    }
-                                }
-                            }
-                            if (matchedLabel) break;
-                        }
-
-                        if (!matchedLabel) {
-                            matchedLabel = targetLabels[0] || null;
-                        }
-                        if (matchedLabel) {
-                            labelMap.set(importedId, matchedLabel.id);
-                        }
-                    }
-
-                    // 3. Clean and sanitize tracks and shapes (strip old server IDs, remap labels, filter attributes)
-                    const cleanTracks = (annPayload.tracks || []).map(t => {
-                        const { id, ...trackCopy } = t;
-                        if (trackCopy.label_id != null && labelMap.has(trackCopy.label_id)) {
-                            trackCopy.label_id = labelMap.get(trackCopy.label_id);
-                        } else if (validLabelIds.size > 0 && !validLabelIds.has(trackCopy.label_id)) {
-                            trackCopy.label_id = defaultLabelId;
-                        }
-
-                        const targetLabel = targetLabels.find(l => l.id === trackCopy.label_id);
-                        const validSpecIds = new Set((targetLabel?.attributes || []).map(a => a.id));
-
-                        if (trackCopy.shapes) {
-                            trackCopy.shapes = trackCopy.shapes.map(s => {
-                                const { id: sId, ...shapeCopy } = s;
-                                shapeCopy.keyframe = true;
-                                if (shapeCopy.attributes && shapeCopy.attributes.length > 0) {
-                                    shapeCopy.attributes = shapeCopy.attributes.map(attr => {
-                                        if (validSpecIds.has(attr.spec_id)) return attr;
-                                        const val = String(attr.value).toLowerCase();
-                                        const matchingAttr = (targetLabel?.attributes || []).find(targetAttr => {
-                                            return (targetAttr.values || []).some(v => String(v).toLowerCase() === val) ||
-                                                   (targetAttr.input_type === 'checkbox' && (val === 'true' || val === 'false'));
-                                        });
-                                        if (matchingAttr) return { spec_id: matchingAttr.id, value: attr.value };
-                                        return null;
-                                    }).filter(Boolean);
-                                }
-                                return shapeCopy;
-                            });
-                        }
-                        return trackCopy;
-                    });
-
-                    const cleanShapes = (annPayload.shapes || []).map(s => {
-                        const { id, ...shapeCopy } = s;
-                        if (shapeCopy.label_id != null && labelMap.has(shapeCopy.label_id)) {
-                            shapeCopy.label_id = labelMap.get(shapeCopy.label_id);
-                        } else if (validLabelIds.size > 0 && !validLabelIds.has(shapeCopy.label_id)) {
-                            shapeCopy.label_id = defaultLabelId;
-                        }
-                        return shapeCopy;
-                    });
-
-                    const uploadPayload = {
-                        version: annPayload.version || 0,
-                        tags: annPayload.tags || [],
-                        shapes: cleanShapes,
-                        tracks: cleanTracks
-                    };
-
-                    const cookieStr = (win.document?.cookie || doc?.cookie || '');
-                    const csrfMatch = cookieStr.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-                    const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : '';
-
-                    const reqHeaders = {
-                        'Content-Type': 'application/json',
-                        'Accept': '*/*'
-                    };
-                    if (csrfToken) {
-                        reqHeaders['X-CSRFToken'] = csrfToken;
-                    }
-
-                    const mode = payload.mode === 'append' ? 'append' : 'replace';
-                    const endpoint = mode === 'append'
-                        ? `/api/jobs/${jobId}/annotations/?action=create`
-                        : `/api/jobs/${jobId}/annotations`;
-                    const httpMethod = mode === 'append' ? 'PATCH' : 'PUT';
-
-                    const res = await win.fetch(endpoint, {
-                        method: httpMethod,
-                        headers: reqHeaders,
-                        credentials: 'same-origin',
-                        body: JSON.stringify(uploadPayload)
-                    });
-                    if (!res.ok) {
-                        const errText = await res.text();
-                        throw new Error(`HTTP ${res.status}: ${errText.slice(0, 300)}`);
-                    }
-                    return {
-                        success: true,
-                        jobId,
-                        mode,
-                        trackCount: uploadPayload.tracks.length,
-                        shapeCount: uploadPayload.shapes.length
-                    };
-                }
+                case 'EXPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.exported(payload);
+                case 'PREVIEW_ANNOTATION_IMPORT': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.preview(payload);
+                case 'IMPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.apply(payload);
                 case 'SET_QC_APPEARANCE': return setAppearance(payload.colors || []);
                 case 'CLEAR_QC_APPEARANCE': clearAppearance(); return {cleared:true};
                 case 'FREECAM': return setFreeCamera(!!payload.enabled);
