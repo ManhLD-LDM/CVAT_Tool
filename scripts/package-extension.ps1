@@ -27,6 +27,10 @@ $unexpectedBootstrapFiles = @(Get-ChildItem -LiteralPath $bootstrapDirectory -Fo
 if ($unexpectedBootstrapFiles.Count) { throw 'Unexpected files in updater bootstrap build directory; inspect before packaging.' }
 Compress-Archive -LiteralPath @((Join-Path $updaterDirectory 'updater.py'),(Join-Path $updaterDirectory 'install.ps1'),(Join-Path $updaterDirectory 'README.md'),$bootstrapDirectory) -DestinationPath (Join-Path $distDirectory 'CVAT-3D-Tool-Updater-Windows.zip') -Force
 $releaseArchives = @((Join-Path $distDirectory ('CVAT-3D-Tool-Extension-' + $manifestVersion + '.zip')),(Join-Path $distDirectory 'CVAT-3D-Tool-Updater-Windows.zip'))
-$checksumLines = foreach ($releaseArchive in $releaseArchives) { (Get-FileHash -LiteralPath $releaseArchive -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($releaseArchive) }
+$checksumLines = foreach ($releaseArchive in $releaseArchives) {
+    $archiveHasher = [Security.Cryptography.SHA256]::Create()
+    try { ([BitConverter]::ToString($archiveHasher.ComputeHash([IO.File]::ReadAllBytes($releaseArchive)))).Replace('-','').ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($releaseArchive) }
+    finally { $archiveHasher.Dispose() }
+}
 $checksumLines | Set-Content -LiteralPath (Join-Path $distDirectory 'SHA256SUMS.txt') -Encoding ASCII
 Write-Output 'Packaged Windows updater and SHA256SUMS.txt for GitHub Release.'

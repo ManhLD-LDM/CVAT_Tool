@@ -70,6 +70,7 @@ data_job*/
 !/scripts/clean_keyframes_pipeline.py
 !/scripts/tracker_3d_pipeline.py
 !/scripts/cvat_client.py
+!/scripts/build-windows-installer.py
 
 # Environment files and local credentials must never be published.
 .env

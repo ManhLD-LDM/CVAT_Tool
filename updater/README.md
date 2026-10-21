@@ -1,11 +1,15 @@
 # CVAT 3D TOOL Windows updater
 
-Requires Windows, Edge/Chrome developer mode and Python 3.10+ (standard library only). This is an unpacked-extension updater, not a browser-store automatic-update mechanism.
+Windows x64 double-click setup: **CVAT-3D-Tool-Setup.exe** includes both the extension and a standalone native updater, including its Python runtime. End users do not install Python, run PowerShell, or paste an extension ID. No administrator rights required.
 
-1. Extract **CVAT-3D-Tool-Updater-Windows.zip** to a normal folder.
-2. Run PowerShell in that folder: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`.
-3. Follow the installer: Load unpacked `%LOCALAPPDATA%\CVAT-3D-Tool\extension`, disable the old copy, and paste the managed extension's ID. No admin rights required. Moving to this folder changes an unpacked extension's ID, so configure presets/shortcuts again if necessary. The old copy's settings remain with the old ID.
-4. Reload the managed extension once, then open CVAT. HUD checks GitHub once on opening and when Reload is clicked. There is no polling timer.
+1. Download `CVAT-3D-Tool-Setup.exe` from the latest GitHub Release and double-click it.
+2. The GUI installs into `%LOCALAPPDATA%\CVAT-3D-Tool`, validates its bundled payload and registers the native host for the current Windows user.
+3. Save CVAT work, disable the old tool copy, then open `edge://extensions` or `chrome://extensions`, enable Developer mode and Load unpacked `%LOCALAPPDATA%\CVAT-3D-Tool\extension`. The installer provides a Copy folder button. This browser step remains manual for an unpacked extension outside the store.
+4. Open the job again. No extension ID input is required: the installer computes the Windows unpacked ID using Chromium's documented source algorithm (canonical path UTF-16LE, uppercase drive letter, SHA-256 mapped to a-p). This keeps the ID/settings of an existing installation at this same managed path. Moving from a different path changes the ID/settings namespace; old settings remain with the old copy.
+
+Setup never changes browser profile files or force-install policies. It does not close/reload CVAT or save annotations itself. Re-running it preserves the previous extension directory as a backup; an older setup refuses to downgrade a newer installation. If a setup/updater is in progress, wait before retrying. The EXE is not code-signed; Windows may display a publisher/SmartScreen prompt. No browser/store or Windows checks are disabled by setup.
+
+The older `CVAT-3D-Tool-Updater-Windows.zip` + `install.ps1` remains an advanced fallback requiring Python 3.10+ and manual ID entry. Prefer Setup.exe.
 
 The updater only writes its managed installation. It never pulls Git, edits the source checkout, reads CVAT sessions, or imports/exports annotations. The extension saves annotations through native CVAT APIs before reloading; failure/unknown save state blocks reload. Multiple dirty editors of the same job also block reload. Close Batch/settings dialogs before retrying.
 

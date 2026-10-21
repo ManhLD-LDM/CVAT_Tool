@@ -99,6 +99,8 @@ class Updater:
         self.target = self.root / 'extension'
 
     def verify_install(self):
+        if (self.root / '.setup.lock').exists():
+            raise ValueError('Windows installer is running; wait before updating')
         if not (self.root / 'managed-install.json').is_file() or not self.target.is_dir() or self.target.is_symlink():
             raise ValueError('Use the managed Windows installer first')
         # Never update a source checkout or follow a junction outside the managed root.
@@ -203,7 +205,7 @@ def main():
         import msvcrt
         msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
-    root = Path(__file__).resolve().parent
+    root = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).resolve().parent
     try:
         config = json.loads((root / 'managed-install.json').read_text(encoding='utf-8-sig'))
         if not any(arg in config['allowed_origins'] for arg in sys.argv[1:]):

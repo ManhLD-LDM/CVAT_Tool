@@ -1,10 +1,16 @@
-# CVAT 3D TOOL 1.15.0
+# CVAT 3D TOOL 1.15.1
+
+## Windows double-click installer — 1.15.1
+
+Download [CVAT-3D-Tool-Setup.exe](https://github.com/ManhLD-LDM/CVAT_Tool/releases/latest/download/CVAT-3D-Tool-Setup.exe) and double-click it. This bundles the extension, native updater and runtime; no Python installation, PowerShell command or extension-ID entry is needed. It installs per user into `%LOCALAPPDATA%\CVAT-3D-Tool` and automatically registers the host for Edge/Chrome. The GUI distinguishes file installation from the remaining browser activation step.
+
+For this unpacked, outside-store distribution, users still Save CVAT, disable the old tool copy, enable Developer mode and Load unpacked the managed extension folder once. Setup does not bypass browser restrictions, change profile files/policies, or close/reload unsaved jobs. It retains the previous installed extension as a backup and refuses downgrades. The EXE is currently unsigned. See [installation instructions](updater/README.md).
 
 ## GitHub updater + save before Reload — 1.15.0
 
 HUD checks the latest stable GitHub Release once when mounted and on Reload; there is no periodic scan. The small status distinguishes current, newer release, local build ahead, and unavailable (offline/private/rate-limited/no release). If a newer release exists, Reload offers **Cập nhật** and **Reload bản hiện tại**; it does not install automatically.
 
-Windows updates require a one-time per-user Native Messaging installer and Python 3.10+. The installer creates `%LOCALAPPDATA%\CVAT-3D-Tool\extension`, separate from the source checkout. Load this unpacked copy, disable the old copy and register its extension ID with the installer. Moving folders changes an unpacked extension's ID; settings may need to be configured again. See [installer instructions](updater/README.md).
+Windows updates require a one-time per-user Native Messaging setup. The original 1.15.0 ZIP installer required Python 3.10+ and manual ID entry; current Setup.exe bundles the runtime and registers the ID automatically. The installer creates `%LOCALAPPDATA%\CVAT-3D-Tool\extension`, separate from the source checkout. Load this unpacked copy and disable the old copy. Moving folders changes an unpacked extension's ID; settings may need to be configured again. See [installer instructions](updater/README.md).
 
 Before a HUD reload/update, all open CVAT job tabs are checked and held against interaction. Pending annotations are saved through native `job.frames.save()` / `job.annotations.save()` and verified clean; unknown state, save failure, open editing dialogs, busy canvas, changed job/tab set or duplicate dirty editors block reload. The extension then reloads and restores the saved job tabs. This guard does not intercept browser Refresh/close. Import-result reload intentionally does not save stale editor data over imported server annotations.
 
