@@ -108,7 +108,7 @@
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchUI=null;
+    let batchUI=null,updateUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -116,9 +116,10 @@
     const text = (id, value) => { const node=el(id); if(node) node.textContent=value; };
     const scopeKey = s => s ? `${s.sessionId}:${s.jobId}:${s.frame}` : '';
     function request(type, payload = {}) {
+        if(type==='IMPORT_ALL_ANNOTATIONS')serverImportPending=true;
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
-            const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS');
+            const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS') || type==='PREPARE_RELOAD';
             const timeout = setTimeout(()=>{
                 pending.delete(requestId);
                 reject(new Error(isLong ? 'Thao tác quá thời gian chờ (180s) từ server CVAT' : 'CVAT did not respond; check bridge connection'));
@@ -205,7 +206,8 @@
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
         root.innerHTML=`
-            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Nạp lại Extension từ ổ cứng & F5 trang" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Kiểm tra bản mới, lưu CVAT rồi reload" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install hidden>Cập nhật</button><button data-update-local hidden>Reload bản hiện tại</button><button data-update-setup hidden>Cài updater</button></div>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
                 <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
@@ -247,25 +249,12 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.14.5 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.15.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
-        el('c3d-btn-reload')?.addEventListener('click', () => {
-            toast('Đang nạp lại Extension & làm mới trang...');
-            let reloaded = false;
-            const doRefresh = () => { if (reloaded) return; reloaded = true; window.location.reload(); };
-            try {
-                if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
-                    chrome.runtime.sendMessage({ action: 'RELOAD_EXTENSION' }, () => {
-                        setTimeout(doRefresh, 300);
-                    });
-                    setTimeout(doRefresh, 800);
-                } else {
-                    doRefresh();
-                }
-            } catch (_) {
-                doRefresh();
-            }
+        updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
+        el('c3d-btn-reload')?.addEventListener('click',()=>{
+            if(updateUI?.reload)updateUI.reload();else toast('Demo không có updater; chỉ cập nhật được trong extension.',true);
         });
         function getJobId() {
             let id = snapshot?.jobId;
@@ -504,17 +493,18 @@
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){closeSettings();batchUI?.dispose();batchUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){closeSettings();batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;updateUI?.dispose();updateUI=null;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
-    const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args)});
+    const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args),onImportSubmitted:()=>{serverImportPending=true;}});
     function sessionMessage(message,sender,reply){
         if(message?.type!=='C3D_SESSION_API')return;
         if(sender.id!==globalThis.chrome?.runtime?.id||sender.url?.split('?')[0]!==chrome.runtime.getURL('session.html'))return;
+        if(updateUI?.isHolding?.()){reply({ok:false,error:'Đang lưu/cập nhật extension; chờ reload xong trước khi dùng phiên CVAT'});return true;}
         sessionTransport(message).then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));
         return true;
     }

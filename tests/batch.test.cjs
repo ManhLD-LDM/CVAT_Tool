@@ -138,3 +138,40 @@ test('apply failure after twenty edits stops remaining frames and retains accura
  assert.deepEqual(result.appliedFrames,selected.slice(0,21));assert.deepEqual(f.history,result.appliedFrames);
  assert.equal(f.locked,false);assert.equal(f.refreshes,1);
 });
+
+test('backend rejects Apply for incomplete computed ranges, even if one proposal exists',async()=>{
+ const f=fixture(),meta=await f.controller.open(5);
+ await f.controller.begin({token:meta.token,from:1,to:6});
+ await f.controller.read({token:meta.token,frame:3});
+ await assert.rejects(f.controller.apply({token:meta.token,frames:[3]}),/Compute incomplete/);
+ assert.deepEqual(f.history,[]);
+});
+
+test('a successful save promise without a committed keyframe is never reported as applied',async()=>{
+ const f=fixture(),get=f.job.annotations.get;
+ f.job.annotations.get=async frame=>{const states=await get(frame);states[0].save=async()=>states[0];return states;};
+ const meta=await f.controller.open(5);await f.controller.read({token:meta.token,frame:3});
+ const result=await f.controller.apply({token:meta.token,frames:[3]});
+ assert.deepEqual(result.appliedFrames,[]);assert.match(result.error,/not confirmed/);assert.equal(f.locked,false);
+});
+
+test('save with wrong committed geometry stops subsequent frames and reports the changed frame',async()=>{
+ const f=fixture(),get=f.job.annotations.get;
+ f.job.annotations.get=async frame=>{const states=await get(frame),save=states[0].save;
+  states[0].save=async function(){this.points[2]+=1;return save.call(this);};return states;};
+ const meta=await f.controller.open(5);for(const frame of [3,10])await f.controller.read({token:meta.token,frame});
+ const result=await f.controller.apply({token:meta.token,frames:[3,10]});
+ assert.deepEqual(result.appliedFrames,[3]);assert.match(result.error,/not confirmed/);assert.equal(f.shapes.has(10),false);
+});
+
+test('recompute invalidates in-flight frame analysis from the previous range',async()=>{
+ const f=fixture(),meta=await f.controller.open(5),get=f.job.frames.get;
+ await f.controller.begin({token:meta.token,from:1,to:6});
+ let release;const waiting=new Promise(resolve=>release=resolve);
+ f.job.frames.get=async frame=>{await waiting;return get(frame);};
+ const read=f.controller.read({token:meta.token,frame:3});
+ await new Promise(resolve=>setImmediate(resolve));
+ await f.controller.begin({token:meta.token,from:8,to:13});release();
+ await assert.rejects(read,/superseded/);
+ await assert.rejects(f.controller.apply({token:meta.token,frames:[3]}),/incomplete/);assert.deepEqual(f.history,[]);
+});

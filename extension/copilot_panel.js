@@ -898,7 +898,7 @@ if(typeof module!=='undefined')module.exports=api;
 (function(root){
 'use strict';
 function mount(env){
- const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false;
+ const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false,cancelConfirm=null;
  const request=env.request,getSnapshot=env.snapshot;
  async function open(){
   try{
@@ -910,6 +910,7 @@ function mount(env){
     '<p data-info></p><p>Native keyframes are protected. Orange = current box; green = proposal. Position only: dimensions and yaw stay fixed. Proposals require human review; sensor motion compensation is not implemented yet.</p>'+
     '<div class="c3d-batch-controls"><label>From <input data-from type="number"></label><label>To <input data-to type="number"></label><button data-action="load">Compute range (max 60)</button><button data-action="prev">Previous 7</button><button data-action="next">Next 7</button></div>'+
     '<p data-progress role="status"></p><p data-summary></p><button data-action="cancel-compute" hidden>Cancel compute</button><div class="c3d-batch-cards"></div>'+
+    '<section data-confirm hidden role="group" aria-label="Confirm batch apply"><p data-confirm-message></p><button data-action="confirm-apply">Confirm Apply</button><button data-action="cancel-apply">Back to review</button></section>'+
     '<footer><button data-action="export">Export preview (.json)</button><button data-action="apply">Apply selected position proposals</button><span>Compute up to 60 frames; review 7 per page. Apply sequentially in groups of 20. Applied frames become keyframes; native Undo per frame. Save CVAT to persist.</span></footer>';
    document.body.append(dialog);dialog.showModal();
    dialog.querySelector('[data-info]').textContent='Job '+model.jobId+' · clientID #'+model.clientId+' · keyframes: '+model.keyframes.join(', ')+' · range '+model.start+'–'+model.stop;
@@ -936,7 +937,8 @@ function mount(env){
  }
  function progress(text){if(dialog)dialog.querySelector('[data-progress]').textContent=text;}
  function summary(){
-  if(dialog)dialog.querySelector('[data-summary]').textContent='Range '+model.from+'–'+model.to+' · Computed '+model.cards.size+' / '+(model.to-model.from+1)+' frames · Selected '+model.selected.size+' · '+(model.complete?'Ready for review':'Incomplete — Compute again before Apply');
+  const cards=[...model.cards.values()],anchors=cards.filter(c=>c.status==='anchor').length,proposals=cards.filter(c=>c.status==='proposal'&&!c.protected).length;
+  if(dialog)dialog.querySelector('[data-summary]').textContent='Range '+model.from+'–'+model.to+' · Computed '+model.cards.size+' / '+(model.to-model.from+1)+' frames · Protected anchors '+anchors+' · Proposals '+proposals+' · Selected '+model.selected.size+' · '+(model.consumed?'Applied batch — reopen to recompute':model.complete?'Ready for review':'Incomplete — Compute again before Apply');
  }
  function disable(value){
   working=value;if(!dialog)return;
@@ -979,6 +981,7 @@ function mount(env){
    model.complete=model.cards.size===to-from+1;
    renderPage();
    progress(model.complete?'Preview only. Computed '+model.cards.size+' frames. Select reviewed proposals across pages; native keyframes cannot be overwritten.':'Compute cancelled. Partial preview only; Compute again before Apply.');
+   if(model.complete&&![...model.cards.values()].some(c=>c.status==='proposal'))progress('Preview only. Computed '+model.cards.size+' frames. No editable proposals: native keyframes are protected; review/outside/unchanged frames are not auto-applied.');
   }catch(e){progress('Compute stopped: '+e.message+' · Compute again before Apply.');}
   finally{if(run===generation&&dialog){renderPage();disable(false);}}
  }
@@ -1032,11 +1035,24 @@ function mount(env){
   }
   progress('Frame navigation was not confirmed; use CVAT frame control manually.');
  }
+ function confirmApply(frames){
+  disable(true);dialog.querySelector('[data-action="cancel-compute"]').hidden=true;
+  const panel=dialog.querySelector('[data-confirm]');panel.hidden=false;
+  panel.querySelector('[data-confirm-message]').textContent='Apply to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Existing keyframes stay protected. Each applied frame has a separate Undo entry.';
+  return new Promise(resolve=>{
+   const finish=value=>{cancelConfirm=null;panel.hidden=true;if(dialog)disable(false);resolve(value);};
+   cancelConfirm=()=>finish(false);
+   for(const action of ['confirm-apply','cancel-apply'])panel.querySelector('[data-action="'+action+'"]').disabled=false;
+   panel.querySelector('[data-action="confirm-apply"]').onclick=()=>finish(true);
+   panel.querySelector('[data-action="cancel-apply"]').onclick=cancelConfirm;
+   panel.querySelector('[data-action="cancel-apply"]').focus();
+  });
+ }
  async function apply(){
   if(working||!dialog||model.consumed||!model.complete)return;
   const frames=[...model.selected].sort((a,b)=>a-b);
   if(!frames.length){progress('Select at least one reviewed proposal');return;}
-  if(!window.confirm('Apply position proposals to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Existing keyframes stay protected. Each frame has a separate Undo entry.'))return;
+  if(!await confirmApply(frames)||!dialog)return;
   applying=true;disable(true);
   try{
    progress('Applying '+frames.length+' reviewed frames sequentially in groups of 20…');
@@ -1050,6 +1066,7 @@ function mount(env){
  }
  async function close(){
   if(applying)return;
+  cancelConfirm?.();
   ++generation;const old=dialog;dialog=null;working=false;model=null;old?.remove();
   try{await request('BATCH_CANCEL');}catch(_){}
  }
@@ -1102,7 +1119,7 @@ function createSessionTransport(env) {
   }
   const csrf=env.cookie().split(';').map(x=>x.trim()).find(x=>x.startsWith('csrftoken='))?.slice(10);
   const headers={Accept:'application/vnd.cvat+json'};if(method!=='GET'&&csrf)headers['X-CSRFToken']=decodeURIComponent(csrf);
-  if(request.operation==='import')importSubmitted=true;
+  if(request.operation==='import'){importSubmitted=true;env.onImportSubmitted?.();}
   const response=await env.fetch(origin+path,{method,body,headers,credentials:'include',redirect:'error'});
   if(!response.ok)throw new Error(request.operation==='export'&&response.status===403?'CVAT refuses dataset export (403). Ask the owner/admin, or use native JSON export if annotation reading is permitted.':response.status===401||response.status===403?'Session expired, CSRF rejected, or permission denied ('+response.status+')':'CVAT API error '+response.status);
   if(context().jobId!==s.jobId)throw new Error('Job changed; check server Requests before retrying');
@@ -1196,6 +1213,72 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     const api={definitions,defaults,normalize,assign,format,fromEvent,signature};
     root.__C3D_SHORTCUTS=api;
     if(typeof module!=='undefined'&&module.exports)module.exports=api;
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+/* Update controls live in ISOLATED world; no CVAT cookies go to GitHub/host. */
+(function(root){
+'use strict';
+function mount(env){
+ const runtime=globalThis.chrome?.runtime;if(!runtime?.id)return {dispose(){}};
+ const node=env.root.querySelector('[data-update-status]'),install=env.root.querySelector('[data-update-install]'),local=env.root.querySelector('[data-update-local]'),setup=env.root.querySelector('[data-update-setup]');
+ let disposed=false,busy=false,hold=null,releaseTimer=null;
+ async function send(type,rest={}){const response=await runtime.sendMessage({type,...rest});if(!response?.ok)throw new Error(response?.error||'Không liên lạc được updater');return response.result;}
+ function show(result){
+  if(disposed)return;
+  const labels={current:'Đã cập nhật',ahead:'Bản trên máy mới hơn release',available:'Có bản mới '+result.latest,unavailable:'Chưa kiểm tra được cập nhật'};
+  node.textContent=labels[result.state]||result.message||'Đang kiểm tra cập nhật…';node.dataset.state=result.state||'checking';
+  node.title=result.error||('Đang dùng '+runtime.getManifest().version+' · '+(result.latest?'GitHub '+result.latest:'GitHub Releases'));
+  install.hidden=result.state!=='available';local.hidden=!['available','unavailable'].includes(result.state);
+ }
+ async function check(){show({message:'Đang kiểm tra cập nhật…'});const result=await send('C3D_UPDATE_CHECK');show(result);return result;}
+ async function run(installUpdate=false){
+  if(busy)return;busy=true;
+  try{
+   node.textContent=installUpdate?'Đang tải/kiểm tra bản cập nhật…':'Đang lưu CVAT để reload…';
+   await env.flush();await send('C3D_SAFE_RELOAD',{install:installUpdate});
+  }catch(error){node.textContent=error.message;node.dataset.state='unavailable';setup.hidden=false;local.hidden=false;env.toast(error.message,true);}
+  finally{busy=false;}
+ }
+ async function reload(){
+  if(busy)return;busy=true;
+  try{const result=await check();if(result.state==='available')env.toast('Có bản '+result.latest+'. Nhấn Cập nhật để cài; CVAT sẽ được lưu trước khi reload.');
+   else if(result.state==='current'||result.state==='ahead'){busy=false;await run(false);}}
+  catch(error){show({state:'unavailable',error:error.message});}
+  finally{busy=false;}
+ }
+ async function release(){
+  clearTimeout(releaseTimer);hold?.remove();hold=null;
+  try{await env.request('RELEASE_RELOAD');}catch(_){}
+ }
+ async function guard(){
+  if(env.importPending?.())throw new Error('Đã gửi import: dùng Nạp lại tab trên màn hình import; không tự Save editor cũ');
+  const snap=await env.request('GET_SNAPSHOT');
+  if(!snap.connected)throw new Error('Tab CVAT chưa kết nối; chưa thể lưu an toàn');
+  if(document.querySelector('dialog[open],[role="dialog"]'))throw new Error('Đóng cửa sổ chỉnh sửa/Batch trước khi Reload');
+  hold=document.createElement('dialog');hold.className='c3d-reload-hold';hold.textContent='Đang lưu CVAT và chuẩn bị reload. Vui lòng chờ…';
+  hold.addEventListener('cancel',event=>event.preventDefault());hold.addEventListener('keydown',event=>event.stopPropagation());document.body.append(hold);hold.showModal();
+  // A lost worker/connection must not leave the editor locked indefinitely.
+  releaseTimer=setTimeout(release,240000);
+  try{await env.flush();return await env.request('PREPARE_RELOAD',{jobId:snap.jobId,sessionId:snap.sessionId});}
+  catch(error){await release();throw error;}
+ }
+ function listener(message,sender,reply){
+  if(sender.id!==runtime.id||!['C3D_RELOAD_STATE','C3D_RELOAD_HOLD','C3D_RELOAD_VERIFY','C3D_RELOAD_RELEASE'].includes(message?.type))return;
+  (async()=>{
+   if(message.type==='C3D_RELOAD_RELEASE'){await release();return {};}
+   if(message.type==='C3D_RELOAD_HOLD')return guard();
+   const s=await env.request('GET_SNAPSHOT');
+   if(message.type==='C3D_RELOAD_VERIFY'&&(!hold||!s.connected||s.saveState!=='saved'))throw new Error('Tab chưa được khóa/lưu; không reload');
+   return {connected:s.connected,jobId:s.jobId,saveState:s.saveState,origin:location.origin};
+  })().then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));return true;
+ }
+ setup.hidden=false;
+ install.onclick=()=>run(true);local.onclick=()=>run(false);setup.onclick=()=>send('C3D_UPDATER_SETUP').catch(error=>env.toast(error.message,true));
+ runtime.onMessage.addListener(listener);check().catch(error=>show({state:'unavailable',error:error.message}));
+ return {reload,isHolding:()=>!!hold,dispose(){disposed=true;runtime.onMessage.removeListener(listener);release();}};
+}
+root.__C3D_UPDATE_CLIENT={mount};
 })(typeof window!=='undefined'?window:globalThis);
 
 ;
@@ -1309,7 +1392,7 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchUI=null;
+    let batchUI=null,updateUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
@@ -1317,9 +1400,10 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     const text = (id, value) => { const node=el(id); if(node) node.textContent=value; };
     const scopeKey = s => s ? `${s.sessionId}:${s.jobId}:${s.frame}` : '';
     function request(type, payload = {}) {
+        if(type==='IMPORT_ALL_ANNOTATIONS')serverImportPending=true;
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
-            const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS');
+            const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS') || type==='PREPARE_RELOAD';
             const timeout = setTimeout(()=>{
                 pending.delete(requestId);
                 reject(new Error(isLong ? 'Thao tác quá thời gian chờ (180s) từ server CVAT' : 'CVAT did not respond; check bridge connection'));
@@ -1406,7 +1490,8 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
         root.innerHTML=`
-            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Nạp lại Extension từ ổ cứng & F5 trang" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <header class="c3d-header"><div style="display:flex;align-items:center;gap:6px;"><span class="c3d-title">CVAT 3D TOOL</span><span id="c3d-badge-conn" class="c3d-badge-status">Connecting</span><button id="c3d-btn-reload" class="c3d-btn-reload" title="Kiểm tra bản mới, lưu CVAT rồi reload" aria-label="Reload extension">🔄 Reload</button></div><button id="c3d-btn-toggle" class="c3d-btn-icon" aria-label="Toggle panel">−</button></header>
+            <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install hidden>Cập nhật</button><button data-update-local hidden>Reload bản hiện tại</button><button data-update-setup hidden>Cài updater</button></div>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
                 <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
@@ -1448,25 +1533,12 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.14.5 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.15.0 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
-        el('c3d-btn-reload')?.addEventListener('click', () => {
-            toast('Đang nạp lại Extension & làm mới trang...');
-            let reloaded = false;
-            const doRefresh = () => { if (reloaded) return; reloaded = true; window.location.reload(); };
-            try {
-                if (typeof chrome !== 'undefined' && chrome?.runtime?.sendMessage) {
-                    chrome.runtime.sendMessage({ action: 'RELOAD_EXTENSION' }, () => {
-                        setTimeout(doRefresh, 300);
-                    });
-                    setTimeout(doRefresh, 800);
-                } else {
-                    doRefresh();
-                }
-            } catch (_) {
-                doRefresh();
-            }
+        updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
+        el('c3d-btn-reload')?.addEventListener('click',()=>{
+            if(updateUI?.reload)updateUI.reload();else toast('Demo không có updater; chỉ cập nhật được trong extension.',true);
         });
         function getJobId() {
             let id = snapshot?.jobId;
@@ -1705,17 +1777,18 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){closeSettings();batchUI?.dispose();batchUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){closeSettings();batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;updateUI?.dispose();updateUI=null;closeSettings();batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
-    const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args)});
+    const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args),onImportSubmitted:()=>{serverImportPending=true;}});
     function sessionMessage(message,sender,reply){
         if(message?.type!=='C3D_SESSION_API')return;
         if(sender.id!==globalThis.chrome?.runtime?.id||sender.url?.split('?')[0]!==chrome.runtime.getURL('session.html'))return;
+        if(updateUI?.isHolding?.()){reply({ok:false,error:'Đang lưu/cập nhật extension; chờ reload xong trước khi dùng phiên CVAT'});return true;}
         sessionTransport(message).then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));
         return true;
     }

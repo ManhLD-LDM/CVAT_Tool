@@ -34,6 +34,33 @@ function topHarness(options={}){
     return {...h,camera,rect,element,hover};
 }
 
+test('reload preparation saves native frames/annotations, confirms clean state and locks edits until released',async()=>{
+ const h=harness(),job=h.state.annotation.job.instance,calls=[];
+ await h.state.annotation.annotations.states[0].save();
+ job.frames={save:async()=>calls.push('frames')};
+ job.annotations.save=async()=>{calls.push('annotations');job.annotations.hasUnsavedChanges=()=>false;};
+ const snapshot=h.adapter.getSnapshot(),payload={jobId:snapshot.jobId,sessionId:snapshot.sessionId};
+ assert.equal((await h.adapter.command('PREPARE_RELOAD',payload)).saved,true);assert.deepEqual(calls,['frames','annotations']);
+ assert.ok(h.actions.some(a=>a.type==='SAVE_ANNOTATIONS_SUCCESS'));
+ await assert.rejects(h.adapter.command('ROTATE',{ref:h.ref(1),degrees:90}),/reload/);
+ await h.adapter.command('RELEASE_RELOAD');assert.equal(h.adapter.getSnapshot().saveState,'saved');
+});
+
+test('save failure, unknown save state and busy native canvas block reload preparation',async()=>{
+ const h=harness(),job=h.state.annotation.job.instance;
+ await h.state.annotation.annotations.states[0].save();job.annotations.save=async()=>{throw new Error('server offline');};
+ let s=h.adapter.getSnapshot();await assert.rejects(h.adapter.command('PREPARE_RELOAD',{jobId:s.jobId,sessionId:s.sessionId}),/offline/);
+ assert.equal(h.adapter.getSnapshot().saveState,'unsaved');assert.ok(h.actions.some(a=>a.type==='SAVE_ANNOTATIONS_FAILED'));
+ job.annotations.hasUnsavedChanges=()=>undefined;
+ await assert.rejects(h.adapter.command('PREPARE_RELOAD',{jobId:s.jobId,sessionId:s.sessionId}),/trạng thái lưu/);
+ const busy=harness({mode:'drag'});s=busy.adapter.getSnapshot();await assert.rejects(busy.adapter.command('PREPARE_RELOAD',{jobId:s.jobId,sessionId:s.sessionId}),/đang thao tác/);
+});
+
+test('a resolved native save with remaining unsaved changes does not authorize reload',async()=>{
+ const h=harness(),job=h.state.annotation.job.instance;await h.state.annotation.annotations.states[0].save();job.annotations.save=async()=>{};
+ const s=h.adapter.getSnapshot();await assert.rejects(h.adapter.command('PREPARE_RELOAD',{jobId:s.jobId,sessionId:s.sessionId}),/chưa xác nhận/);
+});
+
 function adjustmentHarness({occluded=false,weakGround=false,bodyTop}={}){
     const h=harness(),scene=new THREE.Scene(),coordinates=[];
     h.state.annotation.annotations.states[1].points[0]=30;
@@ -491,3 +518,29 @@ test('IMPORT_ALL_ANNOTATIONS uses labels_manifest for mapping and attaches X-CSR
     h.adapter.dispose();
 });
 
+
+
+test('native confirmation accepts float buffer precision and equivalent wrapped Euler angles',async()=>{
+ const h=harness(),target=h.state.annotation.annotations.states[0],save=target.save;
+ target.points[0]=27.213456789;target.points[5]=-.37123456789;
+ target.save=async function(){const saved=await save.call(this);saved.points=saved.points.map(Math.fround);saved.points[5]+=2*Math.PI;return saved;};
+ const result=await h.adapter.command('ROTATE',{ref:h.ref(1),degrees:90});
+ assert.equal(result.applied,true);assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+test('native confirmation still rejects a real coordinate mismatch after native commit',async()=>{
+ const h=harness(),target=h.state.annotation.annotations.states[0],save=target.save;
+ target.save=async function(){const saved=await save.call(this);saved.points[0]+=.01;return saved;};
+ await assert.rejects(h.adapter.command('ROTATE',{ref:h.ref(1),degrees:90}),/Core CVAT accepted edit but UI confirmation failed/);
+ assert.equal(h.history.length,1);assert.equal(h.adapter.getSnapshot().boxes[0].points[0],.01);h.adapter.dispose();
+});
+
+
+test('native confirmation accepts canonical 9-field geometry with or without 16-field padding',async()=>{
+ for(const paddedInput of [false,true]){
+  const h=harness(),target=h.state.annotation.annotations.states[0],save=target.save;
+  if(!paddedInput)target.points=target.points.slice(0,9);
+  target.save=async function(){const saved=await save.call(this);saved.points=paddedInput?saved.points.slice(0,9):saved.points.concat(Array(7).fill(0));return saved;};
+  const result=await h.adapter.command('ROTATE',{ref:h.ref(1),degrees:90});assert.equal(result.applied,true);assert.equal(h.history.length,1);h.adapter.dispose();
+ }
+});

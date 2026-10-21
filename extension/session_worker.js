@@ -1,4 +1,5 @@
 /* Runs only in the extension service worker. No cookie values enter page events. */
+if(typeof importScripts==='function')importScripts('update_service.js');
 function sessionContext(tab, patterns) {
     const url=new URL(tab.url);
     if(!patterns.some(p=>{
@@ -12,10 +13,18 @@ function sessionContext(tab, patterns) {
 }
 if(typeof module!=='undefined')module.exports={sessionContext};
 if(typeof chrome!=='undefined'&&chrome.runtime?.onMessage){
+ const updater=globalThis.__C3D_UPDATES?.createUpdateService({chrome,fetch:globalThis.fetch});
+ chrome.runtime.onInstalled?.addListener(()=>updater?.resume().catch(()=>{}));
  chrome.runtime.onMessage.addListener((message,sender,reply)=>{
-  if(message?.action==='RELOAD_EXTENSION'||message?.type==='RELOAD_EXTENSION'){
-   reply({ok:true});
-   chrome.runtime.reload();
+  if(['C3D_UPDATE_CHECK','C3D_SAFE_RELOAD','C3D_UPDATER_SETUP','RELOAD_EXTENSION'].includes(message?.type||message?.action)){
+   (async()=>{
+    if(sender.id!==chrome.runtime.id||!sender.tab)throw new Error('Invalid update sender');
+    sessionContext(sender.tab,chrome.runtime.getManifest().host_permissions);
+    if(!updater)throw new Error('Update module unavailable; reload extension manually');
+    if(message.type==='C3D_UPDATE_CHECK')return updater.check();
+    if(message.type==='C3D_UPDATER_SETUP'){await chrome.tabs.create({url:chrome.runtime.getURL('updater_setup.html')});return {};}
+    return updater.safeReload(message.install===true);
+   })().then(result=>reply({ok:true,result}),error=>reply({ok:false,error:error.message}));
    return true;
   }
   (async()=>{

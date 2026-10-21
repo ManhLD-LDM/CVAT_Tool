@@ -1,4 +1,24 @@
-# CVAT 3D TOOL 1.14.5
+# CVAT 3D TOOL 1.15.0
+
+## GitHub updater + save before Reload — 1.15.0
+
+HUD checks the latest stable GitHub Release once when mounted and on Reload; there is no periodic scan. The small status distinguishes current, newer release, local build ahead, and unavailable (offline/private/rate-limited/no release). If a newer release exists, Reload offers **Cập nhật** and **Reload bản hiện tại**; it does not install automatically.
+
+Windows updates require a one-time per-user Native Messaging installer and Python 3.10+. The installer creates `%LOCALAPPDATA%\CVAT-3D-Tool\extension`, separate from the source checkout. Load this unpacked copy, disable the old copy and register its extension ID with the installer. Moving folders changes an unpacked extension's ID; settings may need to be configured again. See [installer instructions](updater/README.md).
+
+Before a HUD reload/update, all open CVAT job tabs are checked and held against interaction. Pending annotations are saved through native `job.frames.save()` / `job.annotations.save()` and verified clean; unknown state, save failure, open editing dialogs, busy canvas, changed job/tab set or duplicate dirty editors block reload. The extension then reloads and restores the saved job tabs. This guard does not intercept browser Refresh/close. Import-result reload intentionally does not save stale editor data over imported server annotations.
+
+Updater only accepts the pinned repository's latest stable ZIP, verifies SHA-256 and a flat file allowlist, stages first, retains the old directory as backup and rolls back a failed directory swap. No Git pull, CVAT credentials or annotation transfers go through GitHub/the updater. Publisher must upload the generated versioned extension ZIP, `CVAT-3D-Tool-Updater-Windows.zip` and `SHA256SUMS.txt` as release assets. Before the first release was published, the public latest-release endpoint returned HTTP 404 because no releases existed. Download the stable packages from [GitHub Releases](https://github.com/ManhLD-LDM/CVAT_Tool/releases/latest). Host protocol, UI and save guards are fixture-tested; actual managed installation/native browser registration still needs a live acceptance check.
+
+## Batch Apply verification — 1.14.7
+
+Batch now shows counts of protected anchors and editable proposals, with an explicit explanation when nothing can be applied. Apply confirmation appears inside the Batch dialog and can be cancelled without editing annotations. The backend rejects incomplete computed ranges and discards frame analysis from superseded computations. Every native save is checked against the resulting keyframe's geometry; a no-op or mismatched save stops the remaining plan and reports any frames already changed. This remains sequential, not atomic, with native Undo per changed frame. Dimensions/yaw and original keyframes remain protected; the position refinement algorithm is unchanged.
+
+Offline audit of the supplied job 1224 JSON found 78 tracks and 3,356 visible keyframes across 60 frames, with no visible interpolated frames eligible for automatic refinement. Existing keyframes are deliberately not overwritten. JSON replay verifies annotation invariants; simulated sparse anchors/proposals exercise Apply and Undo but do not establish LiDAR fit accuracy or live native Undo. See [audit evidence](docs/verification/batch-json-1224-1.14.7.md).
+
+## Native geometry confirmation - 1.14.6
+
+Native edits now compare the nine physical cuboid fields numerically, accepting equivalent wrapped Euler angles and 9/16-field padding differences. Coordinate tolerance is 0.1 mm and angle tolerance is 1e-5 rad; real mismatches still surface an error without claiming rollback after native commit. This changes confirmation only, not fitting or tracking algorithms.
 
 ## Batch Track Review — 1.14.5
 
@@ -75,15 +95,15 @@ Dự án tích hợp 2 hệ thống phối hợp đồng bộ:
 1. Mở trình duyệt, truy cập `chrome://extensions/` hoặc `edge://extensions/`.
 2. Bật chế độ **Developer mode** (Góc trên cùng bên phải).
 3. Nhấn **Load unpacked** và chọn thư mục:
-   `D:\Project\VinPrj\CVAT_Tool\extension`
+   Thư mục `extension` trong bản source hoặc gói extension đã giải nén. Muốn tự cập nhật GitHub thì dùng thư mục cài riêng theo `updater/README.md`.
 4. Mở tab CVAT 3D job bất kỳ. Menu tiện ích **CVAT 3D TOOL** sẽ xuất hiện ở góc phải màn hình.
 
 ### 💡 Cách Cập Nhật Extension Cực Nhanh (Không Cần Xóa / Tải Lại):
 > [!TIP]
 > **Annotator tuyệt đối không cần xóa extension và load lại mỗi khi có bản cập nhật mới!**
-> 1. **Cách 1 (Ngay trong tab CVAT - Tiện nhất)**: Bấm nút **🔄** trên thanh tiêu đề của menu **CVAT 3D TOOL**. Extension sẽ nạp lại mã mới từ ổ đĩa và F5 trang ngay lập tức.
-> 2. **Cách 2 (Trang Extensions)**: Vào `chrome://extensions/`, tìm card **CVAT 3D TOOL** và nhấn vào biểu tượng **Reload 🔄** (hình vòng cung tròn). Mã mới sẽ được nạp lại ngay lập tức.
-> 3. **Tự động kéo code mới**: Chạy `git pull` trong thư mục repo rồi bấm nút **🔄** trên HUD là toàn bộ tính năng mới nhất có hiệu lực ngay!
+> 1. **Ngay trong CVAT**: Bấm **Reload** để kiểm tra release. Có bản mới thì chọn **Cập nhật** (cần updater Windows); nếu không, tool lưu CVAT rồi nạp lại bản trên máy. Khi GitHub không truy cập được, có thể chọn **Reload bản hiện tại**.
+> 2. **Trang Extensions**: Nút Reload của trình duyệt chỉ nạp mã từ ổ đĩa và không đi qua cơ chế lưu của tool. Hãy Save CVAT trước khi dùng.
+> 3. **Dành cho developer**: Tự cập nhật source bằng Git, build lại bundle rồi dùng HUD Reload. Updater Windows không thay đổi source checkout.
 
 ---
 

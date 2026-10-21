@@ -1,7 +1,7 @@
 (function(root){
 'use strict';
 function mount(env){
- const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false;
+ const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false,cancelConfirm=null;
  const request=env.request,getSnapshot=env.snapshot;
  async function open(){
   try{
@@ -13,6 +13,7 @@ function mount(env){
     '<p data-info></p><p>Native keyframes are protected. Orange = current box; green = proposal. Position only: dimensions and yaw stay fixed. Proposals require human review; sensor motion compensation is not implemented yet.</p>'+
     '<div class="c3d-batch-controls"><label>From <input data-from type="number"></label><label>To <input data-to type="number"></label><button data-action="load">Compute range (max 60)</button><button data-action="prev">Previous 7</button><button data-action="next">Next 7</button></div>'+
     '<p data-progress role="status"></p><p data-summary></p><button data-action="cancel-compute" hidden>Cancel compute</button><div class="c3d-batch-cards"></div>'+
+    '<section data-confirm hidden role="group" aria-label="Confirm batch apply"><p data-confirm-message></p><button data-action="confirm-apply">Confirm Apply</button><button data-action="cancel-apply">Back to review</button></section>'+
     '<footer><button data-action="export">Export preview (.json)</button><button data-action="apply">Apply selected position proposals</button><span>Compute up to 60 frames; review 7 per page. Apply sequentially in groups of 20. Applied frames become keyframes; native Undo per frame. Save CVAT to persist.</span></footer>';
    document.body.append(dialog);dialog.showModal();
    dialog.querySelector('[data-info]').textContent='Job '+model.jobId+' · clientID #'+model.clientId+' · keyframes: '+model.keyframes.join(', ')+' · range '+model.start+'–'+model.stop;
@@ -39,7 +40,8 @@ function mount(env){
  }
  function progress(text){if(dialog)dialog.querySelector('[data-progress]').textContent=text;}
  function summary(){
-  if(dialog)dialog.querySelector('[data-summary]').textContent='Range '+model.from+'–'+model.to+' · Computed '+model.cards.size+' / '+(model.to-model.from+1)+' frames · Selected '+model.selected.size+' · '+(model.complete?'Ready for review':'Incomplete — Compute again before Apply');
+  const cards=[...model.cards.values()],anchors=cards.filter(c=>c.status==='anchor').length,proposals=cards.filter(c=>c.status==='proposal'&&!c.protected).length;
+  if(dialog)dialog.querySelector('[data-summary]').textContent='Range '+model.from+'–'+model.to+' · Computed '+model.cards.size+' / '+(model.to-model.from+1)+' frames · Protected anchors '+anchors+' · Proposals '+proposals+' · Selected '+model.selected.size+' · '+(model.consumed?'Applied batch — reopen to recompute':model.complete?'Ready for review':'Incomplete — Compute again before Apply');
  }
  function disable(value){
   working=value;if(!dialog)return;
@@ -82,6 +84,7 @@ function mount(env){
    model.complete=model.cards.size===to-from+1;
    renderPage();
    progress(model.complete?'Preview only. Computed '+model.cards.size+' frames. Select reviewed proposals across pages; native keyframes cannot be overwritten.':'Compute cancelled. Partial preview only; Compute again before Apply.');
+   if(model.complete&&![...model.cards.values()].some(c=>c.status==='proposal'))progress('Preview only. Computed '+model.cards.size+' frames. No editable proposals: native keyframes are protected; review/outside/unchanged frames are not auto-applied.');
   }catch(e){progress('Compute stopped: '+e.message+' · Compute again before Apply.');}
   finally{if(run===generation&&dialog){renderPage();disable(false);}}
  }
@@ -135,11 +138,24 @@ function mount(env){
   }
   progress('Frame navigation was not confirmed; use CVAT frame control manually.');
  }
+ function confirmApply(frames){
+  disable(true);dialog.querySelector('[data-action="cancel-compute"]').hidden=true;
+  const panel=dialog.querySelector('[data-confirm]');panel.hidden=false;
+  panel.querySelector('[data-confirm-message]').textContent='Apply to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Existing keyframes stay protected. Each applied frame has a separate Undo entry.';
+  return new Promise(resolve=>{
+   const finish=value=>{cancelConfirm=null;panel.hidden=true;if(dialog)disable(false);resolve(value);};
+   cancelConfirm=()=>finish(false);
+   for(const action of ['confirm-apply','cancel-apply'])panel.querySelector('[data-action="'+action+'"]').disabled=false;
+   panel.querySelector('[data-action="confirm-apply"]').onclick=()=>finish(true);
+   panel.querySelector('[data-action="cancel-apply"]').onclick=cancelConfirm;
+   panel.querySelector('[data-action="cancel-apply"]').focus();
+  });
+ }
  async function apply(){
   if(working||!dialog||model.consumed||!model.complete)return;
   const frames=[...model.selected].sort((a,b)=>a-b);
   if(!frames.length){progress('Select at least one reviewed proposal');return;}
-  if(!window.confirm('Apply position proposals to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Existing keyframes stay protected. Each frame has a separate Undo entry.'))return;
+  if(!await confirmApply(frames)||!dialog)return;
   applying=true;disable(true);
   try{
    progress('Applying '+frames.length+' reviewed frames sequentially in groups of 20…');
@@ -153,6 +169,7 @@ function mount(env){
  }
  async function close(){
   if(applying)return;
+  cancelConfirm?.();
   ++generation;const old=dialog;dialog=null;working=false;model=null;old?.remove();
   try{await request('BATCH_CANCEL');}catch(_){}
  }

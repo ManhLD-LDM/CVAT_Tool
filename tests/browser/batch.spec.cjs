@@ -52,8 +52,8 @@ test('batch applies only explicitly selected frames through native state save',a
  await setup(page);
  const before=await page.evaluate(()=>JSON.stringify([...__batchFixture.shapes.values()]));
  await page.locator('[data-accept="3"]').check();
- page.once('dialog',d=>d.accept());
- await page.locator('[data-action="apply"]').click();
+
+ await page.locator('[data-action="apply"]').click();await page.getByRole('button',{name:'Confirm Apply',exact:true}).click();
  await expect(page.locator('[data-progress]')).toContainText('Applied: 3');
  expect(await page.evaluate(()=>__batchFixture.history.map(h=>h.frame))).toEqual([3]);
  const anchors=await page.evaluate(()=>JSON.stringify([...__batchFixture.shapes.values()].filter(s=>[0,7,14].includes(s.frame))));
@@ -66,7 +66,7 @@ test('review protection removes proposal; stale track changes cannot be applied'
  await expect(page.locator('[data-accept="3"]')).toHaveCount(0);
  await page.locator('[data-accept="4"]').check();
  await page.evaluate(()=>__batchFixture.shapes.get(7).points[0]+=.1);
- page.once('dialog',d=>d.accept());await page.locator('[data-action="apply"]').click();
+ await page.locator('[data-action="apply"]').click();await page.getByRole('button',{name:'Confirm Apply',exact:true}).click();
  await expect(page.locator('[data-progress]')).toContainText('Track changed');
  expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
 });
@@ -110,12 +110,21 @@ test('60-frame compute retains cross-page selections and never reloads PCD on pa
  for(let i=0;i<8;i++)await page.locator('[data-action="prev"]').click();
  await expect(page.locator('[data-accept="3"]')).toBeChecked();
  expect(await page.evaluate(()=>batchReads.length)).toBe(60);
- const downloaded=page.waitForEvent('download');await page.locator('[data-action="export"]').click();
- const download=await downloaded,preview=JSON.parse(fs.readFileSync(await download.path(),'utf8'));
- expect(preview.frames).toHaveLength(60);
- page.once('dialog',d=>d.accept());await page.locator('[data-action="apply"]').click();
+ await page.locator('[data-action="apply"]').click();await page.getByRole('button',{name:'Confirm Apply',exact:true}).click();
  await expect(page.locator('[data-progress]')).toContainText('Applied: 3, 10');
  expect(await page.evaluate(()=>__batchFixture.history.map(h=>h.frame))).toEqual([3,10]);
+});
+
+test('batch confirmation can be cancelled or closed without any edits',async({page})=>{
+ await setup(page);
+ await page.locator('[data-accept="3"]').check();await page.locator('[data-action="apply"]').click();
+ await expect(page.getByRole('group',{name:'Confirm batch apply'})).toContainText('frames 3');
+ expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+ await page.getByRole('button',{name:'Back to review',exact:true}).click();
+ await expect(page.locator('[data-accept="3"]')).toBeChecked();
+ await page.locator('[data-action="apply"]').click();await page.locator('[data-action="close"]').click();
+ await expect(page.locator('.c3d-batch-dialog')).toHaveCount(0);
+ expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
 });
 
 test('inclusive range validation and cancellation never apply partial computation',async({page})=>{

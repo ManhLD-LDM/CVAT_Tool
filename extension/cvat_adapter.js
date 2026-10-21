@@ -11,6 +11,7 @@
         let store = env.store || null, canvas = null, unsubscribe = null, interval = null, disposed = false;
         let signature = '', revision = 0, scope = '', currentSnapshot = null;
         let lastFitCase = null;
+        let reloadHold = null;
         let cloudKey = '', cloudIndex = null, spatialIndex = null, cloudLoading = null, groundCache = new Map();
         let qcColors = new Map(), colorView = null, originalColor = null, colorWrapper = null, cameraRestore = null;
         const listeners = new Set(), pendingObjects = new Set();
@@ -275,6 +276,16 @@
             row?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
             publish(); return { selected: target.clientID,focused,...(focus&&!focused?{message:cameraRestore?'Box selected; turn off Free Cam to focus or resume following':'Box selected; unable to access 3D camera to focus'}:{}) };
         }
+        function geometryConfirmed(actual,expected) {
+            if(!math.parseCVAT16Points(actual)||!math.parseCVAT16Points(expected))return false;
+            // Compare the nine physical 3D fields; CVAT may add/remove unused padding.
+            // Native cuboids may also round buffers or normalize Euler angles.
+            // Confirm geometry numerically, retaining a strict 0.1 mm / 1e-5 rad bound.
+            return actual.slice(0,9).every((value,index)=>{
+                const delta=value-expected[index];
+                return index>=3&&index<=5 ? Math.abs(Math.atan2(Math.sin(delta),Math.cos(delta)))<=1e-5 : Math.abs(delta)<=1e-4;
+            });
+        }
         async function updateObject(ref, changes) {
             const { target, snap } = validate(ref, true), job = editor().job.instance;
             if (pendingObjects.size) throw new Error('Previous operation in progress');
@@ -302,7 +313,7 @@
                     store.dispatch({ type: 'UPDATE_ANNOTATIONS_SUCCESS', payload: { states: [saved], history } });
                     if (changes.points) {
                         const actual = getSnapshot().boxes.find(b => b.id === target.clientID);
-                        if (!actual || JSON.stringify(actual.points) !== JSON.stringify(changes.points)) throw new Error('CVAT did not confirm updated geometry');
+                        if (!actual || !geometryConfirmed(actual.points,changes.points)) throw new Error('CVAT did not confirm updated geometry');
                     }
                     if (changes.labelId != null && getSnapshot().boxes.find(b => b.id === target.clientID)?.labelId !== changes.labelId)
                         throw new Error('CVAT did not confirm updated class');
@@ -557,8 +568,35 @@
             const grounds=await getGrounds(ref,[ref.clientId]);return grounds[ref.clientId];
         }
         async function command(type, payload = {}) {
+            if(reloadHold&&!['GET_SNAPSHOT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
             if (disposed) throw new Error('Adapter is stopped');
             switch (type) {
+                case 'PREPARE_RELOAD': {
+                    const snap=getSnapshot(),job=editor()?.job?.instance;
+                    if(!snap.connected||snap.sessionId!==payload.sessionId||snap.jobId!==payload.jobId)throw new Error('Job đã thay đổi; không reload');
+                    if(reloadHold){if(reloadHold.job!==job)throw new Error('Job đã đổi trong khi khóa reload');return {jobId:snap.jobId,saved:job.annotations.hasUnsavedChanges()===false};}
+                    if(pendingObjects.size||canvas?.mode?.()!=='idle'||snap.saveState==='saving'||editor()?.player?.fetching)throw new Error('CVAT đang thao tác/lưu; chờ xong rồi thử Reload');
+                    if(!['saved','unsaved'].includes(snap.saveState))throw new Error('Không xác nhận được trạng thái lưu; không reload');
+                    reloadHold={job};pendingObjects.add('reload');
+                    try{
+                        if(snap.saveState==='unsaved'||(typeof job.frames?.save==='function'&&String(editor().workspace).toLowerCase()!=='review')){
+                            if(String(editor().workspace).toLowerCase()==='review'||(snap.saveState==='unsaved'&&typeof job.annotations.save!=='function'))throw new Error('Không thể tự lưu editor này; hãy Save CVAT trước');
+                            store.dispatch({type:'SAVE_ANNOTATIONS',payload:{}});
+                            try{
+                                await job.frames?.save?.();if(snap.saveState==='unsaved')await job.annotations.save();
+                                store.dispatch({type:'SAVE_ANNOTATIONS_SUCCESS',payload:{}});
+                            }catch(error){store.dispatch({type:'SAVE_ANNOTATIONS_FAILED',payload:{error}});throw error;}
+                            if(editor()?.job?.instance!==job)throw new Error('Job đã đổi trong khi lưu; không reload');
+                            if(job.annotations.get){
+                                const frame=getSnapshot().frame,states=await job.annotations.get(frame,true,[]),history=await job.actions.get();
+                                if(editor()?.job?.instance===job&&getSnapshot().frame===frame)store.dispatch({type:'UPDATE_ANNOTATIONS_SUCCESS',payload:{states,history}});
+                            }
+                        }
+                        if(editor()?.job?.instance!==job||job.annotations.hasUnsavedChanges()!==false)throw new Error('CVAT chưa xác nhận lưu hết annotation; không reload');
+                        publish();return {jobId:snap.jobId,saved:true};
+                    }catch(error){reloadHold=null;pendingObjects.delete('reload');publish();throw error;}
+                }
+                case 'RELEASE_RELOAD': reloadHold=null;pendingObjects.delete('reload');publish();return {released:true};
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
                 case 'BATCH_OPEN': {validate(payload.ref);if(!batchController)throw new Error('Batch module unavailable');return batchController.open(payload.ref.clientId);}
                 case 'BATCH_BEGIN': if(!batchController)throw new Error('Batch module unavailable');return batchController.begin(payload);
@@ -598,7 +636,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.14.5',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.15.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};

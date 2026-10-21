@@ -40,7 +40,7 @@ function createSessionTransport(env) {
   }
   const csrf=env.cookie().split(';').map(x=>x.trim()).find(x=>x.startsWith('csrftoken='))?.slice(10);
   const headers={Accept:'application/vnd.cvat+json'};if(method!=='GET'&&csrf)headers['X-CSRFToken']=decodeURIComponent(csrf);
-  if(request.operation==='import')importSubmitted=true;
+  if(request.operation==='import'){importSubmitted=true;env.onImportSubmitted?.();}
   const response=await env.fetch(origin+path,{method,body,headers,credentials:'include',redirect:'error'});
   if(!response.ok)throw new Error(request.operation==='export'&&response.status===403?'CVAT refuses dataset export (403). Ask the owner/admin, or use native JSON export if annotation reading is permitted.':response.status===401||response.status===403?'Session expired, CSRF rejected, or permission denied ('+response.status+')':'CVAT API error '+response.status);
   if(context().jobId!==s.jobId)throw new Error('Job changed; check server Requests before retrying');

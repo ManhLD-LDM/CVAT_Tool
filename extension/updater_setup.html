@@ -1,0 +1,12 @@
+<!doctype html><html lang="vi"><meta charset="utf-8"><title>Cài updater CVAT 3D TOOL</title>
+<style>body{color-scheme:dark;background:#18181d;color:#e4e4e7;font:15px system-ui;max-width:760px;margin:48px auto;padding:20px;line-height:1.6}a{color:#6ee7b7}code{background:#303038;padding:3px 6px;overflow-wrap:anywhere}button{background:#303039;color:#eee;border:1px solid #52525b;border-radius:5px;padding:8px;cursor:pointer}</style>
+<h1>Cài updater Windows một lần</h1>
+<p>Updater tải release GitHub về thư mục cài riêng. Cần Python 3.10+, không cần quyền Administrator.</p>
+<ol><li><a href="https://github.com/ManhLD-LDM/CVAT_Tool/releases/latest/download/CVAT-3D-Tool-Updater-Windows.zip">Tải gói updater từ GitHub Release</a>, giải nén.</li>
+<li>Chạy PowerShell trong thư mục vừa giải nén: <code>powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1</code>.</li>
+<li>Làm theo installer: Load unpacked thư mục <code>%LOCALAPPDATA%\CVAT-3D-Tool\extension</code>, tắt bản cũ, rồi nhập ID của bản vừa cài.</li>
+<li>Reload extension một lần và mở lại CVAT. Từ lần sau dùng nút Reload trên HUD.</li></ol>
+<p>ID extension đang mở trang này: <code id="extension-id"></code> <button id="copy-id">Copy ID</button></p>
+<p>Nếu đang mở bản cũ từ source, ID trên không phải ID của bản cài riêng. Hãy lấy ID sau khi Load unpacked bản cài riêng. Việc chuyển thư mục có thể cần đặt lại preset/phím tắt.</p>
+<p>Repo cần có release công khai kèm ZIP extension và checksum. Nếu chưa phát hành, đường dẫn tải sẽ chưa dùng được; có thể dùng gói ZIP do người phát triển cung cấp.</p>
+<p id="status" role="status"></p><script src="updater_setup.js"></script></html>

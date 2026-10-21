@@ -6,6 +6,9 @@ function createBatchController(env){
  const clouds=new Map();
  const signature=t=>JSON.stringify(t);
  const keyframes=t=>new Set(t.shapes.map(s=>s.frame));
+ const sameGeometry=(a,b)=>math.parseCVAT16Points(a)&&math.parseCVAT16Points(b)&&a.slice(0,9).every((v,i)=>{
+  const delta=v-b[i];return Math.abs(i>=3&&i<=5?Math.atan2(Math.sin(delta),Math.cos(delta)):delta)<=(i>=3&&i<=5?1e-5:1e-4);
+ });
  function current(){
   const job=env.job(),snapshot=env.snapshot();
   if(!session||job!==session.job||snapshot.jobId!==session.jobId||snapshot.sessionId!==session.adapterId)
@@ -57,7 +60,7 @@ function createBatchController(env){
   const start=job.startFrame,stop=job.stopFrame;
   if(!Number.isInteger(start)||!Number.isInteger(stop))throw new Error('Native frame bounds unavailable');
   session={id:'batch-'+(++seq),adapterId:s.sessionId,job,jobId:s.jobId,clientId,serverId:t.id??null,
-   signature:signature(t),start,stop,proposals:new Map(),protected:new Set(),consumed:false};
+   signature:signature(t),start,stop,proposals:new Map(),computed:new Set(),epoch:0,protected:new Set(),consumed:false};
   clouds.clear();
   const frames=t.shapes.map(x=>x.frame).sort((a,b)=>a-b);
   return {token:session.id,jobId:s.jobId,clientId,serverId:session.serverId,start,stop,keyframes:frames,
@@ -69,19 +72,20 @@ function createBatchController(env){
   token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');
   frameCheck(payload.from);frameCheck(payload.to);
   if(payload.from>payload.to||payload.to-payload.from+1>60)throw new Error('Select 1–60 frames inclusive');
-  await unchanged();token(payload);session.range=[payload.from,payload.to];session.proposals.clear();clouds.clear();
+  await unchanged();token(payload);session.epoch++;session.range=[payload.from,payload.to];session.proposals.clear();session.computed.clear();clouds.clear();
   return {from:payload.from,to:payload.to};
  }
  async function read(payload){
   token(payload);frameCheck(payload.frame);
   if(session.range&&(payload.frame<session.range[0]||payload.frame>session.range[1]))throw new Error('Frame outside compute range');
   if(running)throw new Error('Batch apply in progress');
-  const owned=session;await unchanged();
+  const owned=session,epoch=session.epoch;await unchanged();
   const {state,states}=await stateAt(payload.frame);
-  if(!state||state.outside)return {frame:payload.frame,status:'outside',protected:true,flags:['Outside/not present; no proposal']};
+  if(session!==owned||session.epoch!==epoch)throw new Error('Batch compute superseded; recompute range');
+  if(!state||state.outside){session.computed.add(payload.frame);return {frame:payload.frame,status:'outside',protected:true,flags:['Outside/not present; no proposal']};}
   const p=Array.from(state.points),original=p.slice();
   const raw=await pointsAt(payload.frame);
-  if(session!==owned)throw new Error('Batch cancelled');
+  if(session!==owned||session.epoch!==epoch)throw new Error('Batch compute superseded or cancelled');
   const groundPoints=[],roi=[],step=Math.max(1,Math.ceil(raw.length/3/160000));
   const cs=Math.cos(p[5]),sn=Math.sin(p[5]);
   for(let i=0;i<raw.length;i+=3){
@@ -100,8 +104,9 @@ function createBatchController(env){
    :batchMath.refinePosition(math,roi,p,ground,states.filter(s=>s.clientID!==session.clientId&&!s.outside&&s.shapeType==='cuboid').map(s=>({points:Array.from(s.points)})));
   const card={frame:payload.frame,original,protected:!!protectedFrame,ground:{accepted:ground.accepted,confidence:ground.confidence,reason:ground.reason,a:ground.a,b:ground.b,c:ground.c,rmse:ground.rmse,inlierCount:ground.inlierCount,radius:ground.radius},
    ...result,points:batchMath.sampleROI(roi,p),analysisPointCount:roi.length,pointsAreSampled:roi.length>4000,label:state.label?.name};
-  if(session!==owned)throw new Error('Batch cancelled');
+  if(session!==owned||session.epoch!==epoch)throw new Error('Batch compute superseded or cancelled');
   session.proposals.set(payload.frame,{...card,state});
+  session.computed.add(payload.frame);
   return card;
  }
  async function protect(payload){
@@ -112,14 +117,17 @@ function createBatchController(env){
  async function apply(payload){
   token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');
   if(!Array.isArray(payload.frames)||!payload.frames.length||payload.frames.length>60)throw new Error('Select 1–60 proposed frames');
+  if(session.range&&session.computed.size!==session.range[1]-session.range[0]+1)throw new Error('Compute incomplete; compute the entire range before Apply');
   const frames=[...new Set(payload.frames)].sort((a,b)=>a-b);
   const plan=[];
   await unchanged();token(payload);
   for(const f of frames){
    frameCheck(f);const proposal=session.proposals.get(f);
    if(!proposal||proposal.protected||session.protected.has(f)||proposal.status!=='proposal')throw new Error('Selected frame has no editable proposal');
+   if(!math.parseCVAT16Points(proposal.proposed)||!sameGeometry(proposal.proposed.slice(0,3).concat(proposal.original.slice(3)),proposal.proposed))
+    throw new Error('Invalid position-only proposal; recompute batch');
    const {state}=await stateAt(f);token(payload);
-   if(!state||state.outside||state.keyframe||state.lock||state.isGroundTruth||JSON.stringify(Array.from(state.points))!==JSON.stringify(proposal.original))
+   if(!state||state.outside||state.keyframe||state.lock||state.isGroundTruth||!sameGeometry(Array.from(state.points),proposal.original))
     throw new Error('Frame changed or became protected; reload batch');
    plan.push({frame:f,points:proposal.proposed});
   }
@@ -134,11 +142,18 @@ function createBatchController(env){
     const {state}=await stateAt(item.frame);token(payload);
     if(state.keyframe||state.lock||state.isGroundTruth)throw new Error('Frame protected during apply');
     state.points=item.points.slice();
-    try{await state.save();applied.push(item.frame);}
+    try{
+     await state.save();
+     const savedTrack=await track(),saved=savedTrack.shapes.find(s=>s.frame===item.frame);
+     const changed=signature(savedTrack)!==session.signature;
+     if(changed){applied.push(item.frame);session.signature=signature(savedTrack);}
+     if(!changed||!saved||saved.outside||!sameGeometry(saved.points,item.points))
+      throw new Error('Native save was not confirmed at frame '+item.frame+'; inspect Undo/history');
+    }
     catch(e){
         const observed=signature(await track());
-        if(observed!==session.signature){applied.push(item.frame);session.signature=observed;}
-        else state.points=session.proposals.get(item.frame).original.slice();
+        if(observed!==session.signature){if(!applied.includes(item.frame))applied.push(item.frame);session.signature=observed;}
+        else if(!applied.includes(item.frame))state.points=session.proposals.get(item.frame).original.slice();
         throw new Error('Native save failed; inspect Undo/history. '+e.message);
     }
     session.signature=signature(await track());

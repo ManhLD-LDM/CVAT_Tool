@@ -556,6 +556,9 @@
 .c3d-batch-dialog>p{margin:4px 0}
 .c3d-batch-cards{flex:1;min-height:0;overflow:auto;align-items:flex-start}
 .c3d-batch-dialog footer{background:#18181d;border-top:1px solid #3f3f46;padding-top:8px}
+.c3d-batch-dialog [data-confirm]{flex-shrink:0;border:1px solid #d4a64a;border-radius:5px;padding:10px;background:#29251c}
+.c3d-batch-dialog [data-confirm-message]{margin:0 0 8px;overflow-wrap:anywhere}
+.c3d-batch-dialog [data-action="confirm-apply"]{border-color:#34d399}
 
 .c3d-preset{border:1px solid #34383e;border-radius:4px;margin:0;padding:8px;font-size:11px;color:#aeb5c0}.c3d-preset legend{padding:0 4px}.c3d-preset-fields{display:flex;gap:6px;margin:7px 0}.c3d-preset-fields label{display:flex;align-items:center;gap:4px;flex:1;min-width:0}.c3d-preset-fields input{width:100%;min-width:0;box-sizing:border-box;background:#191c21;color:#eee;border:1px solid #414650;border-radius:3px;padding:5px}
 #cvat-3d-copilot-root .c3d-shrink-field { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; font-size:12px; }
@@ -567,3 +570,8 @@
 #cvat-3d-copilot-root .c3d-placement-options { flex-wrap:wrap; margin:4px 0; }
 #cvat-3d-copilot-root .c3d-placement-options label { max-width:none; flex-wrap:wrap; }
 #cvat-3d-copilot-root .c3d-placement-options select { min-width:0; max-width:140px; }
+.c3d-update-row{padding:6px 12px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #343438;font-size:10px;color:#a1a1aa}
+.c3d-update-row [data-state="current"]{color:#6ee7b7}.c3d-update-row [data-state="available"]{color:#fbbf24}
+.c3d-update-row button{background:#28282d;color:#ddd;border:1px solid #45454d;border-radius:3px;font:inherit;padding:2px 5px;cursor:pointer}
+.c3d-reload-hold{color-scheme:dark;background:#18181d;color:#eee;border:1px solid #52525b;border-radius:8px;padding:24px;font:14px system-ui;max-width:400px}
+.c3d-reload-hold::backdrop{background:#0009}
