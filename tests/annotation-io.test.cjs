@@ -10,7 +10,7 @@ function sampleTrack(track,frame){
  const t=(frame-left.frame)/(right.frame-left.frame);
  return {...copy(left),points:left.points.map((v,i)=>v+(right.points[i]-v)*t)};
 }
-function fixture(initial=null,schema=null,origin='https://cvat.test'){
+function fixture(initial=null,schema=null,origin='https://cvat.test',recordHistory=true){
  const labels=schema||[{id:7,name:'vehicles',attributes:[]}];let data=initial||{tracks:[38,63,79].map((clientID,i)=>({clientID,id:48950+i,label_id:7,frame:0,group:0,attributes:[],shapes:[0,7,14].map(frame=>({id:100000+clientID*100+frame,type:'cuboid',frame,points:points(clientID+frame),outside:false,occluded:false,z_order:0,rotation:0,attributes:[]}))})),shapes:[],tags:[],intervals:[]};
  const history=[],commits=[];let locked=false,saveFail=null;
  const job={startFrame:0,stopFrame:59,labels,annotations:{export:async()=>copy(data),get:async frame=>{
@@ -18,15 +18,18 @@ function fixture(initial=null,schema=null,origin='https://cvat.test'){
   for(const kind of ['tracks','shapes'])for(const obj of data[kind]){
    if(kind==='shapes'&&obj.frame!==frame)continue;
    const shape=kind==='tracks'?sampleTrack(obj,frame):obj;
-   const state={clientID:obj.clientID,serverID:obj.id,objectType:kind==='tracks'?'track':'shape',shapeType:'cuboid',frame,label:labels.find(l=>l.id===obj.label_id),points:shape.points.slice(),keyframe:kind==='tracks'&&obj.shapes.some(x=>x.frame===frame),outside:shape.outside,lock:!!obj.lock,attributes:{},
-    async save(){if(saveFail===frame)throw new Error('injected native failure');history.push(copy(data));
+   const label=labels.find(l=>l.id===obj.label_id),attributes=Object.fromEntries(label.attributes.map(a=>[a.id,a.defaultValue??a.default_value??a.values?.[0]??'']));
+   for(const a of obj.attributes||[])attributes[a.spec_id]=a.value;
+   if(kind==='tracks')for(const key of obj.shapes.filter(s=>s.frame<=frame).sort((a,b)=>a.frame-b.frame))for(const a of key.attributes||[])attributes[a.spec_id]=a.value;
+   const state={clientID:obj.clientID,serverID:obj.id,objectType:kind==='tracks'?'track':'shape',shapeType:'cuboid',frame,label,points:shape.points.slice(),keyframe:kind==='tracks'&&obj.shapes.some(x=>x.frame===frame),outside:shape.outside,lock:!!obj.lock,attributes,
+    async save(){if(saveFail===frame)throw new Error('injected native failure');if(recordHistory)history.push(copy(data));
      if(kind==='tracks'){
       if(this.keyframe===false)obj.shapes=obj.shapes.filter(x=>x.frame!==frame);
       else{const saved={...shape,frame,points:this.points.slice(),outside:this.outside,occluded:this.occluded,z_order:this.zOrder,rotation:this.rotation,attributes:Object.entries(this.attributes).filter(([id])=>this.label.attributes.some(a=>a.id===+id&&a.mutable)).map(([spec_id,value])=>({spec_id:+spec_id,value}))};const index=obj.shapes.findIndex(x=>x.frame===frame);if(index<0){delete saved.id;obj.shapes.push(saved);}else obj.shapes[index]=saved;obj.shapes.sort((a,b)=>a.frame-b.frame);}
      }else Object.assign(obj,{points:this.points.slice(),outside:this.outside,occluded:this.occluded,z_order:this.zOrder,rotation:this.rotation});obj.label_id=this.label.id;obj.attributes=Object.entries(this.attributes).filter(([id])=>kind==='shapes'||this.label.attributes.some(a=>a.id===+id&&!a.mutable)).map(([spec_id,value])=>({spec_id:+spec_id,value}));return this;}};
    states.push(state);
   }return states;
- },group:async(states,reset)=>{history.push(copy(data));const assigned=reset?0:1+Math.max(0,...data.tracks.map(t=>t.group||0));for(const state of states){const item=[...data.tracks,...data.shapes].find(t=>t.clientID===state.clientID);item.group=assigned;}return assigned;},commit:async(add,remove)=>{history.push(copy(data));commits.push({add:copy(add),remove:copy(remove)});let next=Math.max(79,...data.tracks.map(x=>x.clientID));
+ },group:async(states,reset)=>{if(recordHistory)history.push(copy(data));const assigned=reset?0:1+Math.max(0,...data.tracks.map(t=>t.group||0));for(const state of states){const item=[...data.tracks,...data.shapes].find(t=>t.clientID===state.clientID);item.group=assigned;}return assigned;},commit:async(add,remove)=>{if(recordHistory)history.push(copy(data));commits.push({add:copy(add),remove:copy(remove)});let next=Math.max(79,...data.tracks.map(x=>x.clientID));
   for(const kind of ['tracks','shapes']){data[kind]=data[kind].filter(x=>!(remove[kind]||[]).some(y=>y.clientID===x.clientID));for(const item of add[kind]||[])data[kind].push({...copy(item),clientID:++next});}}}};
  const snapshot={connected:true,sessionId:'fixture',jobId:1224,frame:0};
  const io=createAnnotationIO({math,job:()=>job,snapshot:()=>snapshot,origin:()=>origin,assertEditable(){},lock:v=>locked=v,refresh:async()=>{}});
@@ -38,7 +41,7 @@ test('export includes exact native display and database IDs, including unsaved o
 });
 
 test('editor export is versioned and refuses a collection missing real display IDs',async()=>{
- const f=fixture(),file=(await f.io.exported()).data;assert.equal(file.c3d.toolVersion,'1.17.5');assert.ok(file.c3d.exportedAt);
+ const f=fixture(),file=(await f.io.exported()).data;assert.equal(file.c3d.toolVersion,'1.17.7');assert.ok(file.c3d.exportedAt);
  delete f.data.tracks[0].clientID;await assert.rejects(f.io.exported(),/display IDs/);
 });
 
@@ -52,10 +55,20 @@ test('legacy add, merge and delete-all requests are rejected without native muta
  }
 });
 
-test('foreign job metadata in a wrapped raw export is not discarded during import',async()=>{
- const f=fixture(),file={jobId:1264,origin:'https://cvat.test',annotations:copy(f.data)};
- await assert.rejects(f.io.preview({payload:file}),/another job/);assert.equal(f.history.length,0);
- file.jobId=1224;assert.equal((await f.io.preview({payload:file})).rows[0].matched,true);
+test('wrapped cross-job metadata is retained and requires explicit template confirmation',async()=>{
+ const f=fixture(),file={jobId:1264,origin:'https://cvat.test',annotations:{...copy(f.data),labels_manifest:copy(f.job.labels)}};
+ const p=await f.io.preview({payload:file});assert.equal(p.crossJob,true);assert.equal(p.source.jobId,1264);
+ await assert.rejects(f.io.apply({token:p.token,keys:['tracks:0']}),/Confirm/);assert.equal(f.history.length,0);
+ const r=await f.io.apply({token:p.token,keys:['tracks:0'],confirmCrossJob:true});assert.equal(r.error,null);assert.equal(f.commits.length,0);
+ const bad=copy(file);bad.annotations.c3d={jobId:9,origin:'https://cvat.test'};await assert.rejects(f.io.preview({payload:bad}),/Conflicting/);
+});
+
+test('cross-job previews require source label schema and still reject a different server',async()=>{
+ const f=fixture(),file=(await f.io.exported()).data;file.c3d.jobId=1264;
+ const p=await f.io.preview({payload:file});assert.equal(p.crossJob,true);
+ delete file.labels_manifest;await assert.rejects(f.io.preview({payload:file}),/labels_manifest/);
+ file.labels_manifest=[];await assert.rejects(f.io.preview({payload:file}),/label schema/);
+ file.c3d.origin='https://other.test';await assert.rejects(f.io.preview({payload:file}),/another server/);assert.equal(f.history.length,0);
 });
 
 test('supplied raw job1264 file requires explicit display-ID mapping even when database IDs exist',{skip:!process.env.CVAT_IO_CASE},async()=>{
@@ -114,7 +127,7 @@ test('unknown IDs, foreign job, duplicate IDs and stale previews fail before wri
  for(const scenario of ['unknown','foreign','duplicate','stale','scope']){
   const f=fixture(),data=(await f.io.exported()).data;
   if(scenario==='unknown'){data.tracks[0].id=123456;delete data.tracks[0].clientID;}
-  if(scenario==='foreign')data.c3d.jobId=9;
+  if(scenario==='foreign')data.c3d.origin='https://other.test';
   if(scenario==='duplicate')data.tracks.push(copy(data.tracks[0]));
   if(['foreign','duplicate'].includes(scenario))await assert.rejects(f.io.preview({payload:data}));
   else{const p=await f.io.preview({payload:data});if(scenario==='stale')f.data.tracks[0].shapes[0].points[0]+=.2;
@@ -260,4 +273,67 @@ test('dense template writes every frame including unchanged frames and keeps omi
  const p=await f.io.preview({payload:file}),r=await f.io.apply({token:p.token,keys:['tracks:0']});assert.equal(r.error,null);assert.equal(f.history.length,60);assert.equal(f.commits.length,0);
  for(let frame=0;frame<60;frame++){assert.deepEqual(f.data.tracks[0].shapes[frame].points,file.tracks[0].shapes[frame].points);assert.equal(f.data.tracks[0].shapes[frame].outside,file.tracks[0].shapes[frame].outside);}
  assert.deepEqual(f.data.tracks.slice(1),before.tracks.slice(1));
+});
+
+
+test('cross-job schema uses label and attribute names instead of coincidental numeric IDs',async()=>{
+ const f=fixture();f.job.labels[0].attributes=[{id:1,name:'type',mutable:false,default_value:'car'}];
+ const file=(await f.io.exported()).data;file.c3d.jobId=1264;
+ file.labels_manifest=[{id:99,name:'vehicles',attributes:[{id:101,name:'type',mutable:false}]}];
+ file.tracks=file.tracks.slice(0,1);file.tracks[0].label_id=99;file.tracks[0].attributes=[{spec_id:101,value:'SUV'}];
+ const p=await f.io.preview({payload:file});assert.equal(p.rows[0].labelMismatch,false);
+ const r=await f.io.apply({token:p.token,keys:['tracks:0'],confirmCrossJob:true});assert.equal(r.error,null);assert.equal(f.data.tracks[0].label_id,7);assert.deepEqual(f.data.tracks[0].attributes,[{spec_id:1,value:'SUV'}]);assert.equal(f.commits.length,0);
+});
+
+test('owner 1264 template edits all 76 matched IDs on 1224 model, retaining remaining IDs and source files',{skip:!process.env.CVAT_IO_TEMPLATE_SOURCE||!process.env.CVAT_IO_TEMPLATE_TARGET},async()=>{
+ const fs=require('node:fs'),sourceBytes=fs.readFileSync(process.env.CVAT_IO_TEMPLATE_SOURCE),targetBytes=fs.readFileSync(process.env.CVAT_IO_TEMPLATE_TARGET);
+ const source=JSON.parse(sourceBytes),target=JSON.parse(targetBytes),f=fixture(copy(target),target.labels_manifest,target.c3d.origin,false);
+ assert.equal(source.tracks.length,76);assert.equal(target.tracks.length,79);
+ const p=await f.io.preview({payload:source});assert.equal(p.crossJob,true);assert.equal(p.rows.filter(r=>r.matched).length,76);assert.deepEqual(p.rows.filter(r=>r.labelMismatch).map(r=>r.sourceClientId),[72,73,74,75,76]);
+ await assert.rejects(f.io.apply({token:p.token,keys:p.rows.map(r=>r.key)}),/Confirm/);assert.deepEqual(f.data,target);
+ const r=await f.io.apply({token:p.token,keys:p.rows.map(r=>r.key),confirmCrossJob:true});assert.equal(r.error,null,JSON.stringify(r));assert.equal(r.changed.length,76);assert.equal(f.commits.length,0);
+ for(const src of source.tracks){
+  const actual=f.data.tracks.find(t=>t.clientID===src.clientID),original=target.tracks.find(t=>t.clientID===src.clientID);
+  assert.equal(actual.id,original.id);assert.equal(actual.clientID,original.clientID);assert.equal(actual.label_id,src.label_id);
+  assert.deepEqual(actual.shapes.map(s=>s.frame),src.shapes.map(s=>s.frame));
+  for(const sh of src.shapes){const saved=actual.shapes.find(s=>s.frame===sh.frame);assert.deepEqual(saved.points,sh.points);assert.equal(saved.outside,sh.outside);}
+ }
+ for(const id of [77,78,79])assert.deepEqual(f.data.tracks.find(t=>t.clientID===id),target.tracks.find(t=>t.clientID===id));
+ assert.deepEqual(fs.readFileSync(process.env.CVAT_IO_TEMPLATE_SOURCE),sourceBytes);assert.deepEqual(fs.readFileSync(process.env.CVAT_IO_TEMPLATE_TARGET),targetBytes);
+});
+
+
+test('explicit full replacement creates the complete file with fresh IDs, removes old cuboids and supports model Undo',async()=>{
+ const f=fixture(),before=copy(f.data),file=copy(f.data);file.tracks=file.tracks.slice(0,2);file.tracks[0].shapes[0].points=points(777);
+ f.data.shapes.push({clientID:91,id:80001,type:'cuboid',frame:0,label_id:7,points:points(1),group:0,attributes:[]});const original=copy(f.data);
+ const p=await f.io.preview({mode:'recreate',payload:file});assert.equal(p.mode,'recreate');assert.equal(p.existing,4);
+ await assert.rejects(f.io.apply({token:p.token,keys:p.rows.map(r=>r.key)}),/Confirm deletion/);assert.equal(f.history.length,0);
+ const r=await f.io.apply({token:p.token,keys:p.rows.map(r=>r.key),confirmRecreate:true});assert.equal(r.error,null);assert.equal(r.added.length,2);assert.deepEqual(r.removed,[38,63,79,91]);assert.equal(f.commits.length,1);assert.equal(f.history.length,1);
+ assert.equal(f.data.shapes.length,0);assert.equal(f.data.tracks.length,2);assert.ok(f.data.tracks.every(t=>!original.tracks.some(old=>old.clientID===t.clientID)));assert.equal(f.data.tracks[0].shapes[0].points[0],777);
+ for(const t of f.commits[0].add.tracks){assert.equal(t.id,undefined);assert.equal(t.clientID,undefined);assert.ok(t.shapes.every(s=>s.id===undefined));}
+ f.undo();assert.deepEqual(f.data,original);assert.equal(f.locked,false);
+});
+
+test('full replacement rejects partial selection, mapping, stale data, protected targets and missing APIs before mutation',async()=>{
+ for(const scenario of ['partial','mapping','stale','locked','api','tags','geometry']){
+  const f=fixture(),file=copy(f.data);
+  if(scenario==='locked')f.data.tracks[1].lock=true;
+  if(scenario==='api')delete f.job.annotations.commit;
+  if(scenario==='tags')f.data.tags=[{clientID:100,id:5,frame:0,label_id:7}];
+  if(scenario==='geometry'){file.tracks[0].shapes[0].points[6]=-1;await assert.rejects(f.io.preview({mode:'recreate',payload:file}));continue;}
+  const p=await f.io.preview({mode:'recreate',payload:file});if(scenario==='stale')f.data.tracks[0].shapes[0].points[0]++;
+  await assert.rejects(f.io.apply({token:p.token,confirmRecreate:true,keys:scenario==='partial'?['tracks:0']:p.rows.map(r=>r.key),...(scenario==='mapping'?{mapping:{'tracks:0':38}}:{})}));
+  assert.equal(f.commits.length,0);assert.equal(f.history.length,0);assert.equal(f.locked,false);
+ }
+});
+
+test('replacement failure releases lock, refreshes and never calls a separate clear/delete operation',async()=>{
+ const f=fixture(),before=copy(f.data),p=await f.io.preview({mode:'recreate',payload:copy(f.data)});f.job.annotations.commit=async()=>{throw new Error('native failure');};
+ const r=await f.io.apply({token:p.token,keys:p.rows.map(r=>r.key),confirmRecreate:true});assert.match(r.error,/native failure/);assert.equal(f.locked,false);assert.deepEqual(f.data,before);assert.equal(f.commits.length,0);
+});
+
+test('cross-job full replacement still requires scene/frame confirmation',async()=>{
+ const f=fixture(),file=(await f.io.exported()).data;file.c3d.jobId=1264;
+ const p=await f.io.preview({mode:'recreate',payload:file});await assert.rejects(f.io.apply({token:p.token,keys:p.rows.map(r=>r.key),confirmRecreate:true}),/Confirm/);
+ const r=await f.io.apply({token:p.token,keys:p.rows.map(r=>r.key),confirmRecreate:true,confirmCrossJob:true});assert.equal(r.error,null);assert.equal(r.added.length,3);assert.equal(f.commits.length,1);
 });

@@ -1,19 +1,40 @@
-# CVAT 3D TOOL 1.17.5
+# CVAT 3D TOOL 1.17.7
 
+
+## Full replacement restored — 1.17.7
+
+The HUD now has two separate JSON actions:
+
+- **Chỉnh ID theo file JSON** edits selected existing objects in place, preserving target IDs.
+- **Xóa & import mới** removes all current cuboids across the job and imports every cuboid from the file as new objects. CVAT assigns new display/database IDs; old IDs are not preserved in this mode.
+
+Full replacement previews old/new counts, requires explicit confirmation and requests a versioned JSON editor backup download before applying. Check that the download was saved; clicking a browser download does not establish successful disk persistence. Source job/frame/schema checks remain. Locked/ground-truth objects, unsupported current annotations, invalid input or stale previews block the operation before commit.
+
+The native commit imports new annotations and marks old objects removed in one native Undo/Redo action, followed by render refresh. **Save CVAT** persists the change; no page reload is required. If native import/refresh fails, inspect Undo and the backup before retrying; partial failure is reported, not promised to be atomic. Full replacement currently supports cuboid tracks/shapes only and rejects jobs containing tags, intervals or other shape types.
+
+Verified using offline native-model and browser fixtures; no live annotation import or Save was performed in this change. This local version has not been published as part of this task.
+
+## Dùng JSON làm mẫu giữa hai job — 1.17.6
+
+Cho phép mở JSON editor từ **job khác trên cùng server** để xem trước và chỉnh các #clientID đã chọn. File phải có labels_manifest đầy đủ; nhãn và thuộc tính được ánh xạ theo tên, không dựa vào DB ID giữa hai job. Các frame nguồn phải thuộc phạm vi job đích; frame N vẫn chỉnh frame N, không tự dịch frame hay đổi hệ tọa độ.
+
+Preview ghi rõ job nguồn/đích và yêu cầu người dùng xác nhận cùng cảnh, hệ tọa độ và số frame trước khi Apply; backend kiểm tra xác nhận này. Cùng #ID không chứng minh cùng vật thể. Dòng cùng số ID nhưng khác class được đánh dấu với cả class nguồn/đích và **không chọn sẵn**; có thể chọn đích hiện có thủ công. Không tự ghép ID bằng khoảng cách hoặc DB ID. JSON từ server khác vẫn bị chặn trong luồng này.
+
+Thao tác giữ đối tượng đích, clientID và DB ID; không tạo/xóa track. Các ID không chọn được giữ nguyên, kể cả ID chỉ có ở đích. Export bổ sung phạm vi frame của job vào metadata. Native Apply/Save trên job thật không được thực hiện trong đợt kiểm thử này.
 
 ## Chỉnh ID theo file trên toàn bộ frame — 1.17.5
 
 **JSON là mẫu cho toàn bộ diễn biến của mỗi #clientID đã chọn.** Ví dụ nguồn `clientID: 38`, frame 24 sẽ chỉnh CVAT **#38 tại frame 24**, giữ nguyên đối tượng đích và ID database hiện tại. Không dịch frame theo điểm bắt đầu; track bắt đầu khác frame vẫn chỉnh được. Tool ghi mọi keyframe nguồn, kể cả không khác dữ liệu đích; các frame giữa keyframe dùng nội suy native CVAT giống file. File chỉ lưu keyframe, không nhất thiết chứa một bản ghi cho từng frame.
 
-HUD chỉ còn **Chỉnh ID theo file JSON** → chọn các #ID → **Áp dụng chỉnh sửa**. Đã bỏ Add, Đồng bộ sửa/thêm và Replace toàn bộ khỏi luồng JSON HUD; backend cũng từ chối các yêu cầu tạo/xóa cũ. Không xóa hoặc tạo lại đối tượng, không tự thêm ID thiếu, giữ nguyên ID ngoài lựa chọn. Keyframe cũ không có trong mẫu được bỏ bằng chỉnh cờ keyframe native trên cùng track, để nội suy và xuất hiện/biến mất đúng theo mẫu.
+Luồng chỉnh giữ ID dùng **Chỉnh ID theo file JSON** → chọn các #ID → **Áp dụng chỉnh sửa**. Luồng này từ chối các yêu cầu tạo/xóa cũ; bản 1.17.7 có nút full replacement riêng với xác nhận tường minh. Không xóa hoặc tạo lại đối tượng, không tự thêm ID thiếu, giữ nguyên ID ngoài lựa chọn. Keyframe cũ không có trong mẫu được bỏ bằng chỉnh cờ keyframe native trên cùng track, để nội suy và xuất hiện/biến mất đúng theo mẫu.
 
-Khớp bằng `clientID`, không dùng DB ID hay thứ tự mảng. File cũ thiếu `clientID`, hoặc ID không có trong job, phải chọn một #ID đích hiện có thủ công hoặc bỏ chọn dòng đó. Preview cho thấy mọi ID đích cùng loại; không còn khóa vì khác frame bắt đầu. ClientID có thể được CVAT cấp lại khi nạp editor, nên cần kiểm tra đúng đối tượng trong preview. Metadata sai job/server vẫn bị chặn.
+Khớp bằng `clientID`, không dùng DB ID hay thứ tự mảng. File cũ thiếu `clientID`, hoặc ID không có trong job, phải chọn một #ID đích hiện có thủ công hoặc bỏ chọn dòng đó. Preview cho thấy mọi ID đích cùng loại; không còn khóa vì khác frame bắt đầu. ClientID có thể được CVAT cấp lại khi nạp editor, nên cần kiểm tra đúng đối tượng trong preview. File khác job trên cùng server dùng luồng mẫu có xác nhận ở trên; server khác vẫn bị chặn.
 
 Native ObjectState.save() cập nhật geometry, nhãn, thuộc tính và visibility của đối tượng đích; Undo theo thao tác, Save CVAT để lưu server. Không tự reload. Đây là chỉnh track; một shape độc lập vẫn chỉ thuộc đúng frame của nó và không thể chuyển thành track qua luồng này. Kết quả ngoại tuyến không thay cho nghiệm thu Apply/Save trên job thật; đợt này không import hoặc sửa annotation live.
 
 ## Ground Snap fallback và JSON export — 1.17.3+
 
-- Export JSON editor có `clientID`, `id`, metadata job/server, phiên bản tool và thời điểm xuất. Tên file HUD chứa phiên bản. Nếu backend trả thiếu ID/metadata, tool dừng thay vì tải nhầm JSON raw. Metadata ở wrapper cũng được giữ khi import để chặn sai job/server. Quy tắc DB matching của 1.17.3 đã được thay bằng clientID-only từ 1.17.4; JSON raw cũ thiếu clientID phải chọn đích thủ công.
+- Export JSON editor có `clientID`, `id`, metadata job/server, phiên bản tool và thời điểm xuất. Tên file HUD chứa phiên bản. Nếu backend trả thiếu ID/metadata, tool dừng thay vì tải nhầm JSON raw. Metadata ở wrapper cũng được giữ khi import để kiểm tra job/server nguồn và hiện cảnh báo mẫu khác job. Quy tắc DB matching của 1.17.3 đã được thay bằng clientID-only từ 1.17.4; JSON raw cũ thiếu clientID phải chọn đích thủ công.
 - **Ground Snap** ưu tiên mặt đất cục bộ. Nếu thiếu bằng chứng, tool đo đường gần gốc XY `(0,0)` (giả định đây là xe LiDAR), rồi dùng **cao độ tại gốc** làm mặt phẳng ngang để snap. Không mặc định Z=0, không ngoại suy độ dốc ra box xa. Có thông báo fallback; địa hình xa xe có thể khác cao độ. Chặn fallback nằm cao hơn gốc sensor trên 0.25 m, bằng chứng yếu và độ dịch Z quá 1.5 m theo guard hiện có. Khi bật tùy chọn origin-ground thủ công, cao độ cấu hình vẫn được ưu tiên.
 - Nút Ground Snap không còn bị khóa chỉ vì ground dưới box chưa tin cậy. Ground QC vẫn dùng bằng chứng tại box; không nhận fallback từ xe LiDAR như ground cục bộ đã đo.
 
@@ -37,7 +58,7 @@ Export JSON trên HUD (và JSON native trong trang Phiên) lấy dữ liệu nat
 
 Từ bản 1.17.2, mỗi dòng import có bộ chọn **CVAT #ID đích**. Nếu file cũ thiếu `clientID`, người dùng có thể chỉ định đích hiện có một cách tường minh. Tool không suy ra ID từ thứ tự mảng hoặc vị trí hình học. Nút Apply bị chặn khi ID được chọn chưa có đích hoặc nhiều nguồn cùng chọn một đích; backend kiểm tra lại, giữ chặn stale/protected và sửa chính đối tượng hiện có để giữ ID. Việc chọn đích thủ công phải được người dùng xác nhận; file thiếu định danh không thể tự khôi phục số hiển thị cũ.
 
-Import JSON chỉ chỉnh các ID đã chọn tại chỗ theo mẫu trên toàn bộ frame. Keyframe cũ vắng trong mẫu được chuyển về frame nội suy, không xóa track. Không có chế độ Add hay xóa ID ngoài file. Group thay đổi được tạo lại giữa các ID đã chọn, không ghép ngoài ý muốn với thành viên không được chọn; số group có thể đổi.
+Luồng chỉnh giữ ID chỉ chỉnh các ID đã chọn tại chỗ theo mẫu trên toàn bộ frame. Keyframe cũ vắng trong mẫu được chuyển về frame nội suy, không xóa track. Luồng chỉnh giữ ID không có Add hay xóa ID ngoài file; full replacement là thao tác riêng ở trên. Group thay đổi được tạo lại giữa các ID đã chọn, không ghép ngoài ý muốn với thành viên không được chọn; số group có thể đổi.
 
 Import áp dụng vào editor và cập nhật render, có native Undo theo thao tác. **Save CVAT để lưu server; không tự reload.** Kế hoạch hết hạn khi editor thay đổi; preflight chặn target khóa, dữ liệu lỗi, label/attribute không ánh xạ chính xác. Hiện hỗ trợ cuboid track/shape; tags/intervals/skeleton hoặc chuyển frame của shape độc lập bị chặn rõ ràng. Luồng native có thể dừng sau một số thao tác nếu lỗi; UI báo phần đã sửa và yêu cầu kiểm tra Undo, không tuyên bố rollback nguyên tử.
 

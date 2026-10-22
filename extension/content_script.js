@@ -216,6 +216,7 @@
                 </div>
                 <div class="c3d-action-grid" style="margin-top:2px;">
                     <button id="c3d-btn-import-replace" class="c3d-btn-secondary" title="Chỉnh đối tượng đang có theo #clientID trên toàn bộ frame trong file, giữ ID">Chỉnh ID theo file JSON</button>
+                    <button id="c3d-btn-import-recreate" class="c3d-btn-secondary" title="Xóa toàn bộ annotation hiện tại rồi import file thành đối tượng mới; CVAT cấp ID mới">Xóa & import mới</button>
                 </div>
                 <input type="file" id="c3d-file-import" accept=".json" style="display:none" />
                 <div class="c3d-metrics-bar"><div class="c3d-metric-item"><span class="c3d-metric-label">BOXES</span><strong id="c3d-val-count">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">AFFECTED</span><strong id="c3d-val-affected">0</strong></div><div class="c3d-metric-item"><span class="c3d-metric-label">ISSUES</span><strong id="c3d-val-issues">0</strong></div></div>
@@ -248,7 +249,7 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.17.5 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.17.7 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
@@ -274,7 +275,9 @@
                 toast(`Export thành công ${res.trackCount} tracks (${res.shapeCount} shapes)!`);
             } catch (error) { toast('Lỗi export: ' + error.message, true); }
         });
-        el('c3d-btn-import-replace')?.addEventListener('click', () => el('c3d-file-import')?.click());
+        let importMode='edit';
+        el('c3d-btn-import-replace')?.addEventListener('click', () => {importMode='edit';el('c3d-file-import')?.click();});
+        el('c3d-btn-import-recreate')?.addEventListener('click', () => {importMode='recreate';el('c3d-file-import')?.click();});
         el('c3d-file-import')?.addEventListener('change', async (event) => {
             const file = event.target.files?.[0]; if (!file) return; event.target.value = '';
             try {
@@ -283,7 +286,7 @@
                 if (!json.tracks && !json.shapes) throw new Error('File không chứa mảng tracks hoặc shapes của CVAT');
                 if(!window.__C3D_ANNOTATION_IO_UI)throw new Error('Import selection UI unavailable; reload extension');
                 importUI?.dispose();
-                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:'edit',data:parsed});
+                importUI=window.__C3D_ANNOTATION_IO_UI.mount({request,toast,jobId:getJobId(),sessionId:snapshot?.sessionId,mode:importMode,data:parsed});
                 await importUI.open();
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });
