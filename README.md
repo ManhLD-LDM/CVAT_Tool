@@ -1,5 +1,16 @@
-# CVAT 3D TOOL 1.17.7
+# CVAT 3D TOOL 1.18.0
 
+
+## Batch Edit — 1.18.0
+
+HUD **Batch Edit** groups two functions for the selected cuboid track: **Kích thước box** (the existing Batch Size Update) and **Thuộc tính theo class**. Choose an inclusive range of 1–1000 job frames, select the fields to edit, preview, then confirm Apply. Only checked fields are changed; attribute controls and allowed values come from the selected class schema, including select/radio, checkbox, text and numeric inputs. Boolean false is an explicit editable value.
+
+- Mutable attributes such as `pose` and `ride_state` apply within the selected range. The original effective values are captured at `to+1` and restored after range writes, including when that boundary is already a keyframe without an explicit attribute value. This prevents step-held values from leaking past the range on successful completion.
+- Immutable attributes such as `age` are track-wide in this job's CVAT schema. The UI labels them **TOÀN TRACK** and the backend requires explicit confirmation before any such update. A narrow frame selection cannot restrict an immutable attribute; changing it affects the same track outside that interval too. Changing mutability requires a separate project-schema decision.
+- Attribute edits retain object IDs, geometry, class, visibility and unselected attributes. Outside frames are skipped and listed in preview. Some attribute changes introduce native keyframes; size edits retain the existing keep-bottom/keep-center behavior.
+- Protected targets/boundaries, stale data and invalid schema values stop before writes. Native edits are sequential with per-operation Undo, renderer refresh and partial-error reporting; Save CVAT persists them. On attribute-write failure the controller attempts to restore the end boundary and reports any restoration failure explicitly; it does not promise atomic rollback.
+
+This change was verified with offline native-model and Edge browser fixtures; no edits were applied to live job 1224. Version 1.18.0 was built and verified locally before publication.
 
 ## Full replacement restored — 1.17.7
 
@@ -42,7 +53,7 @@ Kiểm thử ngoại tuyến và browser fixtures không thay cho nghiệm thu i
 
 ## Batch Size Update — 1.17.0
 
-Chọn một cuboid **track** → **Batch Size Update** → nhập **Dài × Rộng × Cao (m)** → chọn khoảng frame → **Xem trước** → **Xác nhận áp dụng** → **Save CVAT**. Kích thước ban đầu lấy từ box đang chọn; dùng **Toàn job** để chọn toàn phạm vi (tối đa 1000 frame/lần, tính cả hai đầu: 24–44 là 21 frame).
+Chọn một cuboid **track** → **Batch Edit → Kích thước box** → nhập **Dài × Rộng × Cao (m)** → chọn khoảng frame → **Xem trước** → **Xác nhận áp dụng** → **Save CVAT**. Kích thước ban đầu lấy từ box đang chọn; dùng **Toàn job** để chọn toàn phạm vi (tối đa 1000 frame/lần, tính cả hai đầu: 24–44 là 21 frame).
 
 - Áp dụng cho đúng một track, kể cả keyframe hiện có; giữ clientID/serverID, X/Y và góc xoay từng frame. Đây là thao tác chỉnh tay hàng loạt, độc lập với bảo vệ keyframe của Batch Track Review.
 - Mặc định **giữ cao độ đáy** từng frame (hỗ trợ box nghiêng); có thể đổi sang **giữ tâm XYZ**. Giữ đáy không phải ground snap: đáy đang lệch mặt đường vẫn giữ độ lệch đó.
