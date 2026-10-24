@@ -34,6 +34,14 @@ function topHarness(options={}){
     return {...h,camera,rect,element,hover};
 }
 
+test('work document reads native unsaved cuboid fingerprints without selection, geometry or history writes',async()=>{
+ const h=harness({adapterEnv:{workLog:require('../extension/work_log.js')}}),job=h.state.annotation.job.instance;
+ job.annotations.export=async()=>({tracks:[{clientID:38,id:88,label_id:7,shapes:[{type:'cuboid',frame:3,points:[1,2,3],outside:false}]}]});
+ const result=await h.adapter.command('GET_WORK_DOCUMENT');assert.equal(result.jobId,9426);assert.equal(result.rows[1].clientId,38);assert.equal(result.rows[1].frame,3);assert.equal('points'in result.rows[1],false);assert.equal(result.saved,true);assert.equal(h.history.length,0);assert.equal(h.actions.length,0);
+ await h.adapter.command('PREPARE_RELOAD',{jobId:9426,sessionId:h.ref(1).sessionId});assert.equal((await h.adapter.command('GET_WORK_DOCUMENT')).rows.length,2);await assert.rejects(h.adapter.command('ROTATE',{ref:h.ref(1),degrees:90}),/reload/);await h.adapter.command('RELEASE_RELOAD');assert.equal(h.history.length,0);
+ let release;job.annotations.export=()=>new Promise(r=>release=r);const pending=h.adapter.command('GET_WORK_DOCUMENT');h.state.annotation.job.instance={id:99};release({tracks:[]});await assert.rejects(pending,/Job changed/);h.adapter.dispose();
+});
+
 test('reload preparation saves native frames/annotations, confirms clean state and locks edits until released',async()=>{
  const h=harness(),job=h.state.annotation.job.instance,calls=[];
  await h.state.annotation.annotations.states[0].save();
@@ -660,4 +668,15 @@ test('native confirmation accepts canonical 9-field geometry with or without 16-
   target.save=async function(){const saved=await save.call(this);saved.points=paddedInput?saved.points.slice(0,9):saved.points.concat(Array(7).fill(0));return saved;};
   const result=await h.adapter.command('ROTATE',{ref:h.ref(1),degrees:90});assert.equal(result.applied,true);assert.equal(h.history.length,1);h.adapter.dispose();
  }
+});
+
+test('review appearance reads CVAT pointSize without mistaking control handle size for LiDAR appearance',()=>{
+ const h=harness();assert.equal(h.adapter.getSnapshot().reviewAppearance.pointSize,2);
+ h.state.settings={shapes:{pointSize:5,controlPointsSize:99}};assert.deepEqual(h.adapter.getSnapshot().reviewAppearance,{pointSize:5,source:'cvat-settings'});
+ h.state.settings.shapes.pointSize=3;assert.equal(h.adapter.getSnapshot().reviewAppearance.pointSize,3);
+ delete h.state.settings.shapes.pointSize;assert.equal(h.adapter.getSnapshot().reviewAppearance.source,'review-default');h.adapter.dispose();
+});
+test('review appearance fallback identifies only the Point size slider, excluding opacity',()=>{
+ const label={textContent:'Point size',parentElement:{querySelectorAll:()=>[{getAttribute:()=> '4'}],parentElement:null}},doc={getElementById:()=>null,querySelectorAll:()=>[label]};
+ const h=harness({adapterEnv:{document:doc}});assert.equal(h.adapter.getSnapshot().reviewAppearance.pointSize,4);assert.equal(h.adapter.getSnapshot().reviewAppearance.source,'cvat-point-size-slider');h.adapter.dispose();
 });

@@ -1,3 +1,4 @@
+const {reveal}=require('./ui-helpers.cjs');
 const {test,expect}=require('@playwright/test');
 
 test('Inspect ground shows a copyable read-only report and invalidates it when settings or selection change',async({page})=>{
@@ -21,20 +22,20 @@ test('Inspect ground shows a copyable read-only report and invalidates it when s
  });
  await page.addScriptTag({path:'extension/copilot_panel.js'});
  await expect(page.locator('#c3d-btn-ground-debug')).toBeEnabled();
- await page.locator('#c3d-origin-ground').check();
+ await reveal(page,'c3d-origin-ground');await page.locator('#c3d-origin-ground').check();
  await page.locator('#c3d-ground-height').fill('-.2');await page.locator('#c3d-ground-height').dispatchEvent('change');
- await page.locator('#c3d-btn-ground-debug').click();
+ await reveal(page,'c3d-btn-ground-debug');await page.locator('#c3d-btn-ground-debug').click();
  const summary=page.locator('#c3d-ground-debug-summary');
  await expect(summary).toContainText('Ground Z at box center: -1.300 m');
  await expect(summary).toContainText('Box lowest Z: -0.900 m');
  await expect(summary).toContainText('Proposed ΔZ (+ up / − down): -0.400 m');
  await expect(summary).toContainText('Road tilt unavailable');
  const report=page.locator('#c3d-ground-debug-report');
- await expect(report).toHaveValue(/"selectedGround"/);await expect(report).toHaveAttribute('readonly','');
+ await reveal(page,'c3d-ground-debug-report');await expect(report).toHaveValue(/"selectedGround"/);await expect(report).toHaveAttribute('readonly','');
  const requests=await page.evaluate(()=>commands.filter(q=>q.type==='INSPECT_GROUND'));
  expect(requests).toHaveLength(1);expect(requests[0].payload).toMatchObject({useOriginGround:true,fallbackGroundHeight:-.2});
  expect(await page.evaluate(()=>commands.some(q=>['SNAP_GROUND','AUTO_ADJUST','AUTO_FIT'].includes(q.type)))).toBe(false);
- await page.locator('#c3d-origin-ground').uncheck();await expect(page.locator('#c3d-ground-debug-result')).toBeHidden();
+ await reveal(page,'c3d-origin-ground');await page.locator('#c3d-origin-ground').uncheck();await expect(page.locator('#c3d-ground-debug-result')).toBeHidden();
  await page.locator('#c3d-btn-ground-debug').click();await expect(summary).toBeVisible();
  await page.locator('#c3d-select-box').selectOption('2');await expect(page.locator('#c3d-ground-debug-result')).toBeHidden();
 });

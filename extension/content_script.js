@@ -108,7 +108,7 @@
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
+    let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,taskUI=null,workUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let groundDebug=null;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
@@ -117,7 +117,8 @@
     const text = (id, value) => { const node=el(id); if(node) node.textContent=value; };
     const scopeKey = s => s ? `${s.sessionId}:${s.jobId}:${s.frame}` : '';
     function request(type, payload = {}) {
-        if(serverImportPending&&['EXPORT_ALL_ANNOTATIONS','PREVIEW_ANNOTATION_IMPORT','IMPORT_ALL_ANNOTATIONS'].includes(type))return Promise.reject(new Error('Đã gửi import server; nạp lại kết quả trước khi dùng editor JSON'));
+        if(serverImportPending&&['EXPORT_ALL_ANNOTATIONS','PREVIEW_ANNOTATION_IMPORT','IMPORT_ALL_ANNOTATIONS','GET_WORK_DOCUMENT'].includes(type))return Promise.reject(new Error('Đã gửi import server; nạp lại kết quả trước khi dùng editor JSON'));
+        workUI?.before(type);
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
             const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS') || type==='PREPARE_RELOAD';
@@ -127,7 +128,7 @@
             }, isLong ? 180000 : 20000);
             pending.set(requestId,{resolve,reject,timeout});
             window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
-        });
+        }).then(result=>{workUI?.result(type,payload,result);return result;}).finally(()=>workUI?.after(type));
     }
     function receive(event) {
         if(typeof event.detail!=='string') return;
@@ -234,6 +235,7 @@
         const previousScope=scopeKey(snapshot), nextScope=scopeKey(next);
         if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
         snapshot=next;
+        workUI?.onSnapshot(next);
         syncFollowCamera();
         if(!root && shouldShow())createHUD();
         if(!root)return;
@@ -245,6 +247,48 @@
             if(autoQc) {clearTimeout(qcTimer);qcTimer=setTimeout(()=>runQC(true),140);}
         }
     }
+    function arrangeTasks(){
+        const body=el('c3d-content-body'),context=root.querySelector('.c3d-context'),footer=root.querySelector('.c3d-footer');
+        const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls||'';if(text)n.textContent=text;return n;};
+        const group=(title)=>{const n=node('section','c3d-task-group');n.append(node('h3','',title));return n;};
+        const move=(id,target)=>{const n=el(id);if(n)target.append(n);return n;};
+        const details=(title)=>{const n=node('details','c3d-task-details');n.append(node('summary','',title));return n;};
+        const nav=node('nav','c3d-task-nav');nav.setAttribute('role','tablist');nav.setAttribute('aria-label','Tác vụ công cụ');
+        const workspace=node('div','c3d-task-workspace'),pages=node('div','c3d-task-pages'),panels={};
+        const selected=node('section','c3d-selection');selected.append(root.querySelector('.c3d-inspector-header'));move('c3d-select-box',selected);const sizeSummary=node('div','c3d-selected-size');sizeSummary.id='c3d-active-size';selected.append(sizeSummary);
+        for(const [id,label] of [['box','Box'],['qc','QC'],['camera','Camera'],['data','Dữ liệu'],['work','Công việc'],['settings','Cài đặt']]){
+            const button=node('button','c3d-task-tab',label);button.type='button';button.id='c3d-tab-'+id;button.dataset.task=id;button.setAttribute('role','tab');button.setAttribute('aria-controls','c3d-task-'+id);
+            const panel=node('section','c3d-task-page');panel.id='c3d-task-'+id;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',button.id);panels[id]=panel;nav.append(button);pages.append(panel);
+        }
+        const inspector=group('Thông tin box');inspector.append(root.querySelector('.c3d-class-row'));const geometryDetails=details('Vị trí, kích thước & ground');geometryDetails.append(root.querySelector('.c3d-inspector-grid'));move('c3d-road-info',geometryDetails);move('c3d-btn-ground-debug',geometryDetails);move('c3d-ground-debug-result',geometryDetails);inspector.append(geometryDetails);panels.box.append(inspector);
+        const quick=group('Căn chỉnh nhanh'),actions=node('div','c3d-quick-actions');move('c3d-btn-autofit',actions);move('c3d-btn-ground',actions);quick.append(actions);
+        quick.append(root.querySelector('.c3d-rot-grid'));panels.box.append(quick);
+        const advanced=details('Preset & căn chỉnh nâng cao');advanced.append(root.querySelector('.c3d-preset'));advanced.append(el('c3d-keep-direction').closest('label'));move('c3d-btn-adjust',advanced);
+        for(const id of ['c3d-origin-ground','c3d-ground-height','c3d-btn-move','c3d-move-longitudinal'])advanced.append(el(id).closest('.c3d-fit-row'));
+        quick.append(advanced);
+        const qc=panels.qc;qc.append(root.querySelector('.c3d-metrics-bar'));move('c3d-btn-scan',qc);qc.append(root.querySelector('.c3d-toggles'),root.querySelector('.c3d-issue-header-bar'),root.querySelector('.c3d-legend'));move('c3d-issue-list',qc);
+        const camera=group('Điều hướng camera');move('c3d-btn-freecam',camera);camera.append(el('c3d-follow-selected').closest('label'));move('c3d-follow-status',camera);camera.append(node('p','c3d-task-note','Free Cam và Target lock chỉ thay đổi góc nhìn, không sửa annotation.'));panels.camera.append(camera);
+        const appearance=group('Hiển thị LiDAR');appearance.append(node('p','c3d-task-note','Point size sử dụng thiết lập Appearance của CVAT. Batch Review có đồng bộ và tùy chỉnh riêng ngay trong cửa sổ review.'));panels.camera.append(appearance);
+        const data=group('Annotation toàn job');data.append(node('p','c3d-task-note','JSON gồm mọi frame và thay đổi chưa lưu trong editor. Đối chiếu #clientID trước khi áp dụng.'));move('c3d-btn-export-ann',data);move('c3d-btn-import-replace',data);move('c3d-file-import',data);
+        const danger=details('Xóa annotation & import mới');danger.classList.add('c3d-danger-zone');danger.append(node('p','c3d-task-note','Xóa toàn bộ annotation hiện tại; CVAT cấp ID mới. Có bước xác nhận và tải bản dự phòng.'));move('c3d-btn-import-recreate',danger);data.append(danger);panels.data.append(data);
+        const session=details('Phiên CVAT & import/export server');move('c3d-session',session);panels.data.append(session);
+        const settingsGroup=group('Cài đặt công cụ');move('c3d-btn-settings',settingsGroup);settingsGroup.append(node('p','c3d-task-note','Phím tắt, giới hạn Auto Adjust và các thiết lập đã lưu.'));const debug=details('Chẩn đoán Auto-Fit');move('c3d-btn-export-fit',debug);settingsGroup.append(debug);panels.settings.append(settingsGroup);
+        const batches=node('section','c3d-task-batches');batches.append(node('h3','','Nhiều frame'));const batchActions=node('div','c3d-action-grid');move('c3d-batch',batchActions);move('c3d-batch-size',batchActions);batches.append(batchActions);
+        const updater=root.querySelector('.c3d-update-row');workspace.append(nav,pages);body.replaceChildren(context,selected,workspace,batches,updater);root.append(footer);
+        const titleLabels={'c3d-btn-autofit':'Auto-Fit','c3d-btn-ground':'Snap ground','c3d-btn-adjust':'Auto Adjust','c3d-btn-scan':'Quét QC','c3d-btn-export-ann':'Export toàn job (.json)','c3d-btn-settings':'Phím tắt & Auto Adjust'};
+        for(const [id,label] of Object.entries(titleLabels)){const n=el(id);n.firstChild.textContent=label+' ';}
+        let active='box',expanded=false,position=null;const header=root.querySelector('.c3d-header');
+        el('c3d-btn-toggle').setAttribute('aria-expanded','true');
+        const expand=node('button','c3d-btn-icon','⤢');expand.id='c3d-btn-expand';expand.type='button';expand.setAttribute('aria-label','Mở rộng công cụ');expand.setAttribute('aria-expanded','false');header.insertBefore(expand,el('c3d-btn-toggle'));
+        function show(id,focus=false){if(!panels[id])return;active=id;for(const [name,panel] of Object.entries(panels)){panel.hidden=name!==id;const b=nav.querySelector('[data-task="'+name+'"]');b.setAttribute('aria-selected',String(name===id));b.tabIndex=name===id?0:-1;if(focus&&name===id)b.focus();}root.dataset.activeTask=id;}
+        function clamp(){const r=root.getBoundingClientRect();if(root.style.left)root.style.left=Math.max(8,Math.min(window.innerWidth-r.width-8,r.left))+'px';if(root.style.top)root.style.top=Math.max(8,Math.min(window.innerHeight-60,r.top))+'px';}
+        expand.onclick=()=>{expanded=!expanded;if(expanded){position={left:root.style.left,right:root.style.right,top:root.style.top};root.style.left='';root.style.right='';root.style.top='';el('c3d-content-body').hidden=false;el('c3d-btn-toggle').textContent='−';}else Object.assign(root.style,position||{left:'',right:'',top:''});root.classList.toggle('c3d-expanded',expanded);expand.setAttribute('aria-expanded',String(expanded));expand.setAttribute('aria-label',expanded?'Thu gọn công cụ':'Mở rộng công cụ');clamp();};
+        nav.addEventListener('click',e=>{const b=e.target.closest('[data-task]');if(b)show(b.dataset.task);});
+        nav.addEventListener('keydown',e=>{const ids=Object.keys(panels);let index=ids.indexOf(active);if(['ArrowRight','ArrowDown','ArrowLeft','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();e.stopPropagation();index=e.key==='Home'?0:e.key==='End'?ids.length-1:(index+(['ArrowRight','ArrowDown'].includes(e.key)?1:-1)+ids.length)%ids.length;show(ids[index],true);}});
+        root.addEventListener('keydown',e=>{if(e.key==='Escape'&&expanded&&!e.target.closest('[role="dialog"]')){e.preventDefault();expand.click();expand.focus();}});
+        const controller=new AbortController();window.addEventListener('resize',clamp,{signal:controller.signal});show('box');
+        return {show,workPanel:panels.work,dispose(){controller.abort();}};
+    }
     function createHUD() {
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
@@ -253,7 +297,7 @@
             <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install title="Kiểm tra và cài release mới từ GitHub">Update online</button><button data-update-local title="Lưu CVAT và nạp lại bản đang cài, không chờ GitHub">Reload local</button><button data-update-setup hidden>Cài updater</button></div>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-batch-size" class="c3d-btn-secondary">Batch Size Update</button></div><div class="c3d-action-grid"><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
+                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-batch-size" class="c3d-btn-secondary">Batch Edit</button></div><div class="c3d-action-grid"><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
                 <div style="margin-top:4px;">
                     <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
                 </div>
@@ -297,10 +341,10 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.17.7 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.21.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
-        updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
+        updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>Promise.all([saveQueue,workUI?.flush()]),afterSave:()=>workUI?.flush(),importPending:()=>serverImportPending});
         function getJobId() {
             let id = snapshot?.jobId;
             if (!id) {
@@ -369,7 +413,7 @@
                 if(!response?.ok)throw new Error(response?.error||'Extension unavailable');
             }catch(error){toast(error.message,true);}
         });
-        el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';});
+        el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';el('c3d-btn-toggle').setAttribute('aria-expanded',String(!body.hidden));});
         el('c3d-btn-scan').addEventListener('click',()=>runQC(true));
         el('c3d-btn-ground').addEventListener('click',()=>action('SNAP_GROUND'));
         el('c3d-btn-ground-debug').addEventListener('click',inspectGround);
@@ -401,6 +445,8 @@
         });
         root.addEventListener('pointermove',event=>{if(!drag)return;root.style.right='auto';root.style.left=Math.max(0,Math.min(window.innerWidth-root.offsetWidth,drag.left+event.clientX-drag.x))+'px';root.style.top=Math.max(0,Math.min(window.innerHeight-60,drag.top+event.clientY-drag.y))+'px';});
         root.addEventListener('pointerup',()=>{drag=null;});
+        taskUI=arrangeTasks();
+        workUI=window.__C3D_WORK_UI?.mount({root,panel:taskUI.workPanel,request,snapshot:()=>snapshot,toast});
         renderInspector();
     }
     function options(select,values,placeholder) {
@@ -448,7 +494,7 @@
         el('c3d-btn-move').disabled=!canEdit||!cap.moveToMouse||!settingsReady;
         refreshShortcutHints();
         el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
-        el('c3d-batch-size').disabled=!box||box.objectType!=='track'||!cap.batchSize||!cap.edit||busy;
+        el('c3d-batch-size').disabled=!box||box.objectType!=='track'||box.groundTruth||!cap.batchSize||!cap.edit||busy;
         el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
         el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
@@ -456,6 +502,7 @@
         text('c3d-prop-subtype',box?.subType ? box.subType.toUpperCase() : (box ? 'None' : '—'));
         text('c3d-prop-pos',geom?geom.center.map(n=>n.toFixed(2)).join(' / ')+' m':'—');
         text('c3d-prop-size',geom?geom.dimensions.map(n=>n.toFixed(2)).join(' × ')+' m':'—');
+        text('c3d-active-size',geom?'L × W × H · '+geom.dimensions.map(n=>n.toFixed(2)).join(' × ')+' m':'Chọn box trong CVAT để bắt đầu');
         text('c3d-prop-yaw',geom?geom.yawDeg.toFixed(1)+'°':'—');text('c3d-prop-zbot',geom?geom.zBottom.toFixed(2)+' m':'—');
         text('c3d-road-info',(settings.useOriginGround?originGroundLabel()+' · ':'Ground base: surrounding road · ')+(ground?.accepted?`QC measured road${ground.confidence<.65 ? ' estimated · QC only' : ''} · ${(ground.confidence*100).toFixed(0)}% · ${ground.inlierCount} pts · RMSE ${(ground.rmse*100).toFixed(1)}cm`:ground?.reason?`Ground: ${ground.reason}`:'QC road: reading LiDAR points…'));
         renderGroundDebug();
@@ -520,6 +567,7 @@
         container.scrollTop=scroll;
     }
     function keydown(event) {
+        if(event.target?.closest?.('.c3d-task-nav'))return;
         if(!root||!settingsReady||settingsPanel||event.repeat||event.isComposing||event.target?.closest?.('input:not([type="checkbox"]):not([type="radio"]),textarea,select,[contenteditable]:not([contenteditable="false"]),[role="dialog"],dialog')||document.querySelector('[role="dialog"],dialog[open]'))return;
         const pressed=shortcuts.fromEvent(event);if(!pressed)return;
         const match=shortcuts.definitions.find(d=>settings.bindings[d.id]&&shortcuts.signature(settings.bindings[d.id])===shortcuts.signature(pressed));
@@ -538,10 +586,10 @@
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }

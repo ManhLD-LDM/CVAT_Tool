@@ -17,7 +17,7 @@ function createAnnotationIO(env){
   const {s,job}=context(payload),data=clone(await job.annotations.export());context({jobId:s.jobId,sessionId:s.sessionId});
   const identities=kinds.flatMap(kind=>(data[kind]||[]).map(t=>t.clientID));
   if(identities.some(id=>!Number.isInteger(id))||new Set(identities).size!==identities.length)throw new Error('Native export lacks unique display IDs; reload extension and the CVAT tab before exporting');
-  data.c3d={toolVersion:'1.17.7',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,frameRange:{start:job.startFrame,stop:job.stopFrame},replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
+  data.c3d={toolVersion:'1.21.1',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,frameRange:{start:job.startFrame,stop:job.stopFrame},replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
   data.labels_manifest=clone(job.labels||[]);
   return {success:true,jobId:s.jobId,data,trackCount:data.tracks?.length||0,shapeCount:data.shapes?.length||0};
  }

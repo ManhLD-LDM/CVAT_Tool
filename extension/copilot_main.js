@@ -859,6 +859,113 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 ;
+/* Local workload ledger. No credentials, annotation coordinates or network calls. */
+(function(root){
+'use strict';
+const KEY='c3d.worklog.v1',DAY_PREFIX='c3d.worklog.day.';
+const dayKey=t=>{const d=new Date(t);return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');};
+function canonical(v){if(Array.isArray(v))return v.map(canonical);if(v&&typeof v==='object')return Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]));return v;}
+function hash(v){const s=JSON.stringify(canonical(v));let a=2166136261,b=3339675911;for(let i=0;i<s.length;i++){a=Math.imul(a^s.charCodeAt(i),16777619);b=Math.imul(b^s.charCodeAt(i),2246822519);}return (a>>>0).toString(16)+':'+(b>>>0).toString(16)+':'+s.length;}
+const attributes=value=>Array.isArray(value)?value.slice().sort((a,b)=>String(a.spec_id??a.id).localeCompare(String(b.spec_id??b.id))):value||{};
+function documentRows(data,epoch){
+ const rows=[];
+ for(const kind of ['tracks','shapes'])for(const obj of data[kind]||[]){
+  const shapes=kind==='tracks'?obj.shapes||[]:[obj];if(!shapes.some(s=>(s.type||s.shapeType)==='cuboid'))continue;
+  if(!Number.isInteger(obj.clientID))throw new Error('Annotation thiếu #clientID; chưa thể ghi nhật ký chính xác');
+  const objectKey=kind+':'+(Number.isInteger(obj.id)?'db:'+obj.id:'new:'+epoch+':'+obj.clientID);
+  rows.push({objectKey,clientId:obj.clientID,serverId:obj.id??null,kind,frame:null,present:true,hash:hash([obj.label_id,attributes(obj.attributes)]),epoch});
+  for(const s of shapes){if((s.type||s.shapeType)!=='cuboid'||!Number.isInteger(s.frame))continue;
+   rows.push({objectKey,clientId:obj.clientID,serverId:obj.id??null,kind,frame:s.frame,present:!s.outside,hash:hash([(s.points||[]).map(n=>typeof n==='number'?Math.round(n*1e6)/1e6:n),!!s.outside,!!s.occluded,attributes(s.attributes)]),epoch});
+  }
+ }
+ return rows;
+}
+const fresh=()=>({schema:1,days:{},aliases:{},active:null,seen:[]});
+function resolve(store,key){const visited=new Set();while(store.aliases[key]&&!visited.has(key)){visited.add(key);key=store.aliases[key];}return key;}
+function ensure(store,date){return store.days[date]||(store.days[date]={goal:{unit:'cuboids',target:0},records:{},decisions:{},shifts:[],activeMs:0});}
+function validDay(date){if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||dayKey(new Date(date+'T12:00:00').getTime())!==date)throw Error('Ngày không hợp lệ');}
+function scopeKey(context){if(!/^https?:\/\//.test(context.origin)||!Number.isInteger(context.jobId))throw Error('Thiếu server/job');return context.origin+'/jobs/'+context.jobId+'/';}
+function summary(store,date,now){
+ const day=ensure(store,date),merged=new Map();
+ for(const r of Object.values(day.records)){
+  const key=resolve(store,r.scope+r.objectKey),id=key+'@'+r.frame,old=merged.get(id);
+  if(!old||r.last>=old.last)merged.set(id,{...r,resolved:key});
+ }
+ const objects=new Map();let touched=0,changed=0,saved=0,deleted=0,reverted=0,edits=0,uncertain=0;
+ for(const r of merged.values()){
+  if(!objects.has(r.resolved))objects.set(r.resolved,{origin:r.origin,jobId:r.jobId,clientId:r.clientId,objectKey:r.objectKey,frames:[],changedFrames:[],savedFrames:[],deletedFrames:[],edits:0,global:false,last:r.last});
+  const o=objects.get(r.resolved),different=r.current!==r.before;
+  o.edits+=r.edits;edits+=r.edits;if(r.last>=o.last){o.clientId=r.clientId;o.last=r.last;}
+  if(r.frame==null){o.global=different&&r.present&&!r.uncertain;continue;}
+  touched++;o.frames.push(r.frame);
+  if(r.uncertain){uncertain++;continue;}
+  if(different&&r.present){changed++;o.changedFrames.push(r.frame);if(r.savedHash===r.current){saved++;o.savedFrames.push(r.frame);}}
+  else if(different&&!r.present){deleted++;o.deletedFrames.push(r.frame);}else reverted++;
+ }
+ const objectList=[...objects.values()].sort((a,b)=>b.last-a.last).map(o=>({...o,frames:o.frames.sort((a,b)=>a-b),changedFrames:o.changedFrames.sort((a,b)=>a-b)}));
+ const changedObjects=objectList.filter(o=>o.global||o.changedFrames.length).length;
+ const decisions=Object.values(day.decisions),accepted=decisions.filter(d=>d.value==='accepted').length,rejected=decisions.filter(d=>d.value==='rejected').length;
+ const achieved=day.goal.unit==='objects'?changedObjects:changed;
+ return {date,goal:day.goal,changed,touched,saved,deleted,reverted,edits,uncertain,changedObjects,objects:objectList,accepted,rejected,activeMs:day.activeMs,shifts:day.shifts,active:store.active,achieved,remaining:Math.max(0,day.goal.target-achieved),progress:day.goal.target?Math.min(100,100*achieved/day.goal.target):0,now};
+}
+function apply(store,message,context={},now=Date.now()){
+ store=store||fresh();const today=dayKey(now),date=message.date||today;validDay(date);const day=ensure(store,date);
+ if(message.op==='view')return {store,result:summary(store,date,now),write:false};
+ if(message.op==='goal'){
+  if(!['cuboids','objects'].includes(message.unit)||!Number.isInteger(message.target)||message.target<0||message.target>1000000)throw Error('KPI phải là số nguyên 0–1.000.000');
+  day.goal={unit:message.unit,target:message.target};
+ }else if(message.op==='in'){
+  if(typeof message.id!=='string'||!message.id.length||message.id.length>180)throw Error('Thiếu mã ca');
+  if(!store.active){store.active={id:message.id,start:now,startDay:today,lastBeat:now};ensure(store,today).shifts.push({id:message.id,start:now,end:null});}
+ }else if(message.op==='out'){
+  if(store.active){for(const d of Object.values(store.days)){const s=d.shifts.find(s=>s.id===store.active.id);if(s)s.end=now;}store.active=null;}
+ }else if(message.op==='beat'){
+  if(store.active){const last=store.active.lastBeat;store.active.lastBeat=now;if(message.working&&now>=last&&now-last<=45000){let cursor=last;while(cursor<now){const d=new Date(cursor),next=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1).getTime(),end=Math.min(now,next);ensure(store,dayKey(cursor)).activeMs+=end-cursor;cursor=end;}}}
+ }else if(message.op==='observe'){
+  if(!store.active||message.shiftId!==store.active.id)return {store,result:summary(store,date,now),write:false};
+  const prefix=scopeKey(context);if(!Array.isArray(message.changes)||message.changes.length>200000)throw Error('Nhật ký quá lớn');
+  if(typeof message.id!=='string'||!message.id.length||message.id.length>200)throw Error('Thiếu mã bản ghi');
+  if(store.seen.includes(message.id))return {store,result:summary(store,date,now),write:false};
+  for(const alias of message.aliases||[]){if(!alias.from.startsWith('tracks:new:')&&!alias.from.startsWith('shapes:new:'))continue;if(!/^(tracks|shapes):db:\d+$/.test(alias.to))continue;store.aliases[prefix+alias.from]=prefix+alias.to;}
+  const target=ensure(store,today);
+  for(const c of message.changes){
+   if(typeof c.objectKey!=='string'||c.objectKey.length>180||!Number.isInteger(c.clientId)||c.frame!==null&&(!Number.isInteger(c.frame)||c.frame<0)||typeof c.after!=='string'&&c.after!==null||typeof c.before!=='string'&&c.before!==null)throw Error('Bản ghi workload không hợp lệ');
+   const key=resolve(store,prefix+c.objectKey)+'@'+c.frame;
+   let record=target.records[key];
+   if(!record){const prior=Object.entries(target.records).find(([,r])=>resolve(store,r.scope+r.objectKey)+'@'+r.frame===key);if(prior){record=target.records[key]=prior[1];delete target.records[prior[0]];}}
+   if(!record)record=target.records[key]={scope:prefix,origin:context.origin,jobId:context.jobId,objectKey:c.objectKey,clientId:c.clientId,frame:c.frame,before:c.before,current:c.before,edits:0,savedHash:null};
+   record.uncertain=false;record.current=c.after;record.present=!!c.present;record.clientId=c.clientId;record.epoch=message.epoch;record.edits++;record.last=now;if(message.saved)record.savedHash=c.after;
+  }
+  if(message.reconcile){const observed=new Map((message.states||[]).map(r=>[resolve(store,prefix+r.objectKey)+'@'+r.frame,r]));for(const r of Object.values(target.records)){if(r.scope!==prefix)continue;const actual=observed.get(resolve(store,r.scope+r.objectKey)+'@'+r.frame);if(actual?.hash===r.before){r.current=r.before;r.present=!!actual.present;r.uncertain=false;}else if(actual?.hash===r.current){r.present=!!actual.present;r.uncertain=false;}else r.uncertain=true;}}
+  // A saved indication only marks hashes actually read from that native editor.
+  if(message.saved){const byKey=new Map(Object.values(target.records).map(r=>[resolve(store,r.scope+r.objectKey)+'@'+r.frame,r]));for(const state of message.states||[]){const r=byKey.get(resolve(store,prefix+state.objectKey)+'@'+state.frame);if(r&&r.current===state.hash)r.savedHash=state.hash;}}
+  store.seen.push(message.id);store.seen=store.seen.slice(-512);
+ }else if(message.op==='decision'){
+  if(!store.active)return {store,result:summary(store,date,now),write:false};
+  if(!['accepted','rejected'].includes(message.value)||typeof message.key!=='string'||message.key.length>300)throw Error('Quyết định không hợp lệ');
+  ensure(store,today).decisions[scopeKey(context)+message.key]={value:message.value,at:now};
+ }else throw Error('Lệnh workload không hỗ trợ');
+ return {store,result:summary(store,date,now),write:true};
+}
+function createService({storage,clock=Date.now}){
+ let queue=Promise.resolve();
+ return {run(message,context){const next=queue.catch(()=>{}).then(async()=>{
+  const now=clock(),today=dayKey(now),date=message.date||today;validDay(date);
+  scopeKey(context);const metaKey=KEY+':'+context.origin,dayPrefix=DAY_PREFIX+encodeURIComponent(context.origin)+'.';
+  const meta=(await storage.get(metaKey))[metaKey]||fresh(),dates=new Set([date]);
+  if(!['view','goal'].includes(message.op))dates.add(today);
+  if(message.op==='out'&&meta.active)dates.add(meta.active.startDay||dayKey(meta.active.start));
+  if(message.op==='beat'&&meta.active)dates.add(dayKey(meta.active.lastBeat));
+  const days={},previous={};await Promise.all([...dates].map(async d=>{const key=dayPrefix+d,data=(await storage.get(key))[key]||meta.days?.[d];if(data){days[d]=structuredClone(data);previous[d]=JSON.stringify(data);}}));
+  const updated=apply({...structuredClone(meta),days},message,context,now);
+  if(updated.write){const values={};for(const [d,data]of Object.entries(meta.days||{}))values[dayPrefix+d]=data;for(const [d,data]of Object.entries(updated.store.days))if(JSON.stringify(data)!==previous[d])values[dayPrefix+d]=data;const {days:ignored,...metadata}=updated.store;values[metaKey]=metadata;await storage.set(values);}
+  return updated.result;
+ });queue=next;return next;}};
+}
+const api={KEY,DAY_PREFIX,dayKey,hash,documentRows,fresh,summary,apply,createService};root.__C3D_WORK_LOG=api;if(typeof module!=='undefined')module.exports=api;
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+;
 /* Own implementation: position-only proposals, no SUSTechPOINTS code copied. */
 (function(root){
 'use strict';
@@ -4555,7 +4662,7 @@ function createBatchController(env){
   const result=protectedFrame?{status:'anchor',flags:['Protected native keyframe / reviewed frame'],beforeCount:math.extractBoxROI(roi,{points:p},0).length}
    :!bracketed?{status:'review',flags:['No bounding keyframes on both sides; add another keyframe before refinement'],beforeCount:math.extractBoxROI(roi,{points:p},0).length}
    :batchMath.refinePosition(math,roi,p,ground,states.filter(s=>s.clientID!==session.clientId&&!s.outside&&s.shapeType==='cuboid').map(s=>({points:Array.from(s.points)})));
-  const card={frame:payload.frame,original,protected:!!protectedFrame,ground:{accepted:ground.accepted,confidence:ground.confidence,reason:ground.reason,a:ground.a,b:ground.b,c:ground.c,rmse:ground.rmse,inlierCount:ground.inlierCount,radius:ground.radius},
+  const card={frame:payload.frame,original,protected:!!protectedFrame,nativeKeyframe:!!state.keyframe,locked:!!state.lock,groundTruth:!!state.isGroundTruth,userProtected:session.protected.has(payload.frame),ground:{accepted:ground.accepted,confidence:ground.confidence,reason:ground.reason,a:ground.a,b:ground.b,c:ground.c,rmse:ground.rmse,inlierCount:ground.inlierCount,radius:ground.radius},
    ...result,points:batchMath.sampleROI(roi,p),analysisPointCount:roi.length,pointsAreSampled:roi.length>4000,label:state.label?.name};
   if(session!==owned||session.epoch!==epoch)throw new Error('Batch compute superseded or cancelled');
   session.proposals.set(payload.frame,{...card,state});
@@ -4567,6 +4674,24 @@ function createBatchController(env){
   if(running)throw new Error('Batch apply in progress');
   session.protected.add(payload.frame);session.proposals.delete(payload.frame);return {protected:true,frame:payload.frame};
  }
+ async function draft(payload){
+  token(payload);frameCheck(payload.frame);if(running||session.consumed)throw new Error('Batch already applied');
+  env.assertEditable();await unchanged();token(payload);
+  const card=session.proposals.get(payload.frame),{state}=await stateAt(payload.frame);
+  token(payload);
+  if(!card?.original||!state||state.outside||state.lock||state.isGroundTruth||session.protected.has(payload.frame))throw new Error('Frame protected or unavailable for manual editing');
+  if(state.keyframe&&payload.allowKeyframe!==true)throw new Error('Enable explicit manual keyframe editing first');
+  const p=payload.points;
+  if(!Array.isArray(p)||!math.parseCVAT16Points(p)||p.slice(6,9).some(v=>v<.01||v>100)||Math.hypot(...p.slice(0,3).map((v,i)=>v-card.original[i]))>20||p[3]!==card.original[3]||p[4]!==card.original[4])throw new Error('Invalid manual geometry');
+  const base=card.autoCard||{...card,state:undefined};
+  const next={...card,autoCard:base,manual:true,manualKeyframe:!!state.keyframe,protected:false,status:'manual',proposed:p.slice(),flags:['Manual draft: review before Apply'],delta:p.slice(0,3).map((v,i)=>v-card.original[i])};
+  session.proposals.set(payload.frame,next);const {state:unused,autoCard,...view}=next;return view;
+ }
+ async function resetDraft(payload){
+  token(payload);if(running||session.consumed)throw new Error('Batch already applied');await unchanged();token(payload);
+  const card=session.proposals.get(payload.frame);if(!card?.autoCard)throw new Error('No manual draft');
+  const base=card.autoCard;session.proposals.set(payload.frame,base);return {...base,state:undefined};
+ }
  async function apply(payload){
   token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');
   if(!Array.isArray(payload.frames)||!payload.frames.length||payload.frames.length>60)throw new Error('Select 1–60 proposed frames');
@@ -4576,13 +4701,14 @@ function createBatchController(env){
   await unchanged();token(payload);
   for(const f of frames){
    frameCheck(f);const proposal=session.proposals.get(f);
-   if(!proposal||proposal.protected||session.protected.has(f)||proposal.status!=='proposal')throw new Error('Selected frame has no editable proposal');
-   if(!math.parseCVAT16Points(proposal.proposed)||!sameGeometry(proposal.proposed.slice(0,3).concat(proposal.original.slice(3)),proposal.proposed))
+   if(!proposal||proposal.protected||session.protected.has(f)||!['proposal','manual'].includes(proposal.status))throw new Error('Selected frame has no editable proposal');
+   if(proposal.manualKeyframe&&payload.confirmManualKeyframes!==true)throw new Error('Confirm explicit manual edits to existing keyframes');
+   if(!math.parseCVAT16Points(proposal.proposed)||!proposal.manual&&!sameGeometry(proposal.proposed.slice(0,3).concat(proposal.original.slice(3)),proposal.proposed))
     throw new Error('Invalid position-only proposal; recompute batch');
    const {state}=await stateAt(f);token(payload);
-   if(!state||state.outside||state.keyframe||state.lock||state.isGroundTruth||!sameGeometry(Array.from(state.points),proposal.original))
+   if(!state||state.outside||state.keyframe&&!proposal.manualKeyframe||state.lock||state.isGroundTruth||!sameGeometry(Array.from(state.points),proposal.original))
     throw new Error('Frame changed or became protected; reload batch');
-   plan.push({frame:f,points:proposal.proposed});
+   plan.push({frame:f,points:proposal.proposed,manualKeyframe:proposal.manualKeyframe});
   }
   await unchanged();token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');env.assertEditable();
   running=true;session.consumed=true;env.lock(true);
@@ -4593,7 +4719,7 @@ function createBatchController(env){
     const item=plan[index];
     await unchanged();token(payload);env.assertEditable();
     const {state}=await stateAt(item.frame);token(payload);
-    if(state.keyframe||state.lock||state.isGroundTruth)throw new Error('Frame protected during apply');
+    if(state.keyframe&&!item.manualKeyframe||state.lock||state.isGroundTruth)throw new Error('Frame protected during apply');
     state.points=item.points.slice();
     try{
      await state.save();
@@ -4619,14 +4745,14 @@ function createBatchController(env){
   return {appliedFrames:applied,error,partial:!!error,undo:'Each applied frame has its own native Undo entry. Save CVAT to persist.'};
  }
  function cancel(){if(running)throw new Error('Apply already started; wait for result');session=null;clouds.clear();return {cancelled:true};}
- return {open,begin,read,protect,apply,cancel};
+ return {open,begin,read,protect,draft,resetDraft,apply,cancel};
 }
 root.__C3D_CREATE_BATCH_CONTROLLER=createBatchController;
 if(typeof module!=='undefined')module.exports={createBatchController};
 })(typeof window!=='undefined'?window:globalThis);
 
 ;
-/* Explicit manual dimension edits; no point-cloud or tracking dependency. */
+/* Batch Edit: explicit dimensions or schema-driven attributes, without PCD. */
 (function(root){
 'use strict';
 function createBatchSizeController(env){
@@ -4636,7 +4762,7 @@ function createBatchSizeController(env){
  function current(token){
   const s=env.snapshot();
   if(!session||session.token!==token||env.job()!==session.job||s.jobId!==session.jobId||s.sessionId!==session.adapterId)
-   throw new Error('Phiên đã thay đổi; mở lại Batch Size Update');
+   throw new Error('Phiên đã thay đổi; mở lại Batch Edit');
   return session;
  }
  async function readTrack(s){
@@ -4648,30 +4774,141 @@ function createBatchSizeController(env){
   const states=await s.job.annotations.get(frame,true,[]);current(s.token);
   return states.find(x=>x.clientID===s.clientId&&x.objectType==='track'&&x.shapeType==='cuboid');
  }
- function editable(state,frame){
-  if(state.lock||state.isGroundTruth)throw new Error('Frame '+frame+' bị khóa / ground truth');
+ function editable(state,frame,unlock=false){
+  if(state.lock&&!unlock||state.isGroundTruth)throw new Error('Frame '+frame+' bị khóa / ground truth');
   if(typeof state.save!=='function')throw new Error('Native save không khả dụng ở frame '+frame);
  }
  async function open(clientId){
-  if(running)throw new Error('Đang áp dụng kích thước');env.assertEditable();
+  if(running)throw new Error('Đang áp dụng Batch Edit');env.assertEditable();
   const job=env.job(),snap=env.snapshot(),box=snap.boxes.find(b=>b.id===clientId);
   if(!box||box.objectType!=='track')throw new Error('Chọn một cuboid TRACK trước');
   const data=await job.annotations.export(),t=data.tracks.find(x=>x.clientID===clientId);
   if(!t||env.job()!==job||env.snapshot().sessionId!==snap.sessionId)throw new Error('Job / track đã thay đổi');
   const p=box.points;if(!env.math.parseCVAT16Points(p))throw new Error('Kích thước box không hợp lệ');
   session={token:'size-'+(++seq),job,jobId:snap.jobId,adapterId:snap.sessionId,clientId,signature:signature(t),consumed:false,plan:null};
-  return {token:session.token,jobId:snap.jobId,clientId,start:job.startFrame,stop:job.stopFrame,frame:snap.frame,dimensions:Array.from(p).slice(6,9)};
+  const state=await stateAt(session,snap.frame),label=(job.labels||[]).find(l=>l.id===t.label_id)||state?.label;
+  session.schema=(label?.attributes||[]).map(a=>({id:a.id,name:a.name,mutable:a.mutable===true,inputType:a.inputType||a.input_type||'text',values:Array.from(a.values||[]),defaultValue:a.defaultValue??a.default_value??a.values?.[0]??''}));
+  return {token:session.token,jobId:snap.jobId,clientId,start:job.startFrame,stop:job.stopFrame,frame:snap.frame,dimensions:Array.from(p).slice(6,9),label:label?.name||box.label_name||'',attributes:session.schema.map(a=>({...a,value:state?.attributes?.[a.id]??a.defaultValue}))};
+ }
+ function validateAttributes(s,p){
+  if(!p.attributes||typeof p.attributes!=='object'||Array.isArray(p.attributes)||!Object.keys(p.attributes).length)throw new Error('Chọn ít nhất một thuộc tính');
+  return Object.entries(p.attributes).map(([id,value])=>{
+   const a=s.schema.find(a=>String(a.id)===id);if(!a)throw new Error('Thuộc tính không thuộc class đang chọn');
+   if(typeof value!=='string')throw new Error('Giá trị thuộc tính phải là chuỗi');
+   if(['select','radio'].includes(a.inputType)&&!a.values.includes(value)||a.inputType==='checkbox'&&!['true','false'].includes(value))throw new Error('Giá trị không hợp lệ: '+a.name);
+   if(a.inputType==='number'){
+    const n=Number(value),[min,max,step]=a.values.map(Number);
+    if(!value.trim()||!Number.isFinite(n)||!Number.isFinite(min)||!Number.isFinite(max)||n<min||n>max||step>0&&Math.abs((n-min)/step-Math.round((n-min)/step))>1e-6)throw new Error('Giá trị số ngoài quy chuẩn: '+a.name);
+   }
+   return {...a,value};
+  });
+ }
+ async function previewAttributes(s,p,epoch){
+  const specs=validateAttributes(s,p),global=specs.filter(a=>!a.mutable),mutable=specs.filter(a=>a.mutable);
+  if(global.length&&p.confirmTrackAttributes!==true)throw new Error(global.map(a=>a.name).join(', ')+' áp dụng TOÀN TRACK theo CVAT; cần xác nhận phạm vi');
+  const plan={mode:'attributes',writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0,global:global.map(a=>a.name)};
+  const attrsOf=state=>Object.fromEntries(s.schema.map(a=>[a.id,String(state.attributes?.[a.id]??a.defaultValue)]));
+  let globalScheduled=false;
+  for(let frame=p.from;frame<=p.to;frame++){
+   const state=await stateAt(s,frame);if(!state||state.outside){plan.skipped.push(frame);continue;}editable(state,frame);
+   const beforeAttrs=attrsOf(state),desired=Object.fromEntries([...mutable,...(!globalScheduled?global:[])].map(a=>[a.id,a.value]));
+   if(global.length)globalScheduled=true;
+   if(Object.entries(desired).every(([id,v])=>beforeAttrs[id]===v)){plan.unchanged.push(frame);continue;}
+   plan.writes.push({frame,before:Array.from(state.points),beforeAttrs,attributes:desired});if(state.keyframe)plan.keyframes++;
+   if(frame%20===0)await new Promise(r=>setTimeout(r,0));
+  }
+  // Attribute values are step-held. Even an existing boundary key may inherit
+  // the edited value, so explicitly restore the original value at to+1.
+  if(plan.writes.length&&mutable.length&&p.to<s.job.stopFrame){
+   const frame=p.to+1,state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame biên');editable(state,frame);
+   const beforeAttrs=attrsOf(state);plan.boundaries.push({frame,before:Array.from(state.points),beforeAttrs,attributes:Object.fromEntries(mutable.map(a=>[a.id,beforeAttrs[a.id]]))});
+  }
+  // Save range first, then restore boundary: native attributes save is a no-op
+  // when a boundary already has the old value before the range was changed.
+  await unchanged(s);current(p.token);if(running||s.consumed||s.epoch!==epoch)throw new Error('Yêu cầu đã thay đổi; xem trước lại');
+  s.plan=plan;s.planId=(s.planId||0)+1;
+  return {token:s.token,planId:s.planId,mode:'attributes',clientId:s.clientId,from:p.from,to:p.to,frames:plan.writes.map(w=>w.frame),keyframes:plan.keyframes,boundaryFrames:plan.boundaries.map(w=>w.frame),skipped:plan.skipped,unchanged:plan.unchanged,globalAttributes:plan.global,attributes:specs.map(a=>({name:a.name,value:a.value,mutable:a.mutable}))};
+ }
+ async function previewOutside(s,p,epoch){
+  if(typeof p.outside!=='boolean')throw new Error('Outside phải là true hoặc false');
+  const plan={mode:'outside',writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0},frames=[];
+  let changed=0;
+  for(let frame=p.from;frame<=p.to;frame++){
+   const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được track ở frame '+frame);editable(state,frame);
+   if(!env.math.parseCVAT16Points(state.points))throw new Error('Geometry không hợp lệ ở frame '+frame);
+   const before=Array.from(state.points);frames.push({frame,before,after:before.slice(),beforeOutside:!!state.outside,outside:p.outside});
+   if(!!state.outside!==p.outside)changed++;else plan.unchanged.push(frame);
+   if(state.keyframe)plan.keyframes++;
+   if(frame%20===0)await new Promise(r=>setTimeout(r,0));
+  }
+  if(changed){
+   // Snapshot every frame before writing: changing outside changes native
+   // interpolation behavior. Reuse these original geometries when unhiding.
+   plan.writes=frames;
+   for(const frame of [p.from-1,p.to+1]){
+    if(frame<s.job.startFrame||frame>s.job.stopFrame)continue;
+    const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame biên '+frame);editable(state,frame);
+    if(!env.math.parseCVAT16Points(state.points))throw new Error('Geometry biên không hợp lệ');
+    const before=Array.from(state.points);plan.boundaries.push({frame,before,after:before.slice(),beforeOutside:!!state.outside,outside:!!state.outside});
+   }
+  }
+  await unchanged(s);current(p.token);if(running||s.consumed||s.epoch!==epoch)throw new Error('Yêu cầu đã thay đổi; xem trước lại');
+  s.plan=plan;s.planId=(s.planId||0)+1;
+  return {token:s.token,planId:s.planId,mode:'outside',clientId:s.clientId,from:p.from,to:p.to,outside:p.outside,changedCount:changed,frames:plan.writes.map(w=>w.frame),keyframes:plan.keyframes,boundaryFrames:plan.boundaries.map(w=>w.frame),skipped:[],unchanged:plan.unchanged};
+ }
+ async function previewProperty(s,p,epoch){
+  const property=p.property;
+  if(!['lock','hidden','pinned','occluded','keyframe'].includes(property)||typeof p.value!=='boolean')throw new Error('Property hoặc giá trị không hợp lệ');
+  const global=['lock','hidden','pinned'].includes(property),plan={mode:'property',property,value:p.value,global,writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0};
+  if(global){
+   if(p.confirmGlobal!==true)throw new Error(property+' áp dụng TOÀN TRACK và chỉ lưu trạng thái editor; cần xác nhận');
+   const frame=p.from,state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được track');editable(state,frame,property==='lock'&&!p.value);
+   plan.globalBefore={lock:!!state.lock,hidden:!!state.hidden,pinned:!!state.pinned};
+   if(plan.globalBefore[property]!==p.value)plan.writes.push({frame,before:Array.from(state.points),property,value:p.value});else plan.unchanged.push(frame);
+  }else{
+   const track=await readTrack(s),keys=track.shapes.slice().sort((a,b)=>a.frame-b.frame);
+   for(let frame=p.from;frame<=p.to;frame++){
+    const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame '+frame);editable(state,frame);
+    const before=Array.from(state.points);if(!env.math.parseCVAT16Points(before))throw new Error('Geometry không hợp lệ');
+    if(property==='keyframe'&&!p.value){
+     const key=keys.find(k=>k.frame===frame),index=keys.indexOf(key),previous=keys[index-1];
+     // Removing visibility, occlusion or attribute anchors changes semantics,
+     // not just interpolation. Keep these explicit anchors in this operation.
+     if(!key){plan.unchanged.push(frame);continue;}
+     if(index===0||key.outside||previous&&!!previous.outside!==!!key.outside||previous&&!!previous.occluded!==!!key.occluded||(key.attributes||[]).length){plan.skipped.push(frame);continue;}
+     plan.writes.push({frame,before,property,value:false});
+    }else{
+     if(!!state[property]===p.value){plan.unchanged.push(frame);continue;}
+     plan.writes.push({frame,before,after:before.slice(),property,value:p.value,outside:!!state.outside});
+    }
+    if(state.keyframe)plan.keyframes++;
+    if(frame%20===0)await new Promise(r=>setTimeout(r,0));
+   }
+   if(plan.writes.length)for(const frame of [p.from-1,p.to+1]){
+    if(frame<s.job.startFrame||frame>s.job.stopFrame)continue;
+    const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame biên');editable(state,frame);
+    const before=Array.from(state.points);plan.boundaries.push({frame,before,after:before.slice(),outside:!!state.outside});
+   }
+  }
+  await unchanged(s);current(p.token);if(running||s.consumed||s.epoch!==epoch)throw new Error('Yêu cầu đã thay đổi');
+  s.plan=plan;s.planId=(s.planId||0)+1;
+  return {token:s.token,planId:s.planId,mode:'property',property,value:p.value,global,clientId:s.clientId,from:p.from,to:p.to,frames:plan.writes.map(w=>w.frame),boundaryFrames:plan.boundaries.map(w=>w.frame),skipped:plan.skipped,unchanged:plan.unchanged};
  }
  function options(s,p){
+  if(p.mode&&!['size','attributes','outside','property'].includes(p.mode))throw new Error('Chọn chức năng Batch Edit');
   if(!Number.isInteger(p.from)||!Number.isInteger(p.to)||p.from<s.job.startFrame||p.to>s.job.stopFrame||p.to<p.from||p.to-p.from+1>1000)
    throw new Error('Chọn khoảng 1–1000 frame trong job (tính cả hai đầu)');
+  if(['attributes','outside','property'].includes(p.mode))return;
   if(!Array.isArray(p.dimensions)||p.dimensions.length!==3||!p.dimensions.every(v=>Number.isFinite(v)&&v>=0.01&&v<=100))
    throw new Error('L × W × H phải từ 0.01 đến 100 mét');
   if(!['bottom','center'].includes(p.anchor))throw new Error('Chọn giữ đáy hoặc giữ tâm');
  }
  async function preview(p){
-  const s=current(p.token);if(running||s.consumed)throw new Error('Mở lại Batch Size Update');
+  const s=current(p.token);if(running||s.consumed)throw new Error('Mở lại Batch Edit');
   env.assertEditable();options(s,p);s.plan=null;const epoch=s.epoch=(s.epoch||0)+1;await unchanged(s);
+  if(p.mode==='attributes')return previewAttributes(s,p,epoch);
+  if(p.mode==='outside')return previewOutside(s,p,epoch);
+  if(p.mode==='property')return previewProperty(s,p,epoch);
   const plan={writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0};
   for(let f=p.from;f<=p.to;f++){
    const state=await stateAt(s,f);
@@ -4704,31 +4941,46 @@ function createBatchSizeController(env){
   running=true;const appliedFrames=[],boundaryFrames=[];let error=null,locked=false;
   try{
    env.assertEditable();env.lock(true);locked=true;await unchanged(s);
-   const writes=[...s.plan.boundaries.map(w=>({...w,boundary:true})),...s.plan.writes];
+   const boundaries=s.plan.boundaries.map(w=>({...w,boundary:true})),writes=s.plan.mode==='attributes'?[...s.plan.writes,...boundaries]:[...boundaries,...s.plan.writes];
    // Validate every target before the first native write, including protected boundaries.
-   for(const w of writes){const state=await stateAt(s,w.frame);if(!state)throw new Error('Track đã thay đổi');editable(state,w.frame);if(!same(Array.from(state.points),w.before))throw new Error('Box đã thay đổi');}
+   for(const w of writes){const state=await stateAt(s,w.frame);if(!state)throw new Error('Track đã thay đổi');editable(state,w.frame,w.property==='lock'&&!w.value);if(s.plan.mode==='property'&&s.plan.global&&Object.keys(s.plan.globalBefore).some(k=>!!state[k]!==s.plan.globalBefore[k]))throw new Error('Trạng thái editor đã thay đổi');if(!same(Array.from(state.points),w.before))throw new Error('Box đã thay đổi');if(w.beforeAttrs&&s.schema.some(a=>String(state.attributes?.[a.id]??a.defaultValue)!==w.beforeAttrs[a.id]))throw new Error('Thuộc tính đã thay đổi');}
    s.consumed=true;
    for(const w of writes){
     env.assertEditable();await unchanged(s);
-    const state=await stateAt(s,w.frame);editable(state,w.frame);
+    const state=await stateAt(s,w.frame);editable(state,w.frame,w.property==='lock'&&!w.value);
     // Re-read states after earlier saves to preserve native metadata and IDs.
-    state.points=w.after.slice();let saveError=null;
+    if(w.attributes)state.attributes={...w.attributes};else if(w.after)state.points=w.after.slice();if(Object.hasOwn(w,'outside'))state.outside=w.outside;if(w.property)state[w.property]=w.value;let saveError=null;
     try{await state.save();}catch(e){saveError=e;}
     const t=await readTrack(s),saved=t.shapes.find(x=>x.frame===w.frame);
     s.signature=signature(t);
-    if(saved&&same(saved.points,w.after)) (w.boundary?boundaryFrames:appliedFrames).push(w.frame);
+    const actual=w.attributes||w.property?await stateAt(s,w.frame):null;
+    const confirmed=w.property?actual&&!!actual[w.property]===w.value&&(w.property==='keyframe'&&!w.value?!saved:same(actual.points,w.before)):w.attributes?actual&&same(actual.points,w.before)&&Object.entries(w.attributes).every(([id,v])=>String(actual.attributes?.[id]??s.schema.find(a=>String(a.id)===id)?.defaultValue)===v):saved&&same(saved.points,w.after)&&(!Object.hasOwn(w,'outside')||!!saved.outside===w.outside);
+    if(confirmed) (w.boundary?boundaryFrames:appliedFrames).push(w.frame);
     else throw saveError||new Error('Native save không lưu đúng box ở frame '+w.frame);
     if(saveError)throw saveError;
     if((appliedFrames.length+boundaryFrames.length)%20===0)await new Promise(r=>setTimeout(r,0));
    }
-  }catch(e){error=e.message;}
+  }catch(e){
+   error=e.message;
+   // A failed range edit must still attempt to stop step-held attributes from
+   // leaking past to+1. Do not claim rollback of already applied range values.
+   if(s.plan?.mode==='attributes'&&appliedFrames.length)for(const w of s.plan.boundaries){
+    if(boundaryFrames.includes(w.frame))continue;
+    try{
+     env.assertEditable();await unchanged(s);const state=await stateAt(s,w.frame);editable(state,w.frame);state.attributes={...w.attributes};await state.save();
+     const t=await readTrack(s);s.signature=signature(t);const restored=await stateAt(s,w.frame);
+     if(!Object.entries(w.attributes).every(([id,v])=>String(restored.attributes?.[id]??s.schema.find(a=>String(a.id)===id)?.defaultValue)===v))throw new Error('Không xác nhận được thuộc tính biên');
+     boundaryFrames.push(w.frame);
+    }catch(boundaryError){error+='; KHÔNG PHỤC HỒI ĐƯỢC BIÊN '+w.frame+': '+boundaryError.message;}
+   }
+  }
   finally{
    try{if(locked)await env.refresh(s.job);}catch(e){error=error||e.message;}
    if(locked)env.lock(false);running=false;
   }
-  return {appliedFrames,boundaryFrames,error,partial:!!error&&(appliedFrames.length+boundaryFrames.length>0),saveRequired:appliedFrames.length+boundaryFrames.length>0};
+  return {appliedFrames,boundaryFrames,error,partial:!!error&&(appliedFrames.length+boundaryFrames.length>0),editorOnly:s.plan.mode==='property'&&!!s.plan.global,saveRequired:!(s.plan.mode==='property'&&s.plan.global)&&appliedFrames.length+boundaryFrames.length>0};
  }
- function cancel(){if(running)throw new Error('Đang áp dụng kích thước');session=null;return {cancelled:true};}
+ function cancel(){if(running)throw new Error('Đang áp dụng Batch Edit');session=null;return {cancelled:true};}
  return {open,preview,apply,cancel};
 }
 if(typeof module==='object'&&module.exports)module.exports={createBatchSizeController};
@@ -4755,7 +5007,7 @@ function createAnnotationIO(env){
   const {s,job}=context(payload),data=clone(await job.annotations.export());context({jobId:s.jobId,sessionId:s.sessionId});
   const identities=kinds.flatMap(kind=>(data[kind]||[]).map(t=>t.clientID));
   if(identities.some(id=>!Number.isInteger(id))||new Set(identities).size!==identities.length)throw new Error('Native export lacks unique display IDs; reload extension and the CVAT tab before exporting');
-  data.c3d={toolVersion:'1.17.7',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,frameRange:{start:job.startFrame,stop:job.stopFrame},replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
+  data.c3d={toolVersion:'1.21.1',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,frameRange:{start:job.startFrame,stop:job.stopFrame},replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
   data.labels_manifest=clone(job.labels||[]);
   return {success:true,jobId:s.jobId,data,trackCount:data.tracks?.length||0,shapeCount:data.shapes?.length||0};
  }
@@ -4960,11 +5212,36 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
     function createCvatAdapter(env = {}) {
         const win = env.window || root, doc = env.document || win.document;
         const math = env.math || win.__CVAT_COPILOT_MATH;
+        const workLog=env.workLog||win.__C3D_WORK_LOG;
         const later = env.delay || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));
         const sessionId = `c3d-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         let store = env.store || null, canvas = null, unsubscribe = null, interval = null, disposed = false;
         let signature = '', revision = 0, scope = '', currentSnapshot = null;
         let lastFitCase = null;
+        let appearanceReadAt=0,reviewAppearance={pointSize:2,source:'review-default'};
+        function readReviewAppearance(){
+            const shapes=store?.getState()?.settings?.shapes;
+            const configured=shapes?.pointSize;
+            if(typeof configured==='number'&&Number.isFinite(configured)&&configured>0)
+                return {pointSize:Math.max(.5,Math.min(12,configured)),source:'cvat-settings'};
+            if(Date.now()-appearanceReadAt<500)return reviewAppearance;
+            appearanceReadAt=Date.now();
+            try{
+                // Read only the slider associated with the exact Point size label;
+                // never mistake the adjacent opacity sliders for point size.
+                for(const label of doc.querySelectorAll?.('label,span')||[]){
+                    if(label.textContent?.trim().toLowerCase()!=='point size')continue;
+                    let parent=label.parentElement;
+                    for(let depth=0;parent&&depth<3;depth++,parent=parent.parentElement){
+                        const sliders=parent.querySelectorAll('[role="slider"][aria-valuenow]');
+                        if(sliders.length!==1)continue;
+                        const value=Number(sliders[0].getAttribute('aria-valuenow'));
+                        if(Number.isFinite(value)&&value>0)return reviewAppearance={pointSize:Math.max(.5,Math.min(12,value)),source:'cvat-point-size-slider'};
+                    }
+                }
+            }catch(_){}
+            return reviewAppearance={pointSize:2,source:'review-default'};
+        }
         let reloadHold = null;
         let cloudKey = '', cloudIndex = null, spatialIndex = null, cloudLoading = null, groundCache = new Map();
         let qcColors = new Map(), colorView = null, originalColor = null, colorWrapper = null, cameraRestore = null;
@@ -5203,7 +5480,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
                 activeBoxId: followEnabled ? (followSelection?.jobId===job?.id ? followSelection.clientId : null) : ann?.annotations?.activatedStateID ?? null, boxes,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
-                freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0,
+                freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0, reviewAppearance:readReviewAppearance(),
                 originGroundReference:originReference(followEnabled?followSelection?.clientId:ann?.annotations?.activatedStateID),
                 originGroundPlane:lastOriginGround,
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
@@ -5669,7 +5946,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
             return report;
         }
         async function command(type, payload = {}) {
-            if(reloadHold&&!['GET_SNAPSHOT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
+            if(reloadHold&&!['GET_SNAPSHOT','GET_WORK_DOCUMENT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
             if (disposed) throw new Error('Adapter is stopped');
             switch (type) {
                 case 'PREPARE_RELOAD': {
@@ -5699,7 +5976,13 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                 }
                 case 'RELEASE_RELOAD': reloadHold=null;pendingObjects.delete('reload');publish();return {released:true};
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
-                case 'BATCH_SIZE_OPEN': {validate(payload.ref,true);if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.open(payload.ref.clientId);}
+                case 'GET_WORK_DOCUMENT': {
+                    const s=getSnapshot(),job=editor()?.job?.instance;
+                    if(!s.connected||typeof job?.annotations?.export!=='function'||!workLog)throw Error('Work log requires native annotation export');
+                    const data=await job.annotations.export();if(editor()?.job?.instance!==job)throw Error('Job changed while reading work log');
+                    return {jobId:s.jobId,epoch:sessionId,rows:workLog.documentRows(data,sessionId),saved:job.annotations.hasUnsavedChanges?.()===false};
+                }
+                case 'BATCH_SIZE_OPEN': {validate(payload.ref);if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.open(payload.ref.clientId);}
                 case 'BATCH_SIZE_PREVIEW': if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.preview(payload);
                 case 'BATCH_SIZE_APPLY': if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.apply(payload);
                 case 'BATCH_SIZE_CANCEL': return batchSizeController?.cancel()||{cancelled:true};
@@ -5707,6 +5990,8 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                 case 'BATCH_BEGIN': if(!batchController)throw new Error('Batch module unavailable');return batchController.begin(payload);
                 case 'BATCH_FRAME': if(!batchController)throw new Error('Batch module unavailable');return batchController.read(payload);
                 case 'BATCH_PROTECT': if(!batchController)throw new Error('Batch module unavailable');return batchController.protect(payload);
+                case 'BATCH_DRAFT': if(!batchController)throw new Error('Batch module unavailable');return batchController.draft(payload);
+                case 'BATCH_RESET_DRAFT': if(!batchController)throw new Error('Batch module unavailable');return batchController.resetDraft(payload);
                 case 'BATCH_APPLY': if(!batchController)throw new Error('Batch module unavailable');return batchController.apply(payload);
                 case 'BATCH_CANCEL': return batchController?.cancel()||{cancelled:true};
                 case 'SELECT_OBJECT': return selectObject(payload.ref, !!payload.focus);
@@ -5741,7 +6026,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.17.7',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.21.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -5898,7 +6183,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
         let response;
         try { response = {requestId:request.requestId,ok:true,result:await adapter.command(request.type,request.payload || {})}; }
         catch (error) { response = {requestId:request.requestId,ok:false,error:error.message || 'Lệnh thất bại'}; }
-        inflight.delete(request.requestId); if(request.type!=='BATCH_FRAME' && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
+        inflight.delete(request.requestId); if(!['BATCH_FRAME','GET_WORK_DOCUMENT'].includes(request.type) && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
         if (completed.size > 150) completed.delete(completed.keys().next().value);
         if (!disposed) dispatch(responseEvent,response);
     }

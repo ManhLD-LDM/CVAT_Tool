@@ -22,7 +22,7 @@
         let response;
         try { response = {requestId:request.requestId,ok:true,result:await adapter.command(request.type,request.payload || {})}; }
         catch (error) { response = {requestId:request.requestId,ok:false,error:error.message || 'Lệnh thất bại'}; }
-        inflight.delete(request.requestId); if(request.type!=='BATCH_FRAME' && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
+        inflight.delete(request.requestId); if(!['BATCH_FRAME','GET_WORK_DOCUMENT'].includes(request.type) && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
         if (completed.size > 150) completed.delete(completed.keys().next().value);
         if (!disposed) dispatch(responseEvent,response);
     }

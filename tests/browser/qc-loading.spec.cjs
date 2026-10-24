@@ -1,3 +1,4 @@
+const {reveal}=require('./ui-helpers.cjs');
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 async function editorFixture(page){
@@ -18,10 +19,10 @@ test('QC reports a missing dependency and recovers when geometry loads late',asy
     await page.addScriptTag({content:fs.readFileSync('extension/shortcut_settings.js','utf8')});
     await page.addScriptTag({content:fs.readFileSync('extension/content_script.js','utf8')});
     await expect(page.locator('#c3d-val-count')).toHaveText('1');
-    await page.locator('#c3d-btn-scan').click();
+    await reveal(page,'c3d-btn-scan');await page.locator('#c3d-btn-scan').click();
     await expect(page.locator('#c3d-toast')).toContainText(/Geometry library not loaded|Thư viện geometry chưa nạp/i);
     await page.addScriptTag({content:fs.readFileSync('extension/geometry_math.js','utf8')});
-    await page.locator('#c3d-btn-scan').click();
+    await reveal(page,'c3d-btn-scan');await page.locator('#c3d-btn-scan').click();
     await expect(page.locator('#c3d-road-info')).toContainText('99%');
     await expect(page.locator('#c3d-val-issues')).toHaveText('0');
     expect(errors).toEqual([]);
@@ -32,7 +33,7 @@ test('manifest panel initializes its own geometry before QC, without a page glob
     const manifest=JSON.parse(fs.readFileSync('extension/manifest.json','utf8'));
     const isolated=manifest.content_scripts.find(entry=>entry.world!=='MAIN');
     for(const name of isolated.js)await page.addScriptTag({content:fs.readFileSync('extension/'+name,'utf8')});
-    await page.locator('#c3d-btn-scan').click();
+    await reveal(page,'c3d-btn-scan');await page.locator('#c3d-btn-scan').click();
     await expect(page.locator('#c3d-road-info')).toContainText('99%');
     expect(errors).toEqual([]);
 });
@@ -54,9 +55,9 @@ test('clicking one QC issue focuses its box and retains all three issues includi
  await page.addScriptTag({content:fs.readFileSync('extension/geometry_math.js','utf8')});
  await page.addScriptTag({content:fs.readFileSync('extension/shortcut_settings.js','utf8')});
     await page.addScriptTag({content:fs.readFileSync('extension/content_script.js','utf8')});
- await page.locator('#c3d-btn-scan').click();
+ await reveal(page,'c3d-btn-scan');await page.locator('#c3d-btn-scan').click();
  await expect(page.locator('.c3d-issue-select')).toHaveCount(3);
- await page.locator('#c3d-filter').selectOption('WARNING');
+ await reveal(page,'c3d-filter');await page.locator('#c3d-filter').selectOption('WARNING');
  await expect(page.locator('.c3d-issue-select')).toHaveCount(3);
  await page.locator('.c3d-issue-select').first().click();
  await expect(page.locator('#c3d-filter')).toHaveValue('ALL');

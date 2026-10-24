@@ -1,0 +1,105 @@
+/* Local workload ledger. No credentials, annotation coordinates or network calls. */
+(function(root){
+'use strict';
+const KEY='c3d.worklog.v1',DAY_PREFIX='c3d.worklog.day.';
+const dayKey=t=>{const d=new Date(t);return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');};
+function canonical(v){if(Array.isArray(v))return v.map(canonical);if(v&&typeof v==='object')return Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]));return v;}
+function hash(v){const s=JSON.stringify(canonical(v));let a=2166136261,b=3339675911;for(let i=0;i<s.length;i++){a=Math.imul(a^s.charCodeAt(i),16777619);b=Math.imul(b^s.charCodeAt(i),2246822519);}return (a>>>0).toString(16)+':'+(b>>>0).toString(16)+':'+s.length;}
+const attributes=value=>Array.isArray(value)?value.slice().sort((a,b)=>String(a.spec_id??a.id).localeCompare(String(b.spec_id??b.id))):value||{};
+function documentRows(data,epoch){
+ const rows=[];
+ for(const kind of ['tracks','shapes'])for(const obj of data[kind]||[]){
+  const shapes=kind==='tracks'?obj.shapes||[]:[obj];if(!shapes.some(s=>(s.type||s.shapeType)==='cuboid'))continue;
+  if(!Number.isInteger(obj.clientID))throw new Error('Annotation thiếu #clientID; chưa thể ghi nhật ký chính xác');
+  const objectKey=kind+':'+(Number.isInteger(obj.id)?'db:'+obj.id:'new:'+epoch+':'+obj.clientID);
+  rows.push({objectKey,clientId:obj.clientID,serverId:obj.id??null,kind,frame:null,present:true,hash:hash([obj.label_id,attributes(obj.attributes)]),epoch});
+  for(const s of shapes){if((s.type||s.shapeType)!=='cuboid'||!Number.isInteger(s.frame))continue;
+   rows.push({objectKey,clientId:obj.clientID,serverId:obj.id??null,kind,frame:s.frame,present:!s.outside,hash:hash([(s.points||[]).map(n=>typeof n==='number'?Math.round(n*1e6)/1e6:n),!!s.outside,!!s.occluded,attributes(s.attributes)]),epoch});
+  }
+ }
+ return rows;
+}
+const fresh=()=>({schema:1,days:{},aliases:{},active:null,seen:[]});
+function resolve(store,key){const visited=new Set();while(store.aliases[key]&&!visited.has(key)){visited.add(key);key=store.aliases[key];}return key;}
+function ensure(store,date){return store.days[date]||(store.days[date]={goal:{unit:'cuboids',target:0},records:{},decisions:{},shifts:[],activeMs:0});}
+function validDay(date){if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||dayKey(new Date(date+'T12:00:00').getTime())!==date)throw Error('Ngày không hợp lệ');}
+function scopeKey(context){if(!/^https?:\/\//.test(context.origin)||!Number.isInteger(context.jobId))throw Error('Thiếu server/job');return context.origin+'/jobs/'+context.jobId+'/';}
+function summary(store,date,now){
+ const day=ensure(store,date),merged=new Map();
+ for(const r of Object.values(day.records)){
+  const key=resolve(store,r.scope+r.objectKey),id=key+'@'+r.frame,old=merged.get(id);
+  if(!old||r.last>=old.last)merged.set(id,{...r,resolved:key});
+ }
+ const objects=new Map();let touched=0,changed=0,saved=0,deleted=0,reverted=0,edits=0,uncertain=0;
+ for(const r of merged.values()){
+  if(!objects.has(r.resolved))objects.set(r.resolved,{origin:r.origin,jobId:r.jobId,clientId:r.clientId,objectKey:r.objectKey,frames:[],changedFrames:[],savedFrames:[],deletedFrames:[],edits:0,global:false,last:r.last});
+  const o=objects.get(r.resolved),different=r.current!==r.before;
+  o.edits+=r.edits;edits+=r.edits;if(r.last>=o.last){o.clientId=r.clientId;o.last=r.last;}
+  if(r.frame==null){o.global=different&&r.present&&!r.uncertain;continue;}
+  touched++;o.frames.push(r.frame);
+  if(r.uncertain){uncertain++;continue;}
+  if(different&&r.present){changed++;o.changedFrames.push(r.frame);if(r.savedHash===r.current){saved++;o.savedFrames.push(r.frame);}}
+  else if(different&&!r.present){deleted++;o.deletedFrames.push(r.frame);}else reverted++;
+ }
+ const objectList=[...objects.values()].sort((a,b)=>b.last-a.last).map(o=>({...o,frames:o.frames.sort((a,b)=>a-b),changedFrames:o.changedFrames.sort((a,b)=>a-b)}));
+ const changedObjects=objectList.filter(o=>o.global||o.changedFrames.length).length;
+ const decisions=Object.values(day.decisions),accepted=decisions.filter(d=>d.value==='accepted').length,rejected=decisions.filter(d=>d.value==='rejected').length;
+ const achieved=day.goal.unit==='objects'?changedObjects:changed;
+ return {date,goal:day.goal,changed,touched,saved,deleted,reverted,edits,uncertain,changedObjects,objects:objectList,accepted,rejected,activeMs:day.activeMs,shifts:day.shifts,active:store.active,achieved,remaining:Math.max(0,day.goal.target-achieved),progress:day.goal.target?Math.min(100,100*achieved/day.goal.target):0,now};
+}
+function apply(store,message,context={},now=Date.now()){
+ store=store||fresh();const today=dayKey(now),date=message.date||today;validDay(date);const day=ensure(store,date);
+ if(message.op==='view')return {store,result:summary(store,date,now),write:false};
+ if(message.op==='goal'){
+  if(!['cuboids','objects'].includes(message.unit)||!Number.isInteger(message.target)||message.target<0||message.target>1000000)throw Error('KPI phải là số nguyên 0–1.000.000');
+  day.goal={unit:message.unit,target:message.target};
+ }else if(message.op==='in'){
+  if(typeof message.id!=='string'||!message.id.length||message.id.length>180)throw Error('Thiếu mã ca');
+  if(!store.active){store.active={id:message.id,start:now,startDay:today,lastBeat:now};ensure(store,today).shifts.push({id:message.id,start:now,end:null});}
+ }else if(message.op==='out'){
+  if(store.active){for(const d of Object.values(store.days)){const s=d.shifts.find(s=>s.id===store.active.id);if(s)s.end=now;}store.active=null;}
+ }else if(message.op==='beat'){
+  if(store.active){const last=store.active.lastBeat;store.active.lastBeat=now;if(message.working&&now>=last&&now-last<=45000){let cursor=last;while(cursor<now){const d=new Date(cursor),next=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1).getTime(),end=Math.min(now,next);ensure(store,dayKey(cursor)).activeMs+=end-cursor;cursor=end;}}}
+ }else if(message.op==='observe'){
+  if(!store.active||message.shiftId!==store.active.id)return {store,result:summary(store,date,now),write:false};
+  const prefix=scopeKey(context);if(!Array.isArray(message.changes)||message.changes.length>200000)throw Error('Nhật ký quá lớn');
+  if(typeof message.id!=='string'||!message.id.length||message.id.length>200)throw Error('Thiếu mã bản ghi');
+  if(store.seen.includes(message.id))return {store,result:summary(store,date,now),write:false};
+  for(const alias of message.aliases||[]){if(!alias.from.startsWith('tracks:new:')&&!alias.from.startsWith('shapes:new:'))continue;if(!/^(tracks|shapes):db:\d+$/.test(alias.to))continue;store.aliases[prefix+alias.from]=prefix+alias.to;}
+  const target=ensure(store,today);
+  for(const c of message.changes){
+   if(typeof c.objectKey!=='string'||c.objectKey.length>180||!Number.isInteger(c.clientId)||c.frame!==null&&(!Number.isInteger(c.frame)||c.frame<0)||typeof c.after!=='string'&&c.after!==null||typeof c.before!=='string'&&c.before!==null)throw Error('Bản ghi workload không hợp lệ');
+   const key=resolve(store,prefix+c.objectKey)+'@'+c.frame;
+   let record=target.records[key];
+   if(!record){const prior=Object.entries(target.records).find(([,r])=>resolve(store,r.scope+r.objectKey)+'@'+r.frame===key);if(prior){record=target.records[key]=prior[1];delete target.records[prior[0]];}}
+   if(!record)record=target.records[key]={scope:prefix,origin:context.origin,jobId:context.jobId,objectKey:c.objectKey,clientId:c.clientId,frame:c.frame,before:c.before,current:c.before,edits:0,savedHash:null};
+   record.uncertain=false;record.current=c.after;record.present=!!c.present;record.clientId=c.clientId;record.epoch=message.epoch;record.edits++;record.last=now;if(message.saved)record.savedHash=c.after;
+  }
+  if(message.reconcile){const observed=new Map((message.states||[]).map(r=>[resolve(store,prefix+r.objectKey)+'@'+r.frame,r]));for(const r of Object.values(target.records)){if(r.scope!==prefix)continue;const actual=observed.get(resolve(store,r.scope+r.objectKey)+'@'+r.frame);if(actual?.hash===r.before){r.current=r.before;r.present=!!actual.present;r.uncertain=false;}else if(actual?.hash===r.current){r.present=!!actual.present;r.uncertain=false;}else r.uncertain=true;}}
+  // A saved indication only marks hashes actually read from that native editor.
+  if(message.saved){const byKey=new Map(Object.values(target.records).map(r=>[resolve(store,r.scope+r.objectKey)+'@'+r.frame,r]));for(const state of message.states||[]){const r=byKey.get(resolve(store,prefix+state.objectKey)+'@'+state.frame);if(r&&r.current===state.hash)r.savedHash=state.hash;}}
+  store.seen.push(message.id);store.seen=store.seen.slice(-512);
+ }else if(message.op==='decision'){
+  if(!store.active)return {store,result:summary(store,date,now),write:false};
+  if(!['accepted','rejected'].includes(message.value)||typeof message.key!=='string'||message.key.length>300)throw Error('Quyết định không hợp lệ');
+  ensure(store,today).decisions[scopeKey(context)+message.key]={value:message.value,at:now};
+ }else throw Error('Lệnh workload không hỗ trợ');
+ return {store,result:summary(store,date,now),write:true};
+}
+function createService({storage,clock=Date.now}){
+ let queue=Promise.resolve();
+ return {run(message,context){const next=queue.catch(()=>{}).then(async()=>{
+  const now=clock(),today=dayKey(now),date=message.date||today;validDay(date);
+  scopeKey(context);const metaKey=KEY+':'+context.origin,dayPrefix=DAY_PREFIX+encodeURIComponent(context.origin)+'.';
+  const meta=(await storage.get(metaKey))[metaKey]||fresh(),dates=new Set([date]);
+  if(!['view','goal'].includes(message.op))dates.add(today);
+  if(message.op==='out'&&meta.active)dates.add(meta.active.startDay||dayKey(meta.active.start));
+  if(message.op==='beat'&&meta.active)dates.add(dayKey(meta.active.lastBeat));
+  const days={},previous={};await Promise.all([...dates].map(async d=>{const key=dayPrefix+d,data=(await storage.get(key))[key]||meta.days?.[d];if(data){days[d]=structuredClone(data);previous[d]=JSON.stringify(data);}}));
+  const updated=apply({...structuredClone(meta),days},message,context,now);
+  if(updated.write){const values={};for(const [d,data]of Object.entries(meta.days||{}))values[dayPrefix+d]=data;for(const [d,data]of Object.entries(updated.store.days))if(JSON.stringify(data)!==previous[d])values[dayPrefix+d]=data;const {days:ignored,...metadata}=updated.store;values[metaKey]=metadata;await storage.set(values);}
+  return updated.result;
+ });queue=next;return next;}};
+}
+const api={KEY,DAY_PREFIX,dayKey,hash,documentRows,fresh,summary,apply,createService};root.__C3D_WORK_LOG=api;if(typeof module!=='undefined')module.exports=api;
+})(typeof globalThis!=='undefined'?globalThis:this);

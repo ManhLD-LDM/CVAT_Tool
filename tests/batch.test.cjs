@@ -175,3 +175,25 @@ test('recompute invalidates in-flight frame analysis from the previous range',as
  await assert.rejects(read,/superseded/);
  await assert.rejects(f.controller.apply({token:meta.token,frames:[3]}),/incomplete/);assert.deepEqual(f.history,[]);
 });
+
+test('manual batch drafts change size/yaw without native writes until Apply, and Reset restores automatic preview',async()=>{
+ const f=fixture(),m=await f.controller.open(5),card=await f.controller.read({token:m.token,frame:3}),p=card.original.slice();p[0]+=.1;p[5]=.3;p[6]=2.1;
+ const staged=await f.controller.draft({token:m.token,frame:3,points:p});assert.equal(staged.status,'manual');assert.equal(f.history.length,0);
+ const restored=await f.controller.resetDraft({token:m.token,frame:3});assert.equal(restored.status,card.status);assert.deepEqual(restored.proposed,card.proposed);
+ await f.controller.draft({token:m.token,frame:3,points:p});const r=await f.controller.apply({token:m.token,frames:[3]});assert.equal(r.error,null);assert.deepEqual(f.shapes.get(3).points,p);
+});
+test('manual edits to native anchors require separate explicit enable/confirm; review protection remains absolute',async()=>{
+ const f=fixture(),m=await f.controller.open(5),card=await f.controller.read({token:m.token,frame:7}),p=card.original.slice();p[6]=2.2;
+ await assert.rejects(f.controller.draft({token:m.token,frame:7,points:p}),/keyframe/);
+ await f.controller.draft({token:m.token,frame:7,points:p,allowKeyframe:true});await assert.rejects(f.controller.apply({token:m.token,frames:[7]}),/Confirm/);
+ const r=await f.controller.apply({token:m.token,frames:[7],confirmManualKeyframes:true});assert.equal(r.error,null);assert.equal(f.shapes.get(7).points[6],2.2);
+ const g=fixture(),n=await g.controller.open(5),other=await g.controller.read({token:n.token,frame:3});await g.controller.protect({token:n.token,frame:3});await assert.rejects(g.controller.draft({token:n.token,frame:3,points:other.original,allowKeyframe:true}));assert.equal(g.history.length,0);
+});
+test('manual drafts reject stale, invalid, locked and ground-truth geometry',async()=>{
+ for(const scenario of ['invalid','stale','locked','gt']){
+  const f=fixture(),m=await f.controller.open(5),card=await f.controller.read({token:m.token,frame:3}),p=card.original.slice();p[0]+=.2;
+  if(scenario==='invalid')p[6]=0;if(scenario==='stale')f.shapes.get(7).points[0]++;
+  if(['locked','gt'].includes(scenario)){const get=f.job.annotations.get;f.job.annotations.get=async frame=>{const states=await get(frame);states[0][scenario==='locked'?'lock':'isGroundTruth']=true;return states;};}
+  await assert.rejects(f.controller.draft({token:m.token,frame:3,points:p}));assert.equal(f.history.length,0);
+ }
+});

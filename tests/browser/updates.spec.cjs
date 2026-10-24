@@ -76,3 +76,10 @@ test('pending server import blocks save-before-reload to protect imported annota
  const response=await page.evaluate(()=>workerMessage('C3D_RELOAD_HOLD'));expect(response.ok).toBe(false);expect(response.error).toContain('import');
  expect(await page.evaluate(()=>nativeCalls.includes('PREPARE_RELOAD'))).toBe(false);
 });
+test('reload waits for post-save ledger flush and releases native hold if it fails',async({page})=>{
+ await setup(page);await page.evaluate(()=>{clientEnv.afterSave=async()=>nativeCalls.push('WORK_LOG_AFTER_SAVE');});
+ expect((await page.evaluate(()=>workerMessage('C3D_RELOAD_HOLD'))).ok).toBe(true);
+ expect(await page.evaluate(()=>nativeCalls.indexOf('WORK_LOG_AFTER_SAVE')>nativeCalls.indexOf('PREPARE_RELOAD'))).toBe(true);
+ await page.evaluate(()=>workerMessage('C3D_RELOAD_RELEASE'));
+ await page.evaluate(()=>{clientEnv.afterSave=async()=>{throw Error('Nhật ký chưa ghi');};});const failed=await page.evaluate(()=>workerMessage('C3D_RELOAD_HOLD'));expect(failed.ok).toBe(false);expect(failed.error).toContain('Nhật ký');await expect(page.locator('.c3d-reload-hold')).toHaveCount(0);
+});

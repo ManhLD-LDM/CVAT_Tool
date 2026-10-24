@@ -859,6 +859,200 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 ;
+/* Local workload ledger. No credentials, annotation coordinates or network calls. */
+(function(root){
+'use strict';
+const KEY='c3d.worklog.v1',DAY_PREFIX='c3d.worklog.day.';
+const dayKey=t=>{const d=new Date(t);return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');};
+function canonical(v){if(Array.isArray(v))return v.map(canonical);if(v&&typeof v==='object')return Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]));return v;}
+function hash(v){const s=JSON.stringify(canonical(v));let a=2166136261,b=3339675911;for(let i=0;i<s.length;i++){a=Math.imul(a^s.charCodeAt(i),16777619);b=Math.imul(b^s.charCodeAt(i),2246822519);}return (a>>>0).toString(16)+':'+(b>>>0).toString(16)+':'+s.length;}
+const attributes=value=>Array.isArray(value)?value.slice().sort((a,b)=>String(a.spec_id??a.id).localeCompare(String(b.spec_id??b.id))):value||{};
+function documentRows(data,epoch){
+ const rows=[];
+ for(const kind of ['tracks','shapes'])for(const obj of data[kind]||[]){
+  const shapes=kind==='tracks'?obj.shapes||[]:[obj];if(!shapes.some(s=>(s.type||s.shapeType)==='cuboid'))continue;
+  if(!Number.isInteger(obj.clientID))throw new Error('Annotation thiếu #clientID; chưa thể ghi nhật ký chính xác');
+  const objectKey=kind+':'+(Number.isInteger(obj.id)?'db:'+obj.id:'new:'+epoch+':'+obj.clientID);
+  rows.push({objectKey,clientId:obj.clientID,serverId:obj.id??null,kind,frame:null,present:true,hash:hash([obj.label_id,attributes(obj.attributes)]),epoch});
+  for(const s of shapes){if((s.type||s.shapeType)!=='cuboid'||!Number.isInteger(s.frame))continue;
+   rows.push({objectKey,clientId:obj.clientID,serverId:obj.id??null,kind,frame:s.frame,present:!s.outside,hash:hash([(s.points||[]).map(n=>typeof n==='number'?Math.round(n*1e6)/1e6:n),!!s.outside,!!s.occluded,attributes(s.attributes)]),epoch});
+  }
+ }
+ return rows;
+}
+const fresh=()=>({schema:1,days:{},aliases:{},active:null,seen:[]});
+function resolve(store,key){const visited=new Set();while(store.aliases[key]&&!visited.has(key)){visited.add(key);key=store.aliases[key];}return key;}
+function ensure(store,date){return store.days[date]||(store.days[date]={goal:{unit:'cuboids',target:0},records:{},decisions:{},shifts:[],activeMs:0});}
+function validDay(date){if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||dayKey(new Date(date+'T12:00:00').getTime())!==date)throw Error('Ngày không hợp lệ');}
+function scopeKey(context){if(!/^https?:\/\//.test(context.origin)||!Number.isInteger(context.jobId))throw Error('Thiếu server/job');return context.origin+'/jobs/'+context.jobId+'/';}
+function summary(store,date,now){
+ const day=ensure(store,date),merged=new Map();
+ for(const r of Object.values(day.records)){
+  const key=resolve(store,r.scope+r.objectKey),id=key+'@'+r.frame,old=merged.get(id);
+  if(!old||r.last>=old.last)merged.set(id,{...r,resolved:key});
+ }
+ const objects=new Map();let touched=0,changed=0,saved=0,deleted=0,reverted=0,edits=0,uncertain=0;
+ for(const r of merged.values()){
+  if(!objects.has(r.resolved))objects.set(r.resolved,{origin:r.origin,jobId:r.jobId,clientId:r.clientId,objectKey:r.objectKey,frames:[],changedFrames:[],savedFrames:[],deletedFrames:[],edits:0,global:false,last:r.last});
+  const o=objects.get(r.resolved),different=r.current!==r.before;
+  o.edits+=r.edits;edits+=r.edits;if(r.last>=o.last){o.clientId=r.clientId;o.last=r.last;}
+  if(r.frame==null){o.global=different&&r.present&&!r.uncertain;continue;}
+  touched++;o.frames.push(r.frame);
+  if(r.uncertain){uncertain++;continue;}
+  if(different&&r.present){changed++;o.changedFrames.push(r.frame);if(r.savedHash===r.current){saved++;o.savedFrames.push(r.frame);}}
+  else if(different&&!r.present){deleted++;o.deletedFrames.push(r.frame);}else reverted++;
+ }
+ const objectList=[...objects.values()].sort((a,b)=>b.last-a.last).map(o=>({...o,frames:o.frames.sort((a,b)=>a-b),changedFrames:o.changedFrames.sort((a,b)=>a-b)}));
+ const changedObjects=objectList.filter(o=>o.global||o.changedFrames.length).length;
+ const decisions=Object.values(day.decisions),accepted=decisions.filter(d=>d.value==='accepted').length,rejected=decisions.filter(d=>d.value==='rejected').length;
+ const achieved=day.goal.unit==='objects'?changedObjects:changed;
+ return {date,goal:day.goal,changed,touched,saved,deleted,reverted,edits,uncertain,changedObjects,objects:objectList,accepted,rejected,activeMs:day.activeMs,shifts:day.shifts,active:store.active,achieved,remaining:Math.max(0,day.goal.target-achieved),progress:day.goal.target?Math.min(100,100*achieved/day.goal.target):0,now};
+}
+function apply(store,message,context={},now=Date.now()){
+ store=store||fresh();const today=dayKey(now),date=message.date||today;validDay(date);const day=ensure(store,date);
+ if(message.op==='view')return {store,result:summary(store,date,now),write:false};
+ if(message.op==='goal'){
+  if(!['cuboids','objects'].includes(message.unit)||!Number.isInteger(message.target)||message.target<0||message.target>1000000)throw Error('KPI phải là số nguyên 0–1.000.000');
+  day.goal={unit:message.unit,target:message.target};
+ }else if(message.op==='in'){
+  if(typeof message.id!=='string'||!message.id.length||message.id.length>180)throw Error('Thiếu mã ca');
+  if(!store.active){store.active={id:message.id,start:now,startDay:today,lastBeat:now};ensure(store,today).shifts.push({id:message.id,start:now,end:null});}
+ }else if(message.op==='out'){
+  if(store.active){for(const d of Object.values(store.days)){const s=d.shifts.find(s=>s.id===store.active.id);if(s)s.end=now;}store.active=null;}
+ }else if(message.op==='beat'){
+  if(store.active){const last=store.active.lastBeat;store.active.lastBeat=now;if(message.working&&now>=last&&now-last<=45000){let cursor=last;while(cursor<now){const d=new Date(cursor),next=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1).getTime(),end=Math.min(now,next);ensure(store,dayKey(cursor)).activeMs+=end-cursor;cursor=end;}}}
+ }else if(message.op==='observe'){
+  if(!store.active||message.shiftId!==store.active.id)return {store,result:summary(store,date,now),write:false};
+  const prefix=scopeKey(context);if(!Array.isArray(message.changes)||message.changes.length>200000)throw Error('Nhật ký quá lớn');
+  if(typeof message.id!=='string'||!message.id.length||message.id.length>200)throw Error('Thiếu mã bản ghi');
+  if(store.seen.includes(message.id))return {store,result:summary(store,date,now),write:false};
+  for(const alias of message.aliases||[]){if(!alias.from.startsWith('tracks:new:')&&!alias.from.startsWith('shapes:new:'))continue;if(!/^(tracks|shapes):db:\d+$/.test(alias.to))continue;store.aliases[prefix+alias.from]=prefix+alias.to;}
+  const target=ensure(store,today);
+  for(const c of message.changes){
+   if(typeof c.objectKey!=='string'||c.objectKey.length>180||!Number.isInteger(c.clientId)||c.frame!==null&&(!Number.isInteger(c.frame)||c.frame<0)||typeof c.after!=='string'&&c.after!==null||typeof c.before!=='string'&&c.before!==null)throw Error('Bản ghi workload không hợp lệ');
+   const key=resolve(store,prefix+c.objectKey)+'@'+c.frame;
+   let record=target.records[key];
+   if(!record){const prior=Object.entries(target.records).find(([,r])=>resolve(store,r.scope+r.objectKey)+'@'+r.frame===key);if(prior){record=target.records[key]=prior[1];delete target.records[prior[0]];}}
+   if(!record)record=target.records[key]={scope:prefix,origin:context.origin,jobId:context.jobId,objectKey:c.objectKey,clientId:c.clientId,frame:c.frame,before:c.before,current:c.before,edits:0,savedHash:null};
+   record.uncertain=false;record.current=c.after;record.present=!!c.present;record.clientId=c.clientId;record.epoch=message.epoch;record.edits++;record.last=now;if(message.saved)record.savedHash=c.after;
+  }
+  if(message.reconcile){const observed=new Map((message.states||[]).map(r=>[resolve(store,prefix+r.objectKey)+'@'+r.frame,r]));for(const r of Object.values(target.records)){if(r.scope!==prefix)continue;const actual=observed.get(resolve(store,r.scope+r.objectKey)+'@'+r.frame);if(actual?.hash===r.before){r.current=r.before;r.present=!!actual.present;r.uncertain=false;}else if(actual?.hash===r.current){r.present=!!actual.present;r.uncertain=false;}else r.uncertain=true;}}
+  // A saved indication only marks hashes actually read from that native editor.
+  if(message.saved){const byKey=new Map(Object.values(target.records).map(r=>[resolve(store,r.scope+r.objectKey)+'@'+r.frame,r]));for(const state of message.states||[]){const r=byKey.get(resolve(store,prefix+state.objectKey)+'@'+state.frame);if(r&&r.current===state.hash)r.savedHash=state.hash;}}
+  store.seen.push(message.id);store.seen=store.seen.slice(-512);
+ }else if(message.op==='decision'){
+  if(!store.active)return {store,result:summary(store,date,now),write:false};
+  if(!['accepted','rejected'].includes(message.value)||typeof message.key!=='string'||message.key.length>300)throw Error('Quyết định không hợp lệ');
+  ensure(store,today).decisions[scopeKey(context)+message.key]={value:message.value,at:now};
+ }else throw Error('Lệnh workload không hỗ trợ');
+ return {store,result:summary(store,date,now),write:true};
+}
+function createService({storage,clock=Date.now}){
+ let queue=Promise.resolve();
+ return {run(message,context){const next=queue.catch(()=>{}).then(async()=>{
+  const now=clock(),today=dayKey(now),date=message.date||today;validDay(date);
+  scopeKey(context);const metaKey=KEY+':'+context.origin,dayPrefix=DAY_PREFIX+encodeURIComponent(context.origin)+'.';
+  const meta=(await storage.get(metaKey))[metaKey]||fresh(),dates=new Set([date]);
+  if(!['view','goal'].includes(message.op))dates.add(today);
+  if(message.op==='out'&&meta.active)dates.add(meta.active.startDay||dayKey(meta.active.start));
+  if(message.op==='beat'&&meta.active)dates.add(dayKey(meta.active.lastBeat));
+  const days={},previous={};await Promise.all([...dates].map(async d=>{const key=dayPrefix+d,data=(await storage.get(key))[key]||meta.days?.[d];if(data){days[d]=structuredClone(data);previous[d]=JSON.stringify(data);}}));
+  const updated=apply({...structuredClone(meta),days},message,context,now);
+  if(updated.write){const values={};for(const [d,data]of Object.entries(meta.days||{}))values[dayPrefix+d]=data;for(const [d,data]of Object.entries(updated.store.days))if(JSON.stringify(data)!==previous[d])values[dayPrefix+d]=data;const {days:ignored,...metadata}=updated.store;values[metaKey]=metadata;await storage.set(values);}
+  return updated.result;
+ });queue=next;return next;}};
+}
+const api={KEY,DAY_PREFIX,dayKey,hash,documentRows,fresh,summary,apply,createService};root.__C3D_WORK_LOG=api;if(typeof module!=='undefined')module.exports=api;
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+;
+(function(root){
+'use strict';
+function mount(env){
+ const panel=env.panel,api=root.__C3D_WORK_LOG;
+ const available=!!(globalThis.chrome?.runtime?.id&&chrome.runtime.sendMessage&&api);
+ let state=null,date=api?.dayKey(Date.now())||'',disposed=false,activeId=null,baseline=null,scope='',timer=null,refreshTimer=null,scanQueue=Promise.resolve(),paused=0,seq=0,page=0,lastActivity=Date.now(),error='',refreshing=false,lastSaved=null,followToday=true;
+ const epoch=globalThis.crypto?.randomUUID?.()||String(Date.now())+Math.random();
+ const proposals=new Map(),batchTargets=new Map(),ignored=new Set();
+ panel.innerHTML='<h3>Theo dõi công việc</h3><p class="c3d-task-note">Nhật ký cục bộ cho server hiện tại · KPI tự theo dõi, không phải kết quả QC.</p>'+
+ '<div class="c3d-work-row"><label>Ngày<input data-work-date type="date"></label><button data-work-in>Vào ca</button><button data-work-out>Ra ca</button></div><p data-work-shift></p>'+
+ '<section class="c3d-task-group"><h3>KPI của ngày</h3><div class="c3d-work-row" data-work-goal><label>Mục tiêu<input data-work-target type="number" min="0" max="1000000" step="1" value="0"></label><label>Đơn vị<select data-work-unit><option value="cuboids">Cuboid-frame có thay đổi</option><option value="objects">Object có thay đổi</option></select></label><button data-work-set>Lưu KPI</button></div><p data-work-progress></p><progress data-work-bar max="100" value="0" aria-label="Tiến độ KPI"></progress></section>'+
+ '<div class="c3d-work-metrics"><div><strong data-work-cuboids>0</strong><span>Cuboid có thay đổi</span></div><div><strong data-work-objects>0</strong><span>Object có thay đổi</span></div><div><strong data-work-saved>0</strong><span>Cuboid CVAT báo đã lưu</span></div><div><strong data-work-time>0 phút</strong><span>Thời gian hoạt động ước tính</span></div></div>'+
+ '<details class="c3d-task-details"><summary>Ca làm việc trong ngày</summary><ul data-work-shifts></ul></details><p data-work-decisions></p><p data-work-status role="status" aria-live="polite"></p>'+
+ '<details class="c3d-task-details"><summary>Cách đếm & phạm vi ghi nhận</summary><p class="c3d-task-note">Chỉ ghi khi đang vào ca và tool đang theo dõi. Một server/job/object/frame chỉ tính một lần trong ngày dù chỉnh nhiều lần. Đếm mốc cuboid native được ghi, không nhân số frame nội suy. Chỉnh trong CVAT và qua tool đều được đọc từ annotation native; không cần tải LiDAR. Undo về trạng thái đầu đã quan sát sẽ giảm KPI có thay đổi; số đã tác động vẫn giữ để tham khảo. Xóa/outside không tăng KPI cuboid.</p><p class="c3d-task-note">Thuộc tính/class toàn track tính ở object, không nhân thành cuboid. Chọn box, camera, QC, lock/hidden/pinned và import qua tool không tăng KPI. Gợi ý nhận/bỏ qua chỉ tính đề xuất tự động trong Batch Review đã Apply thành công hoặc chủ động Protect; bỏ chọn/đóng cửa sổ không tính bỏ qua.</p><p class="c3d-task-note">Không ghi ngược lịch sử trước lúc vào ca. Mốc đầu mỗi lần mở/chuyển editor là baseline, không phải việc đã làm. Đây là dữ liệu cá nhân của profile trình duyệt, tách riêng từng server; không đồng bộ tài khoản hay thiết bị. Nhịp hoạt động chỉ tính khi trang có focus và có tương tác trong 5 phút gần đây; ca mở không tự cộng thời gian khi đóng trình duyệt. Đã lưu là trạng thái CVAT báo tại lần đọc, không phải nghiệm thu chất lượng. Có thể xuất CSV để đối chiếu/lưu trữ.</p></details>'+
+ '<div class="c3d-work-row"><label>Lọc #ID<input data-work-filter type="search" placeholder="Ví dụ 38"></label><button data-work-export>Xuất CSV ngày</button></div><div class="c3d-work-table"><table><thead><tr><th>Job / #ID</th><th>Đã tác động</th><th>Còn thay đổi</th><th>CVAT báo lưu</th></tr></thead><tbody data-work-rows></tbody></table></div><div class="c3d-work-row"><button data-work-prev>Trước</button><span data-work-page></span><button data-work-next>Sau</button></div>';
+ const $=s=>panel.querySelector(s);$('[data-work-date]').value=date;
+ async function send(payload){if(!available)throw Error('Cần extension CVAT thật để lưu nhật ký; demo không tạo số liệu công việc');const response=await chrome.runtime.sendMessage({type:'C3D_WORK_LOG',payload:{date,...payload}});if(!response?.ok)throw Error(response?.error||'Không lưu được nhật ký');return response.result;}
+ function fail(e){error=e.message;$('[data-work-status]').textContent='Nhật ký chưa ghi được: '+error;}
+ function ranges(frames){const out=[];for(let i=0;i<frames.length;i++){const start=frames[i];while(i+1<frames.length&&frames[i+1]===frames[i]+1)i++;out.push(start===frames[i]?String(start):start+'–'+frames[i]);}return out.join(', ');}
+ function render(){
+  if(disposed||!state)return;
+  $('[data-work-shift]').textContent=state.active?'Đang trong ca · từ '+new Date(state.active.start).toLocaleString():'Chưa vào ca · thay đổi ngoài ca không tính KPI';
+  $('[data-work-in]').disabled=!!state.active;$('[data-work-out]').disabled=!state.active;
+  if(!panel.querySelector('[data-work-goal]').contains(document.activeElement)){$('[data-work-target]').value=state.goal.target;$('[data-work-unit]').value=state.goal.unit;}
+  $('[data-work-progress]').textContent=state.goal.target?state.achieved+' / '+state.goal.target+' · '+(state.remaining?'Còn '+state.remaining:'Đạt mục tiêu tự đặt'):'Chưa đặt KPI cho ngày này';$('[data-work-bar]').value=state.progress;
+  for(const [selector,value] of [['cuboids',state.changed],['objects',state.changedObjects],['saved',state.saved],['time',Math.floor(state.activeMs/60000)+' phút']])$('[data-work-'+selector+']').textContent=value;
+  const shifts=$('[data-work-shifts]');shifts.replaceChildren();for(const shift of state.shifts){const item=document.createElement('li');item.textContent=new Date(shift.start).toLocaleString()+' → '+(shift.end?new Date(shift.end).toLocaleString():'đang mở');shifts.append(item);}if(!state.shifts.length){const item=document.createElement('li');item.textContent='Không có ca bắt đầu trong ngày này.';shifts.append(item);}
+  $('[data-work-decisions]').textContent='Gợi ý Batch: nhận '+state.accepted+' · bỏ qua rõ ràng '+state.rejected+' | Đã tác động '+state.touched+' cuboid · '+state.edits+' bản ghi thay đổi quan sát';
+  $('[data-work-status]').textContent=error?'Nhật ký chưa ghi được: '+error:'Đã đọc nhật ký cục bộ · '+state.reverted+' cuboid về baseline · '+state.deleted+' bị xóa/outside · '+(state.uncertain||0)+' chưa đối chiếu được';
+  const filter=$('[data-work-filter]').value.trim().replace(/^#/,''),items=state.objects.filter(o=>!filter||String(o.clientId)===filter);page=Math.min(page,Math.max(0,Math.ceil(items.length/20)-1));
+  const tbody=$('[data-work-rows]');tbody.replaceChildren();
+  for(const item of items.slice(page*20,page*20+20)){const tr=document.createElement('tr');for(const value of ['Job '+item.jobId+' · #'+item.clientId,item.frames.length,item.changedFrames.length+(item.global?' + track':''),item.savedFrames.length]){const td=document.createElement('td');td.textContent=value;tr.append(td);}const detail=document.createElement('tr'),td=document.createElement('td');td.colSpan=4;td.className='c3d-work-frame-list';td.textContent=item.origin+' · Frame đã tác động: '+(ranges(item.frames)||'thuộc tính toàn track');detail.append(td);tbody.append(tr,detail);}
+  if(!items.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=4;cell.textContent='Chưa có object được ghi nhận cho ngày/bộ lọc này.';row.append(cell);tbody.append(row);}
+  $('[data-work-page]').textContent=(items.length?page+1:0)+' / '+Math.ceil(items.length/20)+' · '+items.length+' object';$('[data-work-prev]').disabled=page===0;$('[data-work-next]').disabled=(page+1)*20>=items.length;
+ }
+ async function refresh(){if(disposed||refreshing||!available)return;refreshing=true;try{const next=await send({op:'view'}),changed=next.active?.id!==activeId;state=next;activeId=next.active?.id||null;if(changed){baseline=null;scope='';if(activeId)schedule(true);}render();}catch(e){fail(e);}finally{refreshing=false;}}
+ function schedule(reset=false){clearTimeout(timer);if(disposed||!activeId||paused)return;timer=setTimeout(()=>capture(reset).catch(fail),450);}
+ function capture(reset=false,force=false){
+  const task=scanQueue.catch(()=>{}).then(async()=>{
+   if(disposed||paused||!force&&!activeId)return;
+   const observingShift=activeId;const snap=env.snapshot();if(!snap?.connected||snap.mode==='demo')throw Error('Chỉ ghi khối lượng annotation trong editor CVAT native');
+   const doc=await env.request('GET_WORK_DOCUMENT');if(disposed||paused||activeId!==observingShift||env.snapshot()?.jobId!==doc.jobId)return;
+   const nextScope=doc.jobId+':'+doc.epoch,rows=new Map(doc.rows.map(r=>[r.objectKey+'@'+r.frame,r])),aliases=[];
+   if(scope!==nextScope||reset){scope=nextScope;baseline=rows;lastSaved=doc.saved;ignored.clear();if(activeId)await send({op:'observe',id:epoch+':'+(++seq),shiftId:observingShift,epoch:doc.epoch,changes:[],aliases:[],reconcile:true,saved:!!doc.saved,states:doc.rows.map(r=>({objectKey:r.objectKey,frame:r.frame,hash:r.hash,present:r.present}))});return;}
+   const before=new Map(baseline||[]);
+   const anonymous=new Map([...before.values()].filter(p=>p.frame===null&&p.objectKey.includes(':new:')).map(p=>[p.kind+':'+p.clientId,p]));
+   for(const r of rows.values())if(r.serverId!=null&&r.frame===null){const old=anonymous.get(r.kind+':'+r.clientId);if(old){aliases.push({from:old.objectKey,to:r.objectKey});for(const [key,p]of before)if(p.objectKey===old.objectKey){before.delete(key);before.set(r.objectKey+'@'+p.frame,{...p,objectKey:r.objectKey});}}}
+   const changes=[];
+   for(const key of new Set([...before.keys(),...rows.keys()])){const a=before.get(key),b=rows.get(key);if(a?.hash===b?.hash)continue;const identity=b||a;if(ignored.has(identity.kind+':'+identity.clientId+':'+identity.frame))continue;changes.push({objectKey:identity.objectKey,clientId:identity.clientId,frame:identity.frame,before:a?.hash||null,after:b?.hash||null,present:!!b?.present});}
+   if(changes.length||aliases.length||doc.saved&&!lastSaved){state=await send({op:'observe',id:epoch+':'+(++seq),shiftId:observingShift,epoch:doc.epoch,changes,aliases,saved:!!doc.saved,states:doc.saved?doc.rows.map(r=>({objectKey:r.objectKey,frame:r.frame,hash:r.hash,present:r.present})):[]});error='';render();}
+   baseline=rows;lastSaved=doc.saved;ignored.clear();
+  });scanQueue=task;return task;
+ }
+ function csv(){if(!state)return;const rows=[['date','origin','job','clientID','touched_frames','changed_frames','native_saved_frames','observed_edits','frame_list','kpi_unit','kpi_target','kpi_achieved','active_minutes_day','batch_accepted_day','batch_rejected_day','shift_intervals_day'],...state.objects.map(o=>[date,o.origin,o.jobId,o.clientId,o.frames.length,o.changedFrames.length,o.savedFrames.length,o.edits,o.frames.join(' '),state.goal.unit,state.goal.target,state.achieved,Math.floor(state.activeMs/60000),state.accepted,state.rejected,state.shifts.map(s=>new Date(s.start).toLocaleString()+' → '+(s.end?new Date(s.end).toLocaleString():'open')).join(' | ')])];if(rows.length===1)rows.push([date,'','','',0,0,0,0,'',state.goal.unit,state.goal.target,state.achieved,Math.floor(state.activeMs/60000),state.accepted,state.rejected,state.shifts.map(s=>new Date(s.start).toLocaleString()+' → '+(s.end?new Date(s.end).toLocaleString():'open')).join(' | ')]);const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"';const blob=new Blob(['\uFEFF'+rows.map(r=>r.map(quote).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='cvat-work-'+date+'.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+ function run(fn){return async()=>{try{error=await fn()||'';render();}catch(e){fail(e);}};}
+ $('[data-work-in]').onclick=run(async()=>{await capture(true,true);if(!baseline)throw Error('Ca hoặc editor vừa đổi; hãy thử vào ca lại');state=await send({op:'in',id:epoch+':shift:'+Date.now()});activeId=state.active?.id;lastActivity=Date.now();state=await send({op:'observe',id:epoch+':'+(++seq),shiftId:activeId,changes:[],aliases:[],reconcile:true,saved:!!lastSaved,states:[...(baseline?.values()||[])].map(r=>({objectKey:r.objectKey,frame:r.frame,hash:r.hash,present:r.present}))});});
+ $('[data-work-out]').onclick=run(async()=>{let warning='';try{await capture();}catch(e){warning=e.message;}state=await send({op:'out'});activeId=null;baseline=null;return warning?'Đã ra ca; thay đổi cuối chưa đối chiếu được: '+warning:'';});
+ $('[data-work-set]').onclick=run(async()=>{const target=$('[data-work-target]').valueAsNumber;if(!Number.isInteger(target))throw Error('Nhập KPI là số nguyên, 0 để không đặt mục tiêu');state=await send({op:'goal',target,unit:$('[data-work-unit]').value});});
+ $('[data-work-export]').onclick=run(async()=>{if(activeId&&date===api.dayKey(Date.now()))await capture();state=await send({op:'view'});csv();});
+ $('[data-work-date]').onchange=()=>{date=$('[data-work-date]').value;followToday=date===api.dayKey(Date.now());page=0;refresh();};$('[data-work-filter]').oninput=()=>{page=0;render();};$('[data-work-prev]').onclick=()=>{page--;render();};$('[data-work-next]').onclick=()=>{page++;render();};
+ const controller=new AbortController();for(const name of ['pointerdown','keydown','wheel'])window.addEventListener(name,()=>lastActivity=Date.now(),{signal:controller.signal,passive:true});
+ const storageChanged=(changes,area)=>{if(area==='local'&&(changes[api?.KEY+':'+location.origin]||Object.keys(changes).some(k=>k.startsWith((api?.DAY_PREFIX||'c3d.worklog.day.')+encodeURIComponent(location.origin)+'.')))){clearTimeout(refreshTimer);refreshTimer=setTimeout(refresh,150);}};
+ if(available){chrome.storage?.onChanged?.addListener(storageChanged);refresh();}else{for(const b of panel.querySelectorAll('button,input,select'))b.disabled=true;$('[data-work-status]').textContent='Mở job bằng extension để dùng nhật ký. Demo không tạo số liệu KPI.';}
+ const beatTimer=setInterval(()=>{if(disposed)return;if(activeId)capture().catch(fail);if(followToday&&date!==api.dayKey(Date.now())){date=api.dayKey(Date.now());$('[data-work-date]').value=date;}refresh();if(activeId&&document.visibilityState==='visible'&&document.hasFocus()&&Date.now()-lastActivity<300000)send({op:'beat',working:true}).then(s=>{state=s;render();}).catch(fail);},20000);
+ const writeTypes=new Set(['AUTO_FIT','AUTO_ADJUST','SNAP_GROUND','MOVE_TO_MOUSE','ROTATE','SET_LABEL','BATCH_APPLY','BATCH_SIZE_APPLY']);
+ return {
+  onSnapshot(s){if(activeId){const key=s.sessionId+':'+s.jobId+':'+s.revision+':'+s.saveState;if(key!==this.lastSnapshot){this.lastSnapshot=key;schedule();}}},
+  before(type){if(['BATCH_APPLY','BATCH_SIZE_APPLY'].includes(type)){paused++;clearTimeout(timer);}if(type==='IMPORT_ALL_ANNOTATIONS'){paused++;clearTimeout(timer);baseline=null;}},
+  after(type){if(['BATCH_APPLY','BATCH_SIZE_APPLY'].includes(type)){paused=Math.max(0,paused-1);schedule();}if(type==='IMPORT_ALL_ANNOTATIONS'){paused=Math.max(0,paused-1);baseline=null;scope='';schedule(true);}},
+  result(type,p,result){
+   if(type==='BATCH_SIZE_OPEN')batchTargets.set(result.token,result.clientId);if(type==='BATCH_SIZE_APPLY'){const id=batchTargets.get(p.token);for(const frame of result.boundaryFrames||[])ignored.add('tracks:'+id+':'+frame);}
+   if(writeTypes.has(type))schedule();
+   const key=p.token+':'+p.frame;
+   if(type==='BATCH_FRAME')proposals.set(key,result.status==='proposal'&&!result.protected?'auto':'other');
+   if(type==='BATCH_DRAFT')proposals.set(key,'manual');
+   if(type==='BATCH_RESET_DRAFT')proposals.set(key,result.status==='proposal'&&!result.protected?'auto':'other');
+   if(type==='BATCH_PROTECT'&&activeId&&proposals.get(key)==='auto')send({op:'decision',key,value:'rejected'}).then(s=>{state=s;render();}).catch(fail);
+   if(type==='BATCH_APPLY'&&activeId&&!result.error)for(const frame of result.appliedFrames||[]){const k=p.token+':'+frame;if(proposals.get(k)==='auto')send({op:'decision',key:k,value:'accepted'}).then(s=>{state=s;render();}).catch(fail);}
+  },
+  flush(){clearTimeout(timer);return capture();},
+  dispose(){disposed=true;controller.abort();clearTimeout(timer);clearTimeout(refreshTimer);clearInterval(beatTimer);if(available)chrome.storage?.onChanged?.removeListener(storageChanged);}
+ };
+}
+root.__C3D_WORK_UI={mount};
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+;
 /* Own implementation: position-only proposals, no SUSTechPOINTS code copied. */
 (function(root){
 'use strict';
@@ -907,10 +1101,28 @@ if(typeof module!=='undefined')module.exports=api;
 })(typeof window!=='undefined'?window:globalThis);
 
 ;
+/* Independent screen/box geometry for manual batch drafts (yaw-only handles). */
+(function(root){
+'use strict';
+function projection(base,view){
+ const c=Math.cos(base[5]),s=Math.sin(base[5]),dims=view==='Top'?[base[6],base[7]]:view==='Side'?[base[6],base[8]]:[base[7],base[8]],scale=Math.min(270/(dims[0]+2.8),85/(dims[1]+2));
+ function point(q){const dx=q[0]-base[0],dy=q[1]-base[1],z=q[2]-base[2],u=c*dx+s*dy,v=-s*dx+c*dy;return view==='Top'?[150+u*scale,55-v*scale]:view==='Side'?[150+u*scale,55-z*scale]:[150+v*scale,55-z*scale];}
+ function move(p,dx,dy){const q=p.slice(),a=dx/scale,b=-dy/scale;if(view==='Top'){q[0]+=c*a-s*b;q[1]+=s*a+c*b;}else if(view==='Side'){q[0]+=c*a;q[1]+=s*a;q[2]+=b;}else{q[0]-=s*a;q[1]+=c*a;q[2]+=b;}return q;}
+ function axis(p,i){return i===0?[Math.cos(p[5]),Math.sin(p[5]),0]:i===1?[-Math.sin(p[5]),Math.cos(p[5]),0]:[0,0,1];}
+ function handles(p){const center=point(p),indices=view==='Top'?[0,1]:view==='Side'?[0,2]:[1,2];return indices.map(i=>{const a=axis(p,i),position=point(p.slice(0,3).map((v,j)=>v+a[j]*p[6+i]/2)),unit=point(p.slice(0,3).map((v,j)=>v+a[j]));return {axis:i,position,direction:unit.map((v,j)=>v-center[j])};}).filter(h=>Math.hypot(...h.direction)>1e-4);}
+ function resize(p,i,dx,dy){const q=p.slice(),h=handles(p).find(h=>h.axis===i);if(!h)return q;const d=h.direction,raw=(dx*d[0]+dy*d[1])/(d[0]*d[0]+d[1]*d[1]),size=Math.min(100,Math.max(.01,p[6+i]+raw)),delta=size-p[6+i],a=axis(p,i);q[6+i]=size;for(let j=0;j<3;j++)q[j]+=a[j]*delta/2;return q;}
+ function yaw(p,start,end){if(view!=='Top')return p.slice();const center=point(p),a=Math.atan2(-(start[1]-center[1]),start[0]-center[0]),b=Math.atan2(-(end[1]-center[1]),end[0]-center[0]),q=p.slice();q[5]=Math.atan2(Math.sin(p[5]+b-a),Math.cos(p[5]+b-a));return q;}
+ return {point,move,handles,resize,yaw,scale};
+}
+function hull(points){const sorted=points.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]),cross=(a,b,c)=>(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);const low=[],high=[];for(const p of sorted){while(low.length>1&&cross(low.at(-2),low.at(-1),p)<=0)low.pop();low.push(p);}for(const p of sorted.slice().reverse()){while(high.length>1&&cross(high.at(-2),high.at(-1),p)<=0)high.pop();high.push(p);}return low.slice(0,-1).concat(high.slice(0,-1));}
+const api={projection,hull};root.__C3D_REVIEW_GEOMETRY=api;if(typeof module!=='undefined')module.exports=api;
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+;
 (function(root){
 'use strict';
 function mount(env){
- const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false,cancelConfirm=null;
+ const button=env.root.querySelector('#c3d-batch');let dialog=null,model=null,generation=0,working=false,applying=false,cancelConfirm=null,appearanceTimer=null;
  const request=env.request,getSnapshot=env.snapshot;
  async function open(){
   try{
@@ -919,27 +1131,41 @@ function mount(env){
    dialog=document.createElement('dialog');dialog.className='c3d-batch-dialog';dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label','Batch Track Review');
    dialog.addEventListener('keydown',event=>event.stopPropagation());
    dialog.innerHTML='<header><h2>Batch Track Review</h2><button data-action="close">Close</button></header>'+
-    '<p data-info></p><p>Native keyframes are protected. Orange = current box; green = proposal. Position only: dimensions and yaw stay fixed. Proposals require human review; sensor motion compensation is not implemented yet.</p>'+
-    '<div class="c3d-batch-controls"><label>From <input data-from type="number"></label><label>To <input data-to type="number"></label><button data-action="load">Compute range (max 60)</button><button data-action="prev">Previous 7</button><button data-action="next">Next 7</button></div>'+
+    '<p data-info></p><p>Orange = original; green = proposal/draft. Automatic suggestions change position only. Drag to move, drag square handles to resize, Alt-drag in Top to rotate yaw. Manual drafts are saved only on Apply; interpolation between keys can change. Sensor motion compensation is not implemented.</p>'+
+    '<div class="c3d-batch-controls"><label><input type="checkbox" data-sync-points checked> Theo point size CVAT</label><label>Point size (px) <input data-point-size type="number" min="0.5" max="12" step="0.5" value="2"></label><span data-point-source></span><label>Thao tác <select data-tool><option value="auto">Move / handle resize / Alt yaw</option><option value="move">Move</option><option value="resize">Resize handles</option><option value="yaw">Yaw (Top)</option></select></label><label><input type="checkbox" data-manual-keys> Cho phép sửa TAY keyframe gốc</label></div>'+
+    '<div class="c3d-batch-controls"><label>From <input data-from type="number"></label><label>To <input data-to type="number"></label><button data-action="load">Compute range (max 60)</button><button data-action="prev">Previous</button><button data-action="next">Next</button><label>View / trang <select data-page-size><option value="3">3 · rộng</option><option value="7">7 · gọn</option></select></label></div>'+
     '<p data-progress role="status"></p><p data-summary></p><button data-action="cancel-compute" hidden>Cancel compute</button><div class="c3d-batch-cards"></div>'+
     '<section data-confirm hidden role="group" aria-label="Confirm batch apply"><p data-confirm-message></p><button data-action="confirm-apply">Confirm Apply</button><button data-action="cancel-apply">Back to review</button></section>'+
-    '<footer><button data-action="export">Export preview (.json)</button><button data-action="apply">Apply selected position proposals</button><span>Compute up to 60 frames; review 7 per page. Apply sequentially in groups of 20. Applied frames become keyframes; native Undo per frame. Save CVAT to persist.</span></footer>';
+    '<footer><button data-action="export">Export preview (.json)</button><button data-action="apply">Apply selected proposals / drafts</button><span>Compute up to 60 frames; review 3 or 7 per page. Apply sequentially in groups of 20. Applied frames become keyframes; native Undo per frame. Save CVAT to persist.</span></footer>';
    document.body.append(dialog);dialog.showModal();
    dialog.querySelector('[data-info]').textContent='Job '+model.jobId+' · clientID #'+model.clientId+' · keyframes: '+model.keyframes.join(', ')+' · range '+model.start+'–'+model.stop;
    for(const selector of ['[data-from]','[data-to]']){
     const input=dialog.querySelector(selector);input.min=model.start;input.max=model.stop;
    }
    dialog.querySelector('[data-from]').value=model.defaultStart;dialog.querySelector('[data-to]').value=model.defaultStop;
-   model.page=model.defaultStart;model.cards=new Map();model.selected=new Set();model.complete=false;
+   model.pageSize=3;dialog.dataset.density=3;model.page=model.defaultStart;model.cards=new Map();model.selected=new Set();model.complete=false;model.pointSize=2;
+   function updatePointSize(){
+    if(!dialog||!model)return;
+    const sync=dialog.querySelector('[data-sync-points]').checked,input=dialog.querySelector('[data-point-size]'),appearance=getSnapshot()?.reviewAppearance;
+    const size=sync?(appearance?.pointSize||2):Number(input.value);
+    if(!Number.isFinite(size)||size<.5||size>12)return;
+    input.disabled=sync||working;if(sync)input.value=size;
+    dialog.querySelector('[data-point-source]').textContent=sync?(appearance?.source&&appearance.source!=='review-default'?'Đọc từ CVAT':'Không đọc được CVAT · mặc định 2 px'):'Tuỳ chỉnh riêng cho review';
+    if(model.pointSize!==size){model.pointSize=size;for(const canvas of dialog.querySelectorAll('canvas[data-view]')){const card=model.cards.get(Number(canvas.dataset.frame));if(card)draw(canvas,canvas.dataset.view,card);}}
+   }
+   dialog.querySelector('[data-sync-points]').onchange=updatePointSize;dialog.querySelector('[data-point-size]').oninput=updatePointSize;
+   dialog.querySelector('[data-manual-keys]').onchange=()=>{if(!working)renderPage();};
+   updatePointSize();clearInterval(appearanceTimer);appearanceTimer=setInterval(updatePointSize,500);
    dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
    dialog.querySelector('[data-action="close"]').onclick=close;
    dialog.querySelector('[data-action="load"]').onclick=load;
    dialog.querySelector('[data-action="cancel-compute"]').onclick=()=>{model.cancelCompute=true;progress('Cancelling after current frame…');};
-   dialog.querySelector('[data-action="prev"]').onclick=()=>{model.page=Math.max(model.from,model.page-7);renderPage();};
-   dialog.querySelector('[data-action="next"]').onclick=()=>{model.page+=7;renderPage();};
+   dialog.querySelector('[data-action="prev"]').onclick=()=>{model.page=Math.max(model.from,model.page-model.pageSize);renderPage();};
+   dialog.querySelector('[data-action="next"]').onclick=()=>{model.page+=model.pageSize;renderPage();};
+   dialog.querySelector('[data-page-size]').onchange=e=>{model.pageSize=Number(e.target.value);model.page=model.from+Math.floor((model.page-model.from)/model.pageSize)*model.pageSize;dialog.dataset.density=model.pageSize;renderPage();};
    dialog.querySelector('[data-action="apply"]').onclick=apply;
    dialog.querySelector('[data-action="export"]').onclick=()=>{
-    const data={schema:'cvat-batch-preview/v1',version:'1.14.5',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
+    const data={schema:'cvat-batch-preview/v1',version:'1.21.1',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
      keyframes:model.keyframes,baseline:model.baseline,frames:[...model.cards.values()],note:'Diagnostic preview; sampled ROI only, not a full point-cloud sequence or certified ground truth'};
     const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'})),link=document.createElement('a');
     link.href=url;link.download='batch-job'+model.jobId+'-track'+model.clientId+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
@@ -950,26 +1176,28 @@ function mount(env){
  function progress(text){if(dialog)dialog.querySelector('[data-progress]').textContent=text;}
  function summary(){
   const cards=[...model.cards.values()],anchors=cards.filter(c=>c.status==='anchor').length,proposals=cards.filter(c=>c.status==='proposal'&&!c.protected).length;
-  if(dialog)dialog.querySelector('[data-summary]').textContent='Range '+model.from+'–'+model.to+' · Computed '+model.cards.size+' / '+(model.to-model.from+1)+' frames · Protected anchors '+anchors+' · Proposals '+proposals+' · Selected '+model.selected.size+' · '+(model.consumed?'Applied batch — reopen to recompute':model.complete?'Ready for review':'Incomplete — Compute again before Apply');
+  if(dialog)dialog.querySelector('[data-summary]').textContent='Range '+model.from+'–'+model.to+' · Computed '+model.cards.size+' / '+(model.to-model.from+1)+' frames · Protected anchors '+anchors+' · Proposals '+proposals+' · Selected '+model.selected.size+' · Trang '+(Math.floor((model.page-model.from)/model.pageSize)+1)+' / '+Math.ceil((model.to-model.from+1)/model.pageSize)+' · '+(model.consumed?'Applied batch — reopen to recompute':model.complete?'Ready for review':'Incomplete — Compute again before Apply');
  }
  function disable(value){
   working=value;if(!dialog)return;
   for(const b of dialog.querySelectorAll('button'))b.disabled=(value&&!['close','cancel-compute'].includes(b.dataset.action))||b.dataset.permanent==='true'||(b.dataset.action==='apply'&&(model?.consumed||!model?.complete));
-  for(const input of dialog.querySelectorAll('input'))input.disabled=value;
+  for(const input of dialog.querySelectorAll('input,select'))input.disabled=value;
+  dialog.querySelector('[data-point-size]').disabled=value||dialog.querySelector('[data-sync-points]').checked;
   dialog.querySelector('[data-action="cancel-compute"]').hidden=!value||applying;
   if(applying)dialog.querySelector('[data-action="close"]').disabled=true;
   if(!value){
    dialog.querySelector('[data-action="prev"]').disabled=model.page<=model.from;
-   dialog.querySelector('[data-action="next"]').disabled=model.page+7>model.to;
+   dialog.querySelector('[data-action="next"]').disabled=model.page+model.pageSize>model.to;
   }
  }
  function renderPage(){
   if(!dialog)return;
-  model.page=Math.min(Math.max(model.page,model.from),model.from+Math.floor((model.to-model.from)/7)*7);
+  model.page=Math.min(Math.max(model.page,model.from),model.from+Math.floor((model.to-model.from)/model.pageSize)*model.pageSize);
   const container=dialog.querySelector('.c3d-batch-cards');container.replaceChildren();
-  for(let frame=model.page;frame<=Math.min(model.to,model.page+6);frame++){
+  for(let frame=model.page;frame<=Math.min(model.to,model.page+model.pageSize-1);frame++){
    const card=model.cards.get(frame);if(card)renderCard(card,container);
   }
+  dialog.querySelector('[data-action="prev"]').textContent='Previous '+model.pageSize;dialog.querySelector('[data-action="next"]').textContent='Next '+model.pageSize;
   summary();disable(working);
  }
  async function load(){
@@ -1003,33 +1231,60 @@ function mount(env){
   if(card.original){
    for(const view of ['Top','Side','Front']){
     const label=document.createElement('span');label.textContent=view;article.append(label);
-    const canvas=document.createElement('canvas');canvas.width=300;canvas.height=110;canvas.setAttribute('aria-label',view+' frame '+card.frame);article.append(canvas);draw(canvas,view,card);
+    const canvas=document.createElement('canvas');canvas.width=300;canvas.height=110;canvas.dataset.view=view;canvas.dataset.frame=card.frame;canvas.setAttribute('aria-label',view+' frame '+card.frame);article.append(canvas);draw(canvas,view,card);bindEditing(canvas,view,card);
    }
   }
   const flags=document.createElement('p');flags.textContent=(card.flags||[]).join(' · ');article.append(flags);
-  const details=document.createElement('p');details.textContent='Support '+(card.beforeCount??0)+' → '+(card.afterCount??card.beforeCount??0)+(card.delta?' · ΔXYZ '+card.delta.map(n=>n.toFixed(2)).join('/')+' m':'');article.append(details);
-  if(card.status==='proposal'&&!card.protected&&!model.consumed){
+  const details=document.createElement('p');details.textContent=card.manual?'Manual draft · geometry changed; original QC counts are not a new full-cloud assessment.':'Support '+(card.beforeCount??0)+' → '+(card.afterCount??card.beforeCount??0)+(card.delta?' · ΔXYZ '+card.delta.map(n=>n.toFixed(2)).join('/')+' m':'');article.append(details);
+  if(['proposal','manual'].includes(card.status)&&!card.protected&&!model.consumed){
    const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.dataset.accept=card.frame;check.checked=model.selected.has(card.frame);check.addEventListener('change',()=>{if(check.checked)model.selected.add(card.frame);else model.selected.delete(card.frame);summary();});
    label.append(check,document.createTextNode(' Accept this proposal'));article.append(label);
   }
   const lock=document.createElement('button');lock.textContent=card.protected?'Protected anchor':'Protect this frame';lock.disabled=card.protected;if(card.protected)lock.dataset.permanent='true';
   lock.onclick=async()=>{
-   try{await request('BATCH_PROTECT',{token:model.token,frame:card.frame});model.selected.delete(card.frame);summary();card.protected=true;card.proposed=null;card.status='anchor';article.querySelector('[data-accept]')?.closest('label')?.remove();lock.disabled=true;lock.textContent='Protected for this batch';lock.dataset.permanent='true';}
+   try{await request('BATCH_PROTECT',{token:model.token,frame:card.frame});model.selected.delete(card.frame);summary();card.protected=true;card.userProtected=true;card.proposed=null;card.status='anchor';article.querySelector('[data-accept]')?.closest('label')?.remove();lock.disabled=true;lock.textContent='Protected for this batch';lock.dataset.permanent='true';}
    catch(e){progress(e.message);}
   };article.append(lock);
+  if(card.manual){const reset=document.createElement('button');reset.textContent='Reset manual draft';reset.onclick=async()=>{try{const original=await request('BATCH_RESET_DRAFT',{token:model.token,frame:card.frame});model.cards.set(card.frame,original);model.selected.delete(card.frame);renderPage();}catch(e){progress(e.message);}};article.append(reset);}
   const jump=document.createElement('button');jump.textContent='Open in CVAT';
   jump.onclick=()=>jumpTo(card.frame);article.append(jump);container.append(article);
  }
  function draw(canvas,view,card){
-  const ctx=canvas.getContext('2d'),p=card.original,c=Math.cos(p[5]),s=Math.sin(p[5]);
-  const project=q=>{const dx=q[0]-p[0],dy=q[1]-p[1],z=q[2]-p[2],x=c*dx+s*dy,y=-s*dx+c*dy;return view==='Top'?[x,y]:view==='Side'?[x,z]:[y,z];};
-  const dims=view==='Top'?[p[6],p[7]]:view==='Side'?[p[6],p[8]]:[p[7],p[8]];
-  const scale=Math.min(270/(dims[0]+2.8),85/(dims[1]+2));
+  const ctx=canvas.getContext('2d'),p=card.original,geometry=window.__C3D_REVIEW_GEOMETRY,math=window.__CVAT_COPILOT_MATH;if(!geometry||!math)return;
+  const projection=geometry.projection(p,view),project=projection.point;
   ctx.fillStyle='#09090b';ctx.fillRect(0,0,300,110);ctx.fillStyle='#b4b4bd';
-  for(const q of card.points||[]){const [x,y]=project(q);ctx.fillRect(150+x*scale,55-y*scale,1,1);}
+  const size=model.pointSize||2;
+  for(const q of card.points||[]){const [x,y]=project(q);ctx.fillRect(x-size/2,y-size/2,size,size);}
   for(const [box,color] of [[p,'#fbbf24'],[card.proposed,'#34d399']]){
-   if(!box)continue;const [x,y]=project(box);ctx.strokeStyle=color;ctx.lineWidth=2;ctx.strokeRect(150+(x-dims[0]/2)*scale,55-(y+dims[1]/2)*scale,dims[0]*scale,dims[1]*scale);
+   if(!box)continue;const polygon=geometry.hull(math.cuboidVertices(box).map(project));ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();polygon.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.stroke();
   }
+  if(canEditCard(card)){ctx.fillStyle='#60a5fa';for(const h of projection.handles(card.proposed||p)){const [x,y]=h.position;ctx.fillRect(x-3,y-3,6,6);}}
+ }
+ function canEditCard(card){return model.complete&&!model.consumed&&card.original&&!card.locked&&!card.groundTruth&&!card.userProtected&&(!card.protected||card.status==='anchor'&&dialog.querySelector('[data-manual-keys]').checked)&&Math.abs(card.original[3])+Math.abs(card.original[4])<1e-4;}
+ function bindEditing(canvas,view,card){
+  let drag=null;
+  const xy=e=>{const r=canvas.getBoundingClientRect();return [(e.clientX-r.left)*300/r.width,(e.clientY-r.top)*110/r.height];};
+  canvas.style.touchAction='none';
+  canvas.onpointerdown=e=>{
+   if(working||!canEditCard(card)||e.button!==0)return;
+   const projection=window.__C3D_REVIEW_GEOMETRY.projection(card.original,view),start=xy(e),base=(card.proposed||card.original).slice(),tool=dialog.querySelector('[data-tool]').value;
+   const handle=projection.handles(base).find(h=>Math.hypot(start[0]-h.position[0],start[1]-h.position[1])<7),center=projection.point(base);
+   if(tool==='resize'&&!handle)return;if((tool==='yaw'||e.altKey)&&view!=='Top'){progress('Yaw: use Top view');return;}
+   const mode=tool==='yaw'||e.altKey?'yaw':tool==='move'?'move':handle?'resize':'move';
+   if(mode==='yaw'&&Math.hypot(start[0]-center[0],start[1]-center[1])<5)return;
+   drag={projection,start,base,mode,axis:handle?.axis,prior:card.proposed?.slice()||null,moved:false};canvas.setPointerCapture(e.pointerId);e.preventDefault();
+  };
+  canvas.onpointermove=e=>{
+   if(!drag)return;const end=xy(e),dx=end[0]-drag.start[0],dy=end[1]-drag.start[1];if(Math.hypot(dx,dy)<1)return;drag.moved=true;
+   card.proposed=drag.mode==='yaw'?drag.projection.yaw(drag.base,drag.start,end):drag.mode==='resize'?drag.projection.resize(drag.base,drag.axis,dx,dy):drag.projection.move(drag.base,dx,dy);
+   for(const el of canvas.closest('article').querySelectorAll('canvas'))draw(el,el.dataset.view,card);
+  };
+  canvas.onpointerup=async()=>{
+   if(!drag)return;const end=drag;drag=null;if(!end.moved)return;disable(true);
+   try{const next=await request('BATCH_DRAFT',{token:model.token,frame:card.frame,points:card.proposed,allowKeyframe:dialog.querySelector('[data-manual-keys]').checked});model.cards.set(card.frame,next);model.selected.add(card.frame);progress('Manual draft staged at frame '+card.frame+'. Select reviewed frames and Apply.');}
+   catch(e){card.proposed=end.prior;progress(e.message);}finally{disable(false);renderPage();}
+  };
+  canvas.onpointercancel=()=>{if(drag){card.proposed=drag.prior;drag=null;renderPage();}};
  }
  async function jumpTo(frame){
   if(working)return;
@@ -1050,7 +1305,7 @@ function mount(env){
  function confirmApply(frames){
   disable(true);dialog.querySelector('[data-action="cancel-compute"]').hidden=true;
   const panel=dialog.querySelector('[data-confirm]');panel.hidden=false;
-  panel.querySelector('[data-confirm-message]').textContent='Apply to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Existing keyframes stay protected. Each applied frame has a separate Undo entry.';
+  panel.querySelector('[data-confirm-message]').textContent='Apply to Job '+model.jobId+', track #'+model.clientId+', frames '+frames.join(', ')+'? Automatic proposals preserve keyframes; explicitly enabled manual drafts may edit them. Native interpolation can change between keys. Each applied frame has a separate Undo entry.';
   return new Promise(resolve=>{
    const finish=value=>{cancelConfirm=null;panel.hidden=true;if(dialog)disable(false);resolve(value);};
    cancelConfirm=()=>finish(false);
@@ -1068,7 +1323,7 @@ function mount(env){
   applying=true;disable(true);
   try{
    progress('Applying '+frames.length+' reviewed frames sequentially in groups of 20…');
-   const result=await request('BATCH_APPLY',{token:model.token,frames});
+   const result=await request('BATCH_APPLY',{token:model.token,frames,confirmManualKeyframes:dialog.querySelector('[data-manual-keys]').checked});
    if(!dialog||!model)return;
    progress('Applied: '+result.appliedFrames.join(', ')+(result.error?' · '+result.error:'')+' · '+result.undo);
    dialog.querySelectorAll('[data-accept]').forEach(n=>{n.checked=false;n.disabled=true;});
@@ -1079,11 +1334,12 @@ function mount(env){
  async function close(){
   if(applying)return;
   cancelConfirm?.();
+  clearInterval(appearanceTimer);appearanceTimer=null;
   ++generation;const old=dialog;dialog=null;working=false;model=null;old?.remove();
   try{await request('BATCH_CANCEL');}catch(_){}
  }
  button.addEventListener('click',open);
- return {dispose:()=>{button.removeEventListener('click',open);if(applying){++generation;dialog?.remove();dialog=null;model=null;}else close();}};
+ return {dispose:()=>{clearInterval(appearanceTimer);button.removeEventListener('click',open);if(applying){++generation;dialog?.remove();dialog=null;model=null;}else close();}};
 }
 root.__C3D_BATCH_UI={mount};
 })(typeof window!=='undefined'?window:globalThis);
@@ -1094,7 +1350,8 @@ root.__C3D_BATCH_UI={mount};
 function mount(env){
  const button=env.root.querySelector('#c3d-batch-size');let dialog=null,meta=null,plan=null,busy=false,disposed=false;
  function status(text){if(dialog)dialog.querySelector('[role=status]').textContent=text;}
- function invalidate(){plan=null;if(dialog)dialog.querySelector('[data-apply]').disabled=true;}
+ function stage(value){if(dialog)dialog.querySelectorAll('[data-step]').forEach(n=>n.classList.toggle('active',n.dataset.step===value));}
+ function invalidate(){const hadPlan=!!plan;plan=null;if(dialog){dialog.querySelector('[data-apply]').disabled=true;stage('choose');if(hadPlan)status('Lựa chọn đã thay đổi. Xem trước lại trước khi áp dụng.');}}
  function setBusy(v){busy=v;if(!dialog)return;for(const el of dialog.querySelectorAll('button,input,select'))el.disabled=v;dialog.querySelector('[data-apply]').disabled=v||!plan||!plan.frames.length;}
  function close(){if(busy)return;dialog?.remove();dialog=null;meta=null;plan=null;env.request('BATCH_SIZE_CANCEL').catch(()=>{});}
  async function open(){
@@ -1102,20 +1359,37 @@ function mount(env){
   try{
    const s=env.snapshot();meta=await env.request('BATCH_SIZE_OPEN',{ref:env.reference(s.activeBoxId)});
    if(disposed)return;
-   dialog=document.createElement('dialog');dialog.className='c3d-size-dialog';dialog.setAttribute('aria-label','Batch Size Update');
-   dialog.innerHTML='<header><h2>Batch Size Update</h2><button data-close>Đóng</button></header><p data-info></p>'+
-    '<p>Đồng bộ kích thước một track, kể cả keyframe. Giữ ID, vị trí X/Y và góc xoay từng frame. Không cần tải LiDAR.</p>'+
+   dialog=document.createElement('dialog');dialog.className='c3d-size-dialog';dialog.setAttribute('aria-label','Batch Edit');
+   dialog.innerHTML='<header><h2>Batch Edit</h2><button data-close>Đóng</button></header><p data-info></p>'+
+    '<p>Chỉnh một track trên nhiều frame, giữ ID. Chọn chức năng rồi xem trước; không cần tải LiDAR.</p><label>Chức năng <select data-mode><option value="size">Kích thước box</option><option value="attributes">Thuộc tính theo class</option><option value="outside">Hiển thị / Outside</option><option value="property">Property: lock / occluded / hidden / keyframe / pinned</option></select></label><div data-attributes hidden></div>'+
     '<div class="c3d-size-fields"><label>Từ frame <input data-from type="number" step="1"></label><label>Đến frame <input data-to type="number" step="1"></label><button data-all>Toàn job</button></div>'+
-    '<div class="c3d-size-fields"><label>Dài L (m) <input data-l type="number" min="0.01" max="100" step="0.01"></label><label>Rộng W (m) <input data-w type="number" min="0.01" max="100" step="0.01"></label><label>Cao H (m) <input data-h type="number" min="0.01" max="100" step="0.01"></label></div>'+
-    '<label>Mốc giữ cố định <select data-anchor><option value="bottom">Giữ cao độ đáy từng frame</option><option value="center">Giữ tâm XYZ từng frame</option></select></label>'+
-    '<p>Giữ đáy chỉ giữ cao độ đáy box hiện có; không tự snap xuống mặt đường. Frame outside được bỏ qua. Track bị khóa / ground truth sẽ chặn thao tác. Tối đa 1000 frame/lần, tính cả hai đầu.</p>'+
+    '<section data-property hidden><label>Property <select data-property-name><option value="occluded">Occluded · theo frame</option><option value="keyframe">Keyframe · theo frame</option><option value="lock">Lock · toàn track, editor</option><option value="hidden">Hidden · toàn track, editor</option><option value="pinned">Pinned · toàn track, editor</option></select></label> <label>Giá trị <select data-property-value><option value="true">true · Bật</option><option value="false">false · Tắt</option></select></label><p>Occluded là nhãn che khuất, không phải Outside. Gỡ keyframe sẽ thay đổi nội suy trong khoảng; giữ key đầu, key outside/chuyển trạng thái và key chứa attributes. Lock/Hidden/Pinned áp dụng toàn track trong phiên editor, không ghi vào JSON annotation server.</p><label><input data-confirm-global type="checkbox"> Tôi xác nhận property editor áp dụng TOÀN TRACK.</label></section>'+
+    '<section data-outside hidden><label>Trạng thái <select data-outside-value><option value="true">Outside = true · Ẩn / không hiện diện</option><option value="false">Outside = false · Hiện / có mặt</option></select></label><p>Áp dụng cả frame đang outside. Giữ geometry sẵn có từng frame; không tự tracking hay tạo vị trí mới. Kiểm tra box sau khi bật hiện lại.</p></section>'+
+    '<section data-size><div class="c3d-size-fields"><label>Dài L (m) <input data-l type="number" min="0.01" max="100" step="0.01"></label><label>Rộng W (m) <input data-w type="number" min="0.01" max="100" step="0.01"></label><label>Cao H (m) <input data-h type="number" min="0.01" max="100" step="0.01"></label></div>'+
+    '<label>Mốc giữ cố định <select data-anchor><option value="bottom">Giữ cao độ đáy từng frame</option><option value="center">Giữ tâm XYZ từng frame</option></select></label></section>'+
+    '<p>Kích thước: giữ đáy chỉ giữ cao độ hiện có, không tự snap xuống đường. Thuộc tính: trường theo frame chỉ sửa trong khoảng; trường cố định áp dụng toàn track và cần xác nhận. Ở chế độ Kích thước/Thuộc tính, frame outside được bỏ qua; chế độ Outside đọc và sửa cả các frame này. Track bị khóa / ground truth sẽ chặn thao tác. Tối đa 1000 frame/lần, tính cả hai đầu.</p>'+
     '<button data-preview>Xem trước</button><p role="status" aria-live="polite"></p>'+
     '<footer><button data-apply disabled>Xác nhận áp dụng</button><p>Native Undo cho từng lần ghi. Có thể thêm keyframe biên để giữ hình học ngoài khoảng. Các frame được sửa trở thành keyframe. Nhấn Save CVAT để lưu.</p></footer>';
+   const steps=document.createElement('ol');steps.className='c3d-steps';steps.setAttribute('aria-label','Tiến trình Batch Edit');steps.innerHTML='<li data-step="choose" class="active">1 · Chọn thay đổi</li><li data-step="preview">2 · Xem trước</li><li data-step="applied">3 · Kết quả</li>';dialog.querySelector('header').after(steps);
+   const guide=dialog.querySelector('[data-size]').nextElementSibling;if(guide?.tagName==='P'){const detail=document.createElement('details'),summary=document.createElement('summary');detail.className='c3d-edit-guide';summary.textContent='Phạm vi, giới hạn & cách lưu';detail.append(summary);guide.before(detail);detail.append(guide);}
    document.body.append(dialog);dialog.showModal();dialog.addEventListener('keydown',e=>e.stopPropagation());
    dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
-   dialog.querySelector('[data-info]').textContent='Job '+meta.jobId+' · Track #'+meta.clientId+' · Frame hiện tại '+meta.frame;
+   dialog.querySelector('[data-info]').textContent='Job '+meta.jobId+' · Track #'+meta.clientId+' · '+(meta.label||'')+' · Frame hiện tại '+meta.frame;
    for(const name of ['from','to']){const input=dialog.querySelector('[data-'+name+']');input.min=meta.start;input.max=meta.stop;input.value=name==='from'?meta.start:Math.min(meta.stop,meta.start+999);}
    ['l','w','h'].forEach((n,i)=>dialog.querySelector('[data-'+n+']').value=Number(meta.dimensions[i].toFixed(6)));
+   const attrRoot=dialog.querySelector('[data-attributes]');
+   for(const a of meta.attributes||[]){
+    const row=document.createElement('div'),label=document.createElement('label'),enabled=document.createElement('input');enabled.type='checkbox';enabled.dataset.attrEnable=a.id;enabled.setAttribute('aria-label','Sửa '+a.name);
+    label.append(enabled,document.createTextNode(' '+a.name+' · '+(a.mutable?'theo khoảng frame':'TOÀN TRACK')));row.append(label);
+    let input;if(['select','radio'].includes(a.inputType)){input=document.createElement('select');for(const value of a.values){const option=document.createElement('option');option.value=value;option.textContent=value;input.append(option);}}
+    else{input=document.createElement('input');input.type=a.inputType==='checkbox'?'checkbox':a.inputType==='number'?'number':'text';if(a.inputType==='number'){[input.min,input.max,input.step]=a.values;}}
+    input.dataset.attrValue=a.id;input.setAttribute('aria-label','Giá trị '+a.name);if(input.type==='checkbox')input.checked=String(a.value)==='true';else input.value=a.value;row.append(input);attrRoot.append(row);
+   }
+   if(!meta.attributes?.length){const note=document.createElement('p');note.textContent='Class này không có thuộc tính.';attrRoot.append(note);}
+   const globalLabel=document.createElement('label'),globalConfirm=document.createElement('input');globalConfirm.type='checkbox';globalConfirm.dataset.confirmTrack='';globalConfirm.setAttribute('aria-label','Xác nhận thuộc tính toàn track');globalLabel.append(globalConfirm,document.createTextNode(' Tôi đồng ý thuộc tính cố định (ví dụ age) thay đổi trên TOÀN TRACK, kể cả ngoài khoảng frame.'));attrRoot.append(globalLabel);
+   dialog.querySelector('[data-mode]').onchange=()=>{const attributes=dialog.querySelector('[data-mode]').value==='attributes';const outside=dialog.querySelector('[data-mode]').value==='outside',property=dialog.querySelector('[data-mode]').value==='property';dialog.querySelector('[data-property]').hidden=!property;dialog.querySelector('[data-size]').hidden=attributes||outside||property;dialog.querySelector('[data-outside]').hidden=!outside;attrRoot.hidden=!attributes;invalidate();};
+   const updateScope=()=>{const property=dialog.querySelector('[data-mode]').value==='property',global=property&&['lock','hidden','pinned'].includes(dialog.querySelector('[data-property-name]').value);dialog.querySelector('.c3d-size-fields').hidden=global;dialog.querySelector('[data-confirm-global]').closest('label').hidden=!global;};
+   dialog.querySelector('[data-mode]').addEventListener('change',updateScope);dialog.querySelector('[data-property-name]').addEventListener('change',updateScope);updateScope();
    dialog.querySelector('[data-close]').onclick=close;
    dialog.querySelector('[data-all]').onclick=()=>{dialog.querySelector('[data-from]').value=meta.start;dialog.querySelector('[data-to]').value=meta.stop;invalidate();status('Đã chọn toàn job. Xem trước để kiểm tra phạm vi.');};
    for(const el of dialog.querySelectorAll('input,select'))el.addEventListener('input',invalidate);
@@ -1127,15 +1401,16 @@ function mount(env){
   invalidate();setBusy(true);status('Đang đọc annotation…');
   try{
    plan=await env.request('BATCH_SIZE_PREVIEW',{token:meta.token,from:dialog.querySelector('[data-from]').valueAsNumber,to:dialog.querySelector('[data-to]').valueAsNumber,
-    dimensions:['l','w','h'].map(n=>dialog.querySelector('[data-'+n+']').valueAsNumber),anchor:dialog.querySelector('[data-anchor]').value});
-   status('Track #'+plan.clientId+' · Frame '+plan.from+'–'+plan.to+' · '+plan.dimensions.join(' × ')+' m · '+(plan.anchor==='bottom'?'Giữ đáy':'Giữ tâm')+'\nSẽ sửa '+plan.frames.length+' frame (gồm '+plan.keyframes+' keyframe hiện có). Bỏ qua outside: '+plan.skipped.length+'; đã đúng kích thước: '+plan.unchanged.length+'.\nKeyframe biên giữ nguyên hình học: '+(plan.boundaryFrames.join(', ')||'không cần')+'. Chỉ nhấn xác nhận nếu đúng track và phạm vi.');
+    mode:dialog.querySelector('[data-mode]').value,property:dialog.querySelector('[data-property-name]').value,value:dialog.querySelector('[data-property-value]').value==='true',confirmGlobal:dialog.querySelector('[data-confirm-global]').checked,outside:dialog.querySelector('[data-outside-value]').value==='true',attributes:Object.fromEntries((meta.attributes||[]).filter(a=>dialog.querySelector('[data-attr-enable="'+a.id+'"]').checked).map(a=>{const input=dialog.querySelector('[data-attr-value="'+a.id+'"]');return [a.id,input.type==='checkbox'?String(input.checked):input.value];})),confirmTrackAttributes:dialog.querySelector('[data-confirm-track]').checked,dimensions:['l','w','h'].map(n=>dialog.querySelector('[data-'+n+']').valueAsNumber),anchor:dialog.querySelector('[data-anchor]').value});
+   status(plan.mode==='property'?'Track #'+plan.clientId+' · '+plan.property+' = '+plan.value+' · '+(plan.global?'TOÀN TRACK / chỉ phiên editor':'Frame '+plan.from+'–'+plan.to)+'\nSẽ sửa '+plan.frames.length+' frame; giữ key được bảo vệ: '+plan.skipped.join(', ')+'. Frame biên: '+(plan.boundaryFrames.join(', ')||'không cần')+'.':plan.mode==='outside'?'Track #'+plan.clientId+' · Frame '+plan.from+'–'+plan.to+' · Outside = '+plan.outside+' ('+(plan.outside?'Ẩn':'Hiện')+')\nĐổi trạng thái '+plan.changedCount+' frame; ghi '+plan.frames.length+' frame để giữ geometry. Frame biên giữ trạng thái: '+(plan.boundaryFrames.join(', ')||'không cần')+'. Geometry hiện lại lấy từ track sẵn có; cần kiểm tra lại.':plan.mode==='attributes'?'Track #'+plan.clientId+' · Frame '+plan.from+'–'+plan.to+' · '+plan.attributes.map(a=>a.name+' = '+a.value+' ('+(a.mutable?'theo frame':'TOÀN TRACK')+')').join('; ')+'\nSẽ sửa '+plan.frames.length+' frame; bỏ qua outside: '+plan.skipped.length+'; không đổi: '+plan.unchanged.length+'. Frame biên phục hồi thuộc tính: '+(plan.boundaryFrames.join(', ')||'không cần')+'.': 'Track #'+plan.clientId+' · Frame '+plan.from+'–'+plan.to+' · '+plan.dimensions.join(' × ')+' m · '+(plan.anchor==='bottom'?'Giữ đáy':'Giữ tâm')+'\nSẽ sửa '+plan.frames.length+' frame (gồm '+plan.keyframes+' keyframe hiện có). Bỏ qua outside: '+plan.skipped.length+'; đã đúng kích thước: '+plan.unchanged.length+'.\nKeyframe biên giữ nguyên hình học: '+(plan.boundaryFrames.join(', ')||'không cần')+'. Chỉ nhấn xác nhận nếu đúng track và phạm vi.');
+   stage('preview');
   }catch(e){plan=null;status(e.message);}finally{setBusy(false);}
  }
  async function apply(){
   if(!plan||busy)return;setBusy(true);status('Đang áp dụng qua native CVAT…');
   try{
    const result=await env.request('BATCH_SIZE_APPLY',{token:meta.token,planId:plan.planId});
-   status('Đã sửa '+result.appliedFrames.length+' frame; thêm '+result.boundaryFrames.length+' keyframe biên.'+(result.error?'\nDừng: '+result.error:'')+'\n'+(result.saveRequired?'Nhấn Save CVAT để lưu. Native Undo có thể hoàn tác từng lần ghi.':'Không có thay đổi được xác nhận.')+'\nĐóng và mở lại Batch Size Update để thực hiện lượt mới.');
+   stage('applied');status('Đã sửa '+result.appliedFrames.length+' frame; xử lý '+result.boundaryFrames.length+' frame biên.'+(result.error?'\nDừng: '+result.error:'')+'\n'+(result.editorOnly?'Trạng thái chỉ áp dụng trong phiên editor; không lưu trong annotation server.':result.saveRequired?'Nhấn Save CVAT để lưu. Native Undo có thể hoàn tác từng lần ghi.':'Không có thay đổi được xác nhận.')+'\nĐóng và mở lại Batch Edit để thực hiện lượt mới.');
    plan=null;dialog.querySelector('[data-preview]').hidden=true;
   }catch(e){plan=null;status(e.message+' · Kiểm tra CVAT trước khi thử lại.');}finally{setBusy(false);}
  }
@@ -1331,7 +1606,7 @@ function mount(env){
   hold.addEventListener('cancel',event=>event.preventDefault());hold.addEventListener('keydown',event=>event.stopPropagation());document.body.append(hold);hold.showModal();
   // A lost worker/connection must not leave the editor locked indefinitely.
   releaseTimer=setTimeout(release,240000);
-  try{await env.flush();return await env.request('PREPARE_RELOAD',{jobId:snap.jobId,sessionId:snap.sessionId});}
+  try{await env.flush();const prepared=await env.request('PREPARE_RELOAD',{jobId:snap.jobId,sessionId:snap.sessionId});await env.afterSave?.();return prepared;}
   catch(error){await release();throw error;}
  }
  function listener(message,sender,reply){
@@ -1568,7 +1843,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(required)throw new Error('Geometry library not loaded. Reload extension and refresh CVAT tab.');
         return null;
     }
-    let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
+    let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,taskUI=null,workUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
     let groundDebug=null;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
@@ -1577,7 +1852,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
     const text = (id, value) => { const node=el(id); if(node) node.textContent=value; };
     const scopeKey = s => s ? `${s.sessionId}:${s.jobId}:${s.frame}` : '';
     function request(type, payload = {}) {
-        if(serverImportPending&&['EXPORT_ALL_ANNOTATIONS','PREVIEW_ANNOTATION_IMPORT','IMPORT_ALL_ANNOTATIONS'].includes(type))return Promise.reject(new Error('Đã gửi import server; nạp lại kết quả trước khi dùng editor JSON'));
+        if(serverImportPending&&['EXPORT_ALL_ANNOTATIONS','PREVIEW_ANNOTATION_IMPORT','IMPORT_ALL_ANNOTATIONS','GET_WORK_DOCUMENT'].includes(type))return Promise.reject(new Error('Đã gửi import server; nạp lại kết quả trước khi dùng editor JSON'));
+        workUI?.before(type);
         return new Promise((resolve,reject) => {
             const requestId=`hud-${Date.now()}-${++seq}-${Math.random().toString(36).slice(2,7)}`;
             const isLong = type.startsWith('BATCH_') || type.includes('_ALL_ANNOTATIONS') || type==='PREPARE_RELOAD';
@@ -1587,7 +1863,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             }, isLong ? 180000 : 20000);
             pending.set(requestId,{resolve,reject,timeout});
             window.dispatchEvent(new CustomEvent('c3d:request:v2',{detail:JSON.stringify({protocol:2,requestId,type,payload})}));
-        });
+        }).then(result=>{workUI?.result(type,payload,result);return result;}).finally(()=>workUI?.after(type));
     }
     function receive(event) {
         if(typeof event.detail!=='string') return;
@@ -1694,6 +1970,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         const previousScope=scopeKey(snapshot), nextScope=scopeKey(next);
         if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
         snapshot=next;
+        workUI?.onSnapshot(next);
         syncFollowCamera();
         if(!root && shouldShow())createHUD();
         if(!root)return;
@@ -1705,6 +1982,48 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             if(autoQc) {clearTimeout(qcTimer);qcTimer=setTimeout(()=>runQC(true),140);}
         }
     }
+    function arrangeTasks(){
+        const body=el('c3d-content-body'),context=root.querySelector('.c3d-context'),footer=root.querySelector('.c3d-footer');
+        const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls||'';if(text)n.textContent=text;return n;};
+        const group=(title)=>{const n=node('section','c3d-task-group');n.append(node('h3','',title));return n;};
+        const move=(id,target)=>{const n=el(id);if(n)target.append(n);return n;};
+        const details=(title)=>{const n=node('details','c3d-task-details');n.append(node('summary','',title));return n;};
+        const nav=node('nav','c3d-task-nav');nav.setAttribute('role','tablist');nav.setAttribute('aria-label','Tác vụ công cụ');
+        const workspace=node('div','c3d-task-workspace'),pages=node('div','c3d-task-pages'),panels={};
+        const selected=node('section','c3d-selection');selected.append(root.querySelector('.c3d-inspector-header'));move('c3d-select-box',selected);const sizeSummary=node('div','c3d-selected-size');sizeSummary.id='c3d-active-size';selected.append(sizeSummary);
+        for(const [id,label] of [['box','Box'],['qc','QC'],['camera','Camera'],['data','Dữ liệu'],['work','Công việc'],['settings','Cài đặt']]){
+            const button=node('button','c3d-task-tab',label);button.type='button';button.id='c3d-tab-'+id;button.dataset.task=id;button.setAttribute('role','tab');button.setAttribute('aria-controls','c3d-task-'+id);
+            const panel=node('section','c3d-task-page');panel.id='c3d-task-'+id;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',button.id);panels[id]=panel;nav.append(button);pages.append(panel);
+        }
+        const inspector=group('Thông tin box');inspector.append(root.querySelector('.c3d-class-row'));const geometryDetails=details('Vị trí, kích thước & ground');geometryDetails.append(root.querySelector('.c3d-inspector-grid'));move('c3d-road-info',geometryDetails);move('c3d-btn-ground-debug',geometryDetails);move('c3d-ground-debug-result',geometryDetails);inspector.append(geometryDetails);panels.box.append(inspector);
+        const quick=group('Căn chỉnh nhanh'),actions=node('div','c3d-quick-actions');move('c3d-btn-autofit',actions);move('c3d-btn-ground',actions);quick.append(actions);
+        quick.append(root.querySelector('.c3d-rot-grid'));panels.box.append(quick);
+        const advanced=details('Preset & căn chỉnh nâng cao');advanced.append(root.querySelector('.c3d-preset'));advanced.append(el('c3d-keep-direction').closest('label'));move('c3d-btn-adjust',advanced);
+        for(const id of ['c3d-origin-ground','c3d-ground-height','c3d-btn-move','c3d-move-longitudinal'])advanced.append(el(id).closest('.c3d-fit-row'));
+        quick.append(advanced);
+        const qc=panels.qc;qc.append(root.querySelector('.c3d-metrics-bar'));move('c3d-btn-scan',qc);qc.append(root.querySelector('.c3d-toggles'),root.querySelector('.c3d-issue-header-bar'),root.querySelector('.c3d-legend'));move('c3d-issue-list',qc);
+        const camera=group('Điều hướng camera');move('c3d-btn-freecam',camera);camera.append(el('c3d-follow-selected').closest('label'));move('c3d-follow-status',camera);camera.append(node('p','c3d-task-note','Free Cam và Target lock chỉ thay đổi góc nhìn, không sửa annotation.'));panels.camera.append(camera);
+        const appearance=group('Hiển thị LiDAR');appearance.append(node('p','c3d-task-note','Point size sử dụng thiết lập Appearance của CVAT. Batch Review có đồng bộ và tùy chỉnh riêng ngay trong cửa sổ review.'));panels.camera.append(appearance);
+        const data=group('Annotation toàn job');data.append(node('p','c3d-task-note','JSON gồm mọi frame và thay đổi chưa lưu trong editor. Đối chiếu #clientID trước khi áp dụng.'));move('c3d-btn-export-ann',data);move('c3d-btn-import-replace',data);move('c3d-file-import',data);
+        const danger=details('Xóa annotation & import mới');danger.classList.add('c3d-danger-zone');danger.append(node('p','c3d-task-note','Xóa toàn bộ annotation hiện tại; CVAT cấp ID mới. Có bước xác nhận và tải bản dự phòng.'));move('c3d-btn-import-recreate',danger);data.append(danger);panels.data.append(data);
+        const session=details('Phiên CVAT & import/export server');move('c3d-session',session);panels.data.append(session);
+        const settingsGroup=group('Cài đặt công cụ');move('c3d-btn-settings',settingsGroup);settingsGroup.append(node('p','c3d-task-note','Phím tắt, giới hạn Auto Adjust và các thiết lập đã lưu.'));const debug=details('Chẩn đoán Auto-Fit');move('c3d-btn-export-fit',debug);settingsGroup.append(debug);panels.settings.append(settingsGroup);
+        const batches=node('section','c3d-task-batches');batches.append(node('h3','','Nhiều frame'));const batchActions=node('div','c3d-action-grid');move('c3d-batch',batchActions);move('c3d-batch-size',batchActions);batches.append(batchActions);
+        const updater=root.querySelector('.c3d-update-row');workspace.append(nav,pages);body.replaceChildren(context,selected,workspace,batches,updater);root.append(footer);
+        const titleLabels={'c3d-btn-autofit':'Auto-Fit','c3d-btn-ground':'Snap ground','c3d-btn-adjust':'Auto Adjust','c3d-btn-scan':'Quét QC','c3d-btn-export-ann':'Export toàn job (.json)','c3d-btn-settings':'Phím tắt & Auto Adjust'};
+        for(const [id,label] of Object.entries(titleLabels)){const n=el(id);n.firstChild.textContent=label+' ';}
+        let active='box',expanded=false,position=null;const header=root.querySelector('.c3d-header');
+        el('c3d-btn-toggle').setAttribute('aria-expanded','true');
+        const expand=node('button','c3d-btn-icon','⤢');expand.id='c3d-btn-expand';expand.type='button';expand.setAttribute('aria-label','Mở rộng công cụ');expand.setAttribute('aria-expanded','false');header.insertBefore(expand,el('c3d-btn-toggle'));
+        function show(id,focus=false){if(!panels[id])return;active=id;for(const [name,panel] of Object.entries(panels)){panel.hidden=name!==id;const b=nav.querySelector('[data-task="'+name+'"]');b.setAttribute('aria-selected',String(name===id));b.tabIndex=name===id?0:-1;if(focus&&name===id)b.focus();}root.dataset.activeTask=id;}
+        function clamp(){const r=root.getBoundingClientRect();if(root.style.left)root.style.left=Math.max(8,Math.min(window.innerWidth-r.width-8,r.left))+'px';if(root.style.top)root.style.top=Math.max(8,Math.min(window.innerHeight-60,r.top))+'px';}
+        expand.onclick=()=>{expanded=!expanded;if(expanded){position={left:root.style.left,right:root.style.right,top:root.style.top};root.style.left='';root.style.right='';root.style.top='';el('c3d-content-body').hidden=false;el('c3d-btn-toggle').textContent='−';}else Object.assign(root.style,position||{left:'',right:'',top:''});root.classList.toggle('c3d-expanded',expanded);expand.setAttribute('aria-expanded',String(expanded));expand.setAttribute('aria-label',expanded?'Thu gọn công cụ':'Mở rộng công cụ');clamp();};
+        nav.addEventListener('click',e=>{const b=e.target.closest('[data-task]');if(b)show(b.dataset.task);});
+        nav.addEventListener('keydown',e=>{const ids=Object.keys(panels);let index=ids.indexOf(active);if(['ArrowRight','ArrowDown','ArrowLeft','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();e.stopPropagation();index=e.key==='Home'?0:e.key==='End'?ids.length-1:(index+(['ArrowRight','ArrowDown'].includes(e.key)?1:-1)+ids.length)%ids.length;show(ids[index],true);}});
+        root.addEventListener('keydown',e=>{if(e.key==='Escape'&&expanded&&!e.target.closest('[role="dialog"]')){e.preventDefault();expand.click();expand.focus();}});
+        const controller=new AbortController();window.addEventListener('resize',clamp,{signal:controller.signal});show('box');
+        return {show,workPanel:panels.work,dispose(){controller.abort();}};
+    }
     function createHUD() {
         if(root)return;
         root=document.createElement('section');root.id='cvat-3d-copilot-root';root.setAttribute('aria-label','CVAT 3D TOOL');
@@ -1713,7 +2032,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             <div class="c3d-update-row"><span data-update-status role="status">Cập nhật: chỉ có trong extension</span><button data-update-install title="Kiểm tra và cài release mới từ GitHub">Update online</button><button data-update-local title="Lưu CVAT và nạp lại bản đang cài, không chờ GitHub">Reload local</button><button data-update-setup hidden>Cài updater</button></div>
             <div id="c3d-content-body">
                 <div class="c3d-context"><span id="c3d-context-label">Waiting for editor</span><span id="c3d-save-state">Unknown save state</span></div>
-                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-batch-size" class="c3d-btn-secondary">Batch Size Update</button></div><div class="c3d-action-grid"><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
+                <div class="c3d-action-grid"><button id="c3d-batch" class="c3d-btn-secondary">Batch Track Review</button><button id="c3d-batch-size" class="c3d-btn-secondary">Batch Edit</button></div><div class="c3d-action-grid"><button id="c3d-session" class="c3d-btn-secondary">Phiên CVAT & Import/Export</button></div>
                 <div style="margin-top:4px;">
                     <button id="c3d-btn-export-ann" class="c3d-btn-secondary" style="width:100%;margin-bottom:4px;" title="Export toàn bộ annotations 3D của tất cả frame trong Job này ra file JSON">⬇ Export Toàn Bộ Job (.json)</button>
                 </div>
@@ -1757,10 +2076,10 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.17.7 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.21.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
-        updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>saveQueue,importPending:()=>serverImportPending});
+        updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>Promise.all([saveQueue,workUI?.flush()]),afterSave:()=>workUI?.flush(),importPending:()=>serverImportPending});
         function getJobId() {
             let id = snapshot?.jobId;
             if (!id) {
@@ -1829,7 +2148,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 if(!response?.ok)throw new Error(response?.error||'Extension unavailable');
             }catch(error){toast(error.message,true);}
         });
-        el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';});
+        el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';el('c3d-btn-toggle').setAttribute('aria-expanded',String(!body.hidden));});
         el('c3d-btn-scan').addEventListener('click',()=>runQC(true));
         el('c3d-btn-ground').addEventListener('click',()=>action('SNAP_GROUND'));
         el('c3d-btn-ground-debug').addEventListener('click',inspectGround);
@@ -1861,6 +2180,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         });
         root.addEventListener('pointermove',event=>{if(!drag)return;root.style.right='auto';root.style.left=Math.max(0,Math.min(window.innerWidth-root.offsetWidth,drag.left+event.clientX-drag.x))+'px';root.style.top=Math.max(0,Math.min(window.innerHeight-60,drag.top+event.clientY-drag.y))+'px';});
         root.addEventListener('pointerup',()=>{drag=null;});
+        taskUI=arrangeTasks();
+        workUI=window.__C3D_WORK_UI?.mount({root,panel:taskUI.workPanel,request,snapshot:()=>snapshot,toast});
         renderInspector();
     }
     function options(select,values,placeholder) {
@@ -1908,7 +2229,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         el('c3d-btn-move').disabled=!canEdit||!cap.moveToMouse||!settingsReady;
         refreshShortcutHints();
         el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
-        el('c3d-batch-size').disabled=!box||box.objectType!=='track'||!cap.batchSize||!cap.edit||busy;
+        el('c3d-batch-size').disabled=!box||box.objectType!=='track'||box.groundTruth||!cap.batchSize||!cap.edit||busy;
         el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
         el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
@@ -1916,6 +2237,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         text('c3d-prop-subtype',box?.subType ? box.subType.toUpperCase() : (box ? 'None' : '—'));
         text('c3d-prop-pos',geom?geom.center.map(n=>n.toFixed(2)).join(' / ')+' m':'—');
         text('c3d-prop-size',geom?geom.dimensions.map(n=>n.toFixed(2)).join(' × ')+' m':'—');
+        text('c3d-active-size',geom?'L × W × H · '+geom.dimensions.map(n=>n.toFixed(2)).join(' × ')+' m':'Chọn box trong CVAT để bắt đầu');
         text('c3d-prop-yaw',geom?geom.yawDeg.toFixed(1)+'°':'—');text('c3d-prop-zbot',geom?geom.zBottom.toFixed(2)+' m':'—');
         text('c3d-road-info',(settings.useOriginGround?originGroundLabel()+' · ':'Ground base: surrounding road · ')+(ground?.accepted?`QC measured road${ground.confidence<.65 ? ' estimated · QC only' : ''} · ${(ground.confidence*100).toFixed(0)}% · ${ground.inlierCount} pts · RMSE ${(ground.rmse*100).toFixed(1)}cm`:ground?.reason?`Ground: ${ground.reason}`:'QC road: reading LiDAR points…'));
         renderGroundDebug();
@@ -1980,6 +2302,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         container.scrollTop=scroll;
     }
     function keydown(event) {
+        if(event.target?.closest?.('.c3d-task-nav'))return;
         if(!root||!settingsReady||settingsPanel||event.repeat||event.isComposing||event.target?.closest?.('input:not([type="checkbox"]):not([type="radio"]),textarea,select,[contenteditable]:not([contenteditable="false"]),[role="dialog"],dialog')||document.querySelector('[role="dialog"],dialog[open]'))return;
         const pressed=shortcuts.fromEvent(event);if(!pressed)return;
         const match=shortcuts.definitions.find(d=>settings.bindings[d.id]&&shortcuts.signature(settings.bindings[d.id])===shortcuts.signature(pressed));
@@ -1998,10 +2321,10 @@ root.__C3D_ANNOTATION_IO_UI={mount};
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        disposed=true;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
         window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
