@@ -1,5 +1,49 @@
-# CVAT 3D TOOL 1.18.0
+# CVAT 3D TOOL 1.21.0
 
+## Theo dõi công việc & KPI ngày — 1.21.0 (local)
+
+Open **Công việc**, choose the day, set a target in **cuboid-frame có thay đổi** or **object có thay đổi**, then **Vào ca**. Changes made through the tool or directly in the native CVAT editor are observed while the shift is open. **Ra ca** closes it. The panel shows progress/remaining target, distinct touched and still-changed cuboids, native saved indications, estimated activity time, Batch Review decisions, and per-server/job/#ID frame lists. Search an ID, browse previous days or export that day's CSV. Goals and history persist locally across reloads and are isolated by CVAT server. They are not uploaded or synchronized between devices/browser profiles; accounts using the same profile and server share this personal ledger.
+
+Counting is deliberately explicit:
+
+- Existing annotation at shift start is a baseline, not completed work. The same server/object/frame contributes once per day even when edited repeatedly. Counts refer to changed native cuboid annotation anchors, not every interpolated frame influenced by one keyframe. Track-wide class/attribute edits contribute to the object metric without multiplying cuboid counts.
+- **Đã tác động** is observed touched-frame history. **Có thay đổi** excludes returns to the day's first observed baseline, so Undo can reduce KPI. Missing/unmatched state after reopening is marked uncertain and excluded from completed cuboids. Deletion/outside does not increase the completed cuboid count. Technical boundary keys added by Batch Edit are excluded.
+- Selection, camera movement, QC scans and editor-only lock/hidden/pinned switches do not increase annotation quantity. Tool imports reset observation baselines and do not count imported annotations as human work. This cannot recover edits from before observation or while the tool/browser was closed.
+- Suggestion decisions cover automatic Batch Review proposals: successful complete Apply counts accepted frames, explicit Protect counts rejected frames once per review episode. Manual drafts, unchecked boxes, closed previews and failed/partial Apply are not silently treated as accepted/rejected suggestions.
+- **CVAT báo đã lưu** requires matching fingerprints observed while native CVAT reports no unsaved changes. It is not quality acceptance or independent server verification. Activity time is an estimate from focused, recently interacted-with pages, not elapsed shift time; browser downtime is not billed.
+
+This is a personal reference ledger for a self-set target, not an official team KPI or an employee monitoring backend. Data belongs to the current browser profile, including work across accounts used in it. `unlimitedStorage` supports growing local daily history; storage failures are surfaced instead of silently claiming progress. CSV provides a portable daily report; removing the extension/profile can remove its local history. No cookies, keystroke contents or annotation coordinates are stored in the ledger.
+
+Implementation/verification: [Work log 1.21.0](docs/verification/work-log-1.21.0.md). Local build only; no push or release in this task.
+
+## Task-based floating interface — 1.20.0 (local)
+
+The extension stays inside the current CVAT page. The compact floating panel groups controls into **Box**, **QC**, **Camera**, **Dữ liệu** and **Cài đặt**, with a shared selected-track selector, Focus, size summary, native save status and batch entry points. The header supports drag, collapse and expansion into a wider task workspace. Arrow keys/Home/End navigate the task tabs. Moving between tasks retains existing controls and input values; it does not edit annotations.
+
+Preset, origin-ground, placement and detailed geometry controls live in expandable sections. Data separates in-place editing by displayed clientID from destructive delete-and-import, which stays behind an explicitly named section and retains its existing backup/confirmation flow. Update online and Reload local retain their existing save/verification guards. The sidebar does not render another point cloud or replace CVAT's canvas.
+
+Batch Review now defaults to **3 larger frames per page**, with a **7 compact frames** option. Changing page size preserves selections/drafts and reuses already computed data. Up to 60 frames are still computed; position suggestions and native Apply logic are unchanged. Batch Edit has a choose/preview/result step indicator; editor-only whole-track properties hide the irrelevant frame-range controls. All dialogs use the same restrained dark theme, readable controls and thin scrollbars.
+
+Local build only; no push/release or live CVAT edits in this task. Verification: [UI 1.20.0](docs/verification/ui-1.20.0.md).
+
+## Interactive Batch Review and properties — 1.19.0 (local)
+
+Batch Track Review now supports manual drafts in its Top/Side/Front projections: drag to move, drag the blue square face handles to resize, and Alt-drag in Top (or choose Yaw) to rotate. Choose Move when dragging close to a handle. Changes are staged in memory and selected for Apply; Reset restores the original computed proposal. Only confirmed Apply writes through native ObjectState.save, with per-frame Undo and Save CVAT required for persistence. Native interpolation between edited keys can change. Original keyframes remain protected unless **Cho phép sửa TAY keyframe gốc** is checked; user-protected, locked and ground-truth boxes cannot be edited. Interactive handles support yaw-only cuboids; pitched/rolled cuboids can still be reviewed or opened in CVAT. Automatic suggestions retain their existing position-only algorithm. QC counts describe the original computation, not a fresh full-cloud audit of the manual draft.
+
+Review follows CVAT's point size when exposed through its settings or the visible Point size slider. The panel labels the source, uses a 2 px fallback when unavailable, and allows an independent 0.5–12 px override by disabling **Theo point size CVAT**. It does not change CVAT's setting. Compute remains capped at 60 frames with 7 cards per page.
+
+Batch Edit adds explicit true/false updates for **occluded**, **keyframe**, **lock**, **hidden** and **pinned**. Occluded and keyframe use the inclusive selected range. Removing keys preserves the first key and keys marking outside, visibility/occlusion transitions or explicit attributes; preview lists these retained anchors. Removing keys can change interpolation within the range. Lock/hidden/pinned are whole-track editor states, require scope acknowledgement, and are not serialized as server annotation properties. Unlock can be opened on a locked track; other writes still respect locks. Hidden is an editor display switch, distinct from the persisted Outside label.
+
+Verification and local package status: [1.19.0 report](docs/verification/batch-review-1.19.0.md). Live CVAT Apply/Save/reload has not been exercised for these changes; this local version has not been pushed or released.
+
+
+## Batch Outside — 1.18.1
+
+In **Batch Edit**, choose **Hiển thị / Outside**, set **true** (outside/hidden) or **false** (present/visible), choose an inclusive frame range, preview and confirm. This function reads existing outside frames as well as visible frames. It does not delete/recreate tracks, change class/attributes, run tracking or estimate new geometry. Unhidden boxes reuse their existing per-frame geometry and must be reviewed before Save CVAT.
+
+All range geometries and outside values are captured before edits. If any outside value differs, every frame in the selected range is written from those snapshots to avoid geometry changes caused by native visibility-dependent interpolation. Immediate boundary frames retain their original geometry and outside state; they are written before the range, including existing boundary keyframes. No-op ranges create no keys. Locked/ground-truth targets or boundaries and stale previews block edits. Native Undo is per write; errors stop remaining writes and report partial progress.
+
+Local 1.18.1: verified with native-model and browser fixtures, with no live job Apply/Save in this change. Not pushed or released in this task.
 
 ## Batch Edit — 1.18.0
 

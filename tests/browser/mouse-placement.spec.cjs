@@ -1,3 +1,4 @@
+const {reveal}=require('./ui-helpers.cjs');
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 const THREEBundle=require('esbuild').buildSync({stdin:{contents:"window.__TEST_THREE=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
@@ -30,12 +31,12 @@ async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_M
     for(const file of ['geometry_math.js','cvat_adapter.js','main_world_bridge.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
     await expect(page.locator('#c3d-btn-move')).toBeEnabled();
     await expect(page.locator('#c3d-adjust-direction')).not.toBeChecked();
-    if(useOriginGround)await page.locator('#c3d-origin-ground').check();
-    if(adjustDirection)await page.locator('#c3d-adjust-direction').check();
+    if(useOriginGround){await reveal(page,'c3d-origin-ground');await page.locator('#c3d-origin-ground').check();}
+    if(adjustDirection){await reveal(page,'c3d-adjust-direction');await page.locator('#c3d-adjust-direction').check();}
     if(placement){
-        if(placement.fallbackGroundHeight!==undefined){await page.locator('#c3d-ground-height').fill(String(placement.fallbackGroundHeight));await page.locator('.c3d-title').click();}
-        if(placement.moveLongitudinal)await page.locator('#c3d-move-longitudinal').selectOption(placement.moveLongitudinal);
-        if(placement.moveLateral)await page.locator('#c3d-move-lateral').selectOption(placement.moveLateral);
+        if(placement.fallbackGroundHeight!==undefined){await reveal(page,'c3d-ground-height');await page.locator('#c3d-ground-height').fill(String(placement.fallbackGroundHeight));await page.locator('.c3d-title').click();}
+        if(placement.moveLongitudinal){await reveal(page,'c3d-move-longitudinal');await page.locator('#c3d-move-longitudinal').selectOption(placement.moveLongitudinal);}
+        if(placement.moveLateral){await reveal(page,'c3d-move-lateral');await page.locator('#c3d-move-lateral').selectOption(placement.moveLateral);}
         await page.locator('.c3d-title').click();
     }
     await page.mouse.move(500,400);
@@ -77,7 +78,7 @@ test('Auto Adjust shortcut catches nearby points with fixed direction, ground co
     expect(points.slice(3,6)).toEqual(original.slice(3,6));expect(points[6]).toBeGreaterThan(original[6]);expect(points[7]).toBeGreaterThan(original[7]);
     expect(points[2]-points[8]/2).toBeCloseTo(0,6);
     await expect(page.locator('#c3d-toast')).toContainText('Auto Adjust updated sides/top');
-    await expect(page.locator('#c3d-btn-adjust')).toBeEnabled();await page.locator('#c3d-btn-adjust').click();
+    await expect(page.locator('#c3d-btn-adjust')).toBeEnabled();await reveal(page,'c3d-btn-adjust');await page.locator('#c3d-btn-adjust').click();
     await expect(page.locator('#c3d-toast')).toContainText('no supported local correction');
     expect(await page.evaluate(()=>savedEdits.length)).toBe(1);
 });
@@ -138,7 +139,7 @@ test('origin base overrides an elevated plane and stays unchanged across frames'
         ann.player.frame.number=1;for(const state of ann.annotations.states)state.frame=1;
         __store__.dispatch({type:'TEST_FRAME_CHANGE'});
     });
-    await expect(page.locator('#c3d-btn-ground')).toBeEnabled();await page.locator('#c3d-btn-ground').click();
+    await expect(page.locator('#c3d-btn-ground')).toBeEnabled();await reveal(page,'c3d-btn-ground');await page.locator('#c3d-btn-ground').click();
     await expect.poll(()=>page.evaluate(()=>savedEdits.length)).toBe(2);
     expect(await page.evaluate(()=>savedEdits[1][2]-savedEdits[1][8]/2)).toBeCloseTo(0,7);
     await expect(page.locator('#c3d-road-info')).toContainText('Origin ground Z 0.00m');
@@ -148,11 +149,11 @@ test('checkbox switches between road below origin and the coordinate origin',asy
     await fixture(page,false,false,{command:'SNAP_GROUND',groundHeight:-.6,useOriginGround:false});
     await expect(page.locator('#c3d-origin-ground')).not.toBeChecked();
     expect(await page.evaluate(()=>savedEdits[0][2]-savedEdits[0][8]/2)).toBeCloseTo(-.6,6);
-    await page.locator('#c3d-origin-ground').check();await expect(page.locator('#c3d-btn-ground')).toBeEnabled();await page.locator('#c3d-btn-ground').click();
+    await reveal(page,'c3d-origin-ground');await page.locator('#c3d-origin-ground').check();await expect(page.locator('#c3d-btn-ground')).toBeEnabled();await reveal(page,'c3d-btn-ground');await page.locator('#c3d-btn-ground').click();
     await expect.poll(()=>page.evaluate(()=>savedEdits.length)).toBe(2);
     expect(await page.evaluate(()=>savedEdits[1][2]-savedEdits[1][8]/2)).toBeCloseTo(0,6);
-    await expect(page.locator('#c3d-origin-ground')).toBeEnabled();await page.locator('#c3d-origin-ground').uncheck();
-    await expect(page.locator('#c3d-btn-ground')).toBeEnabled();await page.locator('#c3d-btn-ground').click();
+    await expect(page.locator('#c3d-origin-ground')).toBeEnabled();await reveal(page,'c3d-origin-ground');await page.locator('#c3d-origin-ground').uncheck();
+    await expect(page.locator('#c3d-btn-ground')).toBeEnabled();await reveal(page,'c3d-btn-ground');await page.locator('#c3d-btn-ground').click();
     await expect.poll(()=>page.evaluate(()=>savedEdits.length)).toBe(3);
     expect(await page.evaluate(()=>savedEdits[2][2]-savedEdits[2][8]/2)).toBeCloseTo(-.6,6);
 });

@@ -44,7 +44,7 @@ function mount(env){
   hold.addEventListener('cancel',event=>event.preventDefault());hold.addEventListener('keydown',event=>event.stopPropagation());document.body.append(hold);hold.showModal();
   // A lost worker/connection must not leave the editor locked indefinitely.
   releaseTimer=setTimeout(release,240000);
-  try{await env.flush();return await env.request('PREPARE_RELOAD',{jobId:snap.jobId,sessionId:snap.sessionId});}
+  try{await env.flush();const prepared=await env.request('PREPARE_RELOAD',{jobId:snap.jobId,sessionId:snap.sessionId});await env.afterSave?.();return prepared;}
   catch(error){await release();throw error;}
  }
  function listener(message,sender,reply){

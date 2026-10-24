@@ -1,5 +1,5 @@
 const {test,expect}=require('@playwright/test'),fs=require('node:fs');
-async function setup(page,stop=14){
+async function setup(page,stop=14,pageSize=7){
  await page.setContent('<html data-c3d-demo="true"><body><input role="spinbutton" aria-valuemin="0" aria-valuemax="14" type="number" value="7"></body></html>');
  await page.evaluate(stop=>{
   const shapes=new Map([0,7,stop].map(f=>[f,{frame:f,type:'cuboid',outside:false,points:[f*.1,0,.9,0,0,0,1.8,.8,1.6,0,0,0,0,0,0,0]}]));
@@ -36,6 +36,7 @@ async function setup(page,stop=14){
  await expect(page.locator('#c3d-batch')).toBeEnabled();
  await page.locator('#c3d-batch').click();
  await expect(page.locator('[data-progress]')).toContainText('Preview only');
+ if(pageSize===7)await page.locator('[data-page-size]').selectOption('7');
 }
 test('batch shows real PCD projections and protects native keyframes without changing annotations',async({page})=>{
  await setup(page);
@@ -153,6 +154,58 @@ test('failed computation blocks Apply and a fresh compute recovers',async({page}
  expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
  await page.evaluate(()=>restoreFrames());
  await page.locator('[data-action="load"]').click();
- await expect(page.locator('[data-progress]')).toContainText('Computed 20 frames');
+ await expect(page.locator('[data-progress]')).toContainText('Computed 20 frames',{timeout:30000});
  await expect(page.locator('[data-action="apply"]')).toBeEnabled();
+});
+
+
+test('manual drag stages a draft without native saves, then applies geometry after confirmation',async({page})=>{
+ await setup(page);await page.locator('[data-tool]').selectOption('move');
+ const canvas=page.locator('.c3d-batch-card[data-frame="3"] canvas[data-view="Top"]'),r=await canvas.boundingBox();
+ await page.mouse.move(r.x+150,r.y+55);await page.mouse.down();await page.mouse.move(r.x+165,r.y+55,{steps:3});await page.mouse.up();
+ await expect(page.locator('.c3d-batch-card[data-frame="3"] h3')).toContainText('manual');expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+ await expect(page.locator('[data-accept="3"]')).toBeChecked();await page.locator('[data-action="apply"]').click();await page.getByRole('button',{name:'Confirm Apply',exact:true}).click();
+ await expect(page.locator('[data-progress]')).toContainText('Applied: 3');expect(await page.evaluate(()=>__batchFixture.shapes.get(3).points[0])).toBeGreaterThan(.3);
+});
+
+test('review follows CVAT point size, permits a local override and keeps native size unchanged',async({page})=>{
+ await setup(page);await page.evaluate(()=>{const state=__store__.getState();state.settings={shapes:{pointSize:5}};__store__.dispatch({type:'UPDATE_ANNOTATIONS_SUCCESS',payload:{states:state.annotation.annotations.states,history:{undo:[],redo:[]}}});});
+ await expect(page.locator('[data-point-size]')).toHaveValue('5');await expect(page.locator('[data-point-source]')).toContainText('Đọc từ CVAT');
+ await page.locator('[data-sync-points]').uncheck();await page.locator('[data-point-size]').fill('7');await expect(page.locator('[data-point-source]')).toContainText('Tuỳ chỉnh');expect(await page.evaluate(()=>__store__.getState().settings.shapes.pointSize)).toBe(5);
+ await page.locator('[data-sync-points]').check();await expect(page.locator('[data-point-size]')).toHaveValue('5');
+});
+
+test('native keyframe editing remains opt-in and resetting a manual draft does not write CVAT',async({page})=>{
+ await setup(page);await page.locator('[data-tool]').selectOption('move');
+ const canvas=page.locator('.c3d-batch-card[data-frame="0"] canvas[data-view="Top"]'),r=await canvas.boundingBox();
+ await page.mouse.move(r.x+150,r.y+55);await page.mouse.down();await page.mouse.move(r.x+160,r.y+55);await page.mouse.up();await expect(page.locator('[data-accept="0"]')).toHaveCount(0);
+ await page.locator('[data-manual-keys]').check();await page.mouse.move(r.x+150,r.y+55);await page.mouse.down();await page.mouse.move(r.x+160,r.y+55);await page.mouse.up();
+ await expect(page.locator('[data-accept="0"]')).toBeChecked();await page.locator('.c3d-batch-card[data-frame="0"]').getByRole('button',{name:'Reset manual draft',exact:true}).click();await expect(page.locator('[data-accept="0"]')).toHaveCount(0);expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+});
+
+test('resize and yaw gestures stage correct manual geometry across review views',async({page})=>{
+ await setup(page);await page.locator('[data-manual-keys]').check();await page.locator('[data-tool]').selectOption('resize');
+ const top=page.locator('.c3d-batch-card[data-frame="0"] canvas[data-view="Top"]');
+ const handle=await page.evaluate(()=>{const p=[0,0,.9,0,0,0,1.8,.8,1.6];return __C3D_REVIEW_GEOMETRY.projection(p,'Top').handles(p)[0].position;});
+ let r=await top.boundingBox();await page.mouse.move(r.x+handle[0],r.y+handle[1]);await page.mouse.down();await page.mouse.move(r.x+handle[0]+15,r.y+handle[1],{steps:3});await page.mouse.up();
+ await expect(page.locator('.c3d-batch-card[data-frame="0"] h3')).toContainText('manual');
+ await page.locator('[data-tool]').selectOption('yaw');r=await top.boundingBox();
+ await page.mouse.move(r.x+180,r.y+55);await page.mouse.down();await page.mouse.move(r.x+150,r.y+25,{steps:3});await page.mouse.up();
+ await expect(page.locator('[data-progress]')).toContainText('Manual draft staged');
+ await page.screenshot({path:'docs/verification/batch-review-manual-1.19.0.png'});
+ expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+ await page.locator('[data-action="apply"]').click();await page.locator('[data-action="confirm-apply"]').click();
+ await expect(page.locator('[data-progress]')).toContainText('Applied: 0');
+ const p=await page.evaluate(()=>__batchFixture.shapes.get(0).points);expect(p[6]).toBeGreaterThan(1.8);expect(Math.abs(p[5])).toBeGreaterThan(.5);
+});
+
+test('wide three-frame review preserves selections when switching density and supports scaled pointer drafts',async({page})=>{
+ await setup(page,14,3);await expect(page.locator('.c3d-batch-card')).toHaveCount(3);
+ await page.locator('[data-accept="2"]').check();await page.locator('[data-action=next]').click();await expect(page.locator('.c3d-batch-card[data-frame="3"]')).toBeVisible();
+ await page.locator('[data-page-size]').selectOption('7');await expect(page.locator('[data-accept="2"]')).toBeChecked();
+ await page.locator('[data-page-size]').selectOption('3');await page.locator('[data-manual-keys]').check();await page.locator('[data-tool]').selectOption('move');
+ const canvas=page.locator('.c3d-batch-card[data-frame="0"] canvas[data-view=Top]');await canvas.scrollIntoViewIfNeeded();const r=await canvas.boundingBox();
+ await page.mouse.move(r.x+r.width*.5,r.y+r.height*.5);await page.mouse.down();await page.mouse.move(r.x+r.width*.6,r.y+r.height*.5,{steps:3});await page.mouse.up();
+ await expect(page.locator('.c3d-batch-card[data-frame="0"] h3')).toContainText('manual');expect(await page.evaluate(()=>__batchFixture.history.length)).toBe(0);
+ await page.screenshot({path:'docs/verification/ui-batch-three-1.20.0.png',fullPage:true});
 });

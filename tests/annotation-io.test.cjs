@@ -41,7 +41,7 @@ test('export includes exact native display and database IDs, including unsaved o
 });
 
 test('editor export is versioned and refuses a collection missing real display IDs',async()=>{
- const f=fixture(),file=(await f.io.exported()).data;assert.equal(file.c3d.toolVersion,'1.18.0');assert.ok(file.c3d.exportedAt);
+ const f=fixture(),file=(await f.io.exported()).data;assert.equal(file.c3d.toolVersion,'1.21.0');assert.ok(file.c3d.exportedAt);
  delete f.data.tracks[0].clientID;await assert.rejects(f.io.exported(),/display IDs/);
 });
 

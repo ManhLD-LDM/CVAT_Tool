@@ -18,7 +18,7 @@ async function fixture(page,{supported=true}={}){
         window.testFollow={camera,target,box,history,render,advance(frame,center,ready=true){annotation.player.frame.number=frame;box.frame=frame;box.points.splice(0,3,...center);if(ready)render();for(const fn of subscribers)fn();}};
     },{supported});
     for(const file of ['geometry_math.js','cvat_adapter.js','main_world_bridge.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
-    await expect(page.locator('#c3d-follow-selected')).toBeVisible();
+    await page.locator('[data-task=camera]').click();await expect(page.locator('#c3d-follow-selected')).toBeVisible();
 }
 
 test('follow checkbox preserves orbit through frame loading and persists across panel/browser reloads',async({page})=>{

@@ -6,11 +6,36 @@
     function createCvatAdapter(env = {}) {
         const win = env.window || root, doc = env.document || win.document;
         const math = env.math || win.__CVAT_COPILOT_MATH;
+        const workLog=env.workLog||win.__C3D_WORK_LOG;
         const later = env.delay || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));
         const sessionId = `c3d-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         let store = env.store || null, canvas = null, unsubscribe = null, interval = null, disposed = false;
         let signature = '', revision = 0, scope = '', currentSnapshot = null;
         let lastFitCase = null;
+        let appearanceReadAt=0,reviewAppearance={pointSize:2,source:'review-default'};
+        function readReviewAppearance(){
+            const shapes=store?.getState()?.settings?.shapes;
+            const configured=shapes?.pointSize;
+            if(typeof configured==='number'&&Number.isFinite(configured)&&configured>0)
+                return {pointSize:Math.max(.5,Math.min(12,configured)),source:'cvat-settings'};
+            if(Date.now()-appearanceReadAt<500)return reviewAppearance;
+            appearanceReadAt=Date.now();
+            try{
+                // Read only the slider associated with the exact Point size label;
+                // never mistake the adjacent opacity sliders for point size.
+                for(const label of doc.querySelectorAll?.('label,span')||[]){
+                    if(label.textContent?.trim().toLowerCase()!=='point size')continue;
+                    let parent=label.parentElement;
+                    for(let depth=0;parent&&depth<3;depth++,parent=parent.parentElement){
+                        const sliders=parent.querySelectorAll('[role="slider"][aria-valuenow]');
+                        if(sliders.length!==1)continue;
+                        const value=Number(sliders[0].getAttribute('aria-valuenow'));
+                        if(Number.isFinite(value)&&value>0)return reviewAppearance={pointSize:Math.max(.5,Math.min(12,value)),source:'cvat-point-size-slider'};
+                    }
+                }
+            }catch(_){}
+            return reviewAppearance={pointSize:2,source:'review-default'};
+        }
         let reloadHold = null;
         let cloudKey = '', cloudIndex = null, spatialIndex = null, cloudLoading = null, groundCache = new Map();
         let qcColors = new Map(), colorView = null, originalColor = null, colorWrapper = null, cameraRestore = null;
@@ -221,7 +246,7 @@
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
                 activeBoxId: ann?.annotations?.activatedStateID ?? null, boxes,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
-                freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0,
+                freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0,reviewAppearance:readReviewAppearance(),
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
@@ -604,7 +629,7 @@
             const grounds=await getGrounds(ref,[ref.clientId]);return grounds[ref.clientId];
         }
         async function command(type, payload = {}) {
-            if(reloadHold&&!['GET_SNAPSHOT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
+            if(reloadHold&&!['GET_SNAPSHOT','GET_WORK_DOCUMENT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
             if (disposed) throw new Error('Adapter is stopped');
             switch (type) {
                 case 'PREPARE_RELOAD': {
@@ -634,7 +659,13 @@
                 }
                 case 'RELEASE_RELOAD': reloadHold=null;pendingObjects.delete('reload');publish();return {released:true};
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
-                case 'BATCH_SIZE_OPEN': {validate(payload.ref,true);if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.open(payload.ref.clientId);}
+                case 'GET_WORK_DOCUMENT': {
+                    const s=getSnapshot(),job=editor()?.job?.instance;
+                    if(!s.connected||typeof job?.annotations?.export!=='function'||!workLog)throw Error('Work log requires native annotation export');
+                    const data=await job.annotations.export();if(editor()?.job?.instance!==job)throw Error('Job changed while reading work log');
+                    return {jobId:s.jobId,epoch:sessionId,rows:workLog.documentRows(data,sessionId),saved:job.annotations.hasUnsavedChanges?.()===false};
+                }
+                case 'BATCH_SIZE_OPEN': {validate(payload.ref);if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.open(payload.ref.clientId);}
                 case 'BATCH_SIZE_PREVIEW': if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.preview(payload);
                 case 'BATCH_SIZE_APPLY': if(!batchSizeController)throw new Error('Batch size module unavailable');return batchSizeController.apply(payload);
                 case 'BATCH_SIZE_CANCEL': return batchSizeController?.cancel()||{cancelled:true};
@@ -642,6 +673,8 @@
                 case 'BATCH_BEGIN': if(!batchController)throw new Error('Batch module unavailable');return batchController.begin(payload);
                 case 'BATCH_FRAME': if(!batchController)throw new Error('Batch module unavailable');return batchController.read(payload);
                 case 'BATCH_PROTECT': if(!batchController)throw new Error('Batch module unavailable');return batchController.protect(payload);
+                case 'BATCH_DRAFT': if(!batchController)throw new Error('Batch module unavailable');return batchController.draft(payload);
+                case 'BATCH_RESET_DRAFT': if(!batchController)throw new Error('Batch module unavailable');return batchController.resetDraft(payload);
                 case 'BATCH_APPLY': if(!batchController)throw new Error('Batch module unavailable');return batchController.apply(payload);
                 case 'BATCH_CANCEL': return batchController?.cancel()||{cancelled:true};
                 case 'SELECT_OBJECT': return selectObject(payload.ref, !!payload.focus);
@@ -676,7 +709,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.18.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.21.0',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};

@@ -102,7 +102,7 @@ function createBatchController(env){
   const result=protectedFrame?{status:'anchor',flags:['Protected native keyframe / reviewed frame'],beforeCount:math.extractBoxROI(roi,{points:p},0).length}
    :!bracketed?{status:'review',flags:['No bounding keyframes on both sides; add another keyframe before refinement'],beforeCount:math.extractBoxROI(roi,{points:p},0).length}
    :batchMath.refinePosition(math,roi,p,ground,states.filter(s=>s.clientID!==session.clientId&&!s.outside&&s.shapeType==='cuboid').map(s=>({points:Array.from(s.points)})));
-  const card={frame:payload.frame,original,protected:!!protectedFrame,ground:{accepted:ground.accepted,confidence:ground.confidence,reason:ground.reason,a:ground.a,b:ground.b,c:ground.c,rmse:ground.rmse,inlierCount:ground.inlierCount,radius:ground.radius},
+  const card={frame:payload.frame,original,protected:!!protectedFrame,nativeKeyframe:!!state.keyframe,locked:!!state.lock,groundTruth:!!state.isGroundTruth,userProtected:session.protected.has(payload.frame),ground:{accepted:ground.accepted,confidence:ground.confidence,reason:ground.reason,a:ground.a,b:ground.b,c:ground.c,rmse:ground.rmse,inlierCount:ground.inlierCount,radius:ground.radius},
    ...result,points:batchMath.sampleROI(roi,p),analysisPointCount:roi.length,pointsAreSampled:roi.length>4000,label:state.label?.name};
   if(session!==owned||session.epoch!==epoch)throw new Error('Batch compute superseded or cancelled');
   session.proposals.set(payload.frame,{...card,state});
@@ -114,6 +114,24 @@ function createBatchController(env){
   if(running)throw new Error('Batch apply in progress');
   session.protected.add(payload.frame);session.proposals.delete(payload.frame);return {protected:true,frame:payload.frame};
  }
+ async function draft(payload){
+  token(payload);frameCheck(payload.frame);if(running||session.consumed)throw new Error('Batch already applied');
+  env.assertEditable();await unchanged();token(payload);
+  const card=session.proposals.get(payload.frame),{state}=await stateAt(payload.frame);
+  token(payload);
+  if(!card?.original||!state||state.outside||state.lock||state.isGroundTruth||session.protected.has(payload.frame))throw new Error('Frame protected or unavailable for manual editing');
+  if(state.keyframe&&payload.allowKeyframe!==true)throw new Error('Enable explicit manual keyframe editing first');
+  const p=payload.points;
+  if(!Array.isArray(p)||!math.parseCVAT16Points(p)||p.slice(6,9).some(v=>v<.01||v>100)||Math.hypot(...p.slice(0,3).map((v,i)=>v-card.original[i]))>20||p[3]!==card.original[3]||p[4]!==card.original[4])throw new Error('Invalid manual geometry');
+  const base=card.autoCard||{...card,state:undefined};
+  const next={...card,autoCard:base,manual:true,manualKeyframe:!!state.keyframe,protected:false,status:'manual',proposed:p.slice(),flags:['Manual draft: review before Apply'],delta:p.slice(0,3).map((v,i)=>v-card.original[i])};
+  session.proposals.set(payload.frame,next);const {state:unused,autoCard,...view}=next;return view;
+ }
+ async function resetDraft(payload){
+  token(payload);if(running||session.consumed)throw new Error('Batch already applied');await unchanged();token(payload);
+  const card=session.proposals.get(payload.frame);if(!card?.autoCard)throw new Error('No manual draft');
+  const base=card.autoCard;session.proposals.set(payload.frame,base);return {...base,state:undefined};
+ }
  async function apply(payload){
   token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');
   if(!Array.isArray(payload.frames)||!payload.frames.length||payload.frames.length>60)throw new Error('Select 1–60 proposed frames');
@@ -123,13 +141,14 @@ function createBatchController(env){
   await unchanged();token(payload);
   for(const f of frames){
    frameCheck(f);const proposal=session.proposals.get(f);
-   if(!proposal||proposal.protected||session.protected.has(f)||proposal.status!=='proposal')throw new Error('Selected frame has no editable proposal');
-   if(!math.parseCVAT16Points(proposal.proposed)||!sameGeometry(proposal.proposed.slice(0,3).concat(proposal.original.slice(3)),proposal.proposed))
+   if(!proposal||proposal.protected||session.protected.has(f)||!['proposal','manual'].includes(proposal.status))throw new Error('Selected frame has no editable proposal');
+   if(proposal.manualKeyframe&&payload.confirmManualKeyframes!==true)throw new Error('Confirm explicit manual edits to existing keyframes');
+   if(!math.parseCVAT16Points(proposal.proposed)||!proposal.manual&&!sameGeometry(proposal.proposed.slice(0,3).concat(proposal.original.slice(3)),proposal.proposed))
     throw new Error('Invalid position-only proposal; recompute batch');
    const {state}=await stateAt(f);token(payload);
-   if(!state||state.outside||state.keyframe||state.lock||state.isGroundTruth||!sameGeometry(Array.from(state.points),proposal.original))
+   if(!state||state.outside||state.keyframe&&!proposal.manualKeyframe||state.lock||state.isGroundTruth||!sameGeometry(Array.from(state.points),proposal.original))
     throw new Error('Frame changed or became protected; reload batch');
-   plan.push({frame:f,points:proposal.proposed});
+   plan.push({frame:f,points:proposal.proposed,manualKeyframe:proposal.manualKeyframe});
   }
   await unchanged();token(payload);if(running||session.consumed)throw new Error('Batch already applied; reopen preview');env.assertEditable();
   running=true;session.consumed=true;env.lock(true);
@@ -140,7 +159,7 @@ function createBatchController(env){
     const item=plan[index];
     await unchanged();token(payload);env.assertEditable();
     const {state}=await stateAt(item.frame);token(payload);
-    if(state.keyframe||state.lock||state.isGroundTruth)throw new Error('Frame protected during apply');
+    if(state.keyframe&&!item.manualKeyframe||state.lock||state.isGroundTruth)throw new Error('Frame protected during apply');
     state.points=item.points.slice();
     try{
      await state.save();
@@ -166,7 +185,7 @@ function createBatchController(env){
   return {appliedFrames:applied,error,partial:!!error,undo:'Each applied frame has its own native Undo entry. Save CVAT to persist.'};
  }
  function cancel(){if(running)throw new Error('Apply already started; wait for result');session=null;clouds.clear();return {cancelled:true};}
- return {open,begin,read,protect,apply,cancel};
+ return {open,begin,read,protect,draft,resetDraft,apply,cancel};
 }
 root.__C3D_CREATE_BATCH_CONTROLLER=createBatchController;
 if(typeof module!=='undefined')module.exports={createBatchController};

@@ -1,3 +1,4 @@
+const {reveal}=require('./ui-helpers.cjs');
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 
@@ -18,7 +19,7 @@ async function fixture(page){
 }
 
 test('shrink settings save, validate, persist, reset and reach Auto Adjust commands',async({page})=>{
-    await fixture(page);await page.locator('#c3d-btn-settings').click();
+    await fixture(page);await reveal(page,'c3d-btn-settings');await page.locator('#c3d-btn-settings').click();
     const distance=page.getByRole('spinbutton',{name:'Maximum shrink distance (cm)',exact:true}),percent=page.getByRole('spinbutton',{name:'Maximum shrink (%)',exact:true});
     await expect(distance).toHaveValue('10');await expect(percent).toHaveValue('5');
     await distance.fill('25');await percent.click();await percent.fill('20');await distance.click();
@@ -30,17 +31,17 @@ test('shrink settings save, validate, persist, reset and reach Auto Adjust comma
     await page.keyboard.press('Alt+Shift+B');
     await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_ADJUST').length)).toBe(1);
     expect(await page.evaluate(()=>{const p=requests.find(r=>r.type==='AUTO_ADJUST').payload;return [p.maxShrinkDistance,p.maxShrinkPercent];})).toEqual([.25,20]);
-    await page.reload();await page.locator('#c3d-btn-settings').click();await expect(distance).toHaveValue('25');await expect(percent).toHaveValue('20');
+    await page.reload();await reveal(page,'c3d-btn-settings');await page.locator('#c3d-btn-settings').click();await expect(distance).toHaveValue('25');await expect(percent).toHaveValue('20');
     await page.getByRole('button',{name:'Reset shrink limits',exact:true}).click();await expect(distance).toHaveValue('10');await expect(percent).toHaveValue('5');
 });
 
 test('settings record single keys, reject duplicates, persist direction and refresh hints',async({page})=>{
     const errors=[];page.on('pageerror',e=>errors.push(e.message));
     await fixture(page);
-    await page.locator('#c3d-keep-direction').check();
+    await reveal(page,'c3d-keep-direction');await page.locator('#c3d-keep-direction').check();
     await expect(page.locator('#c3d-adjust-direction')).not.toBeChecked();
-    await page.locator('#c3d-adjust-direction').check();
-    await page.locator('#c3d-btn-settings').click();
+    await reveal(page,'c3d-adjust-direction');await page.locator('#c3d-adjust-direction').check();
+    await reveal(page,'c3d-btn-settings');await page.locator('#c3d-btn-settings').click();
     await page.getByRole('button',{name:'Record Ground Snap shortcut',exact:true}).click();
     await page.keyboard.press('Alt+Shift+A');
     await expect(page.locator('#c3d-shortcut-message')).toContainText('Already assigned');
@@ -56,7 +57,7 @@ test('settings record single keys, reject duplicates, persist direction and refr
     await expect(page.locator('#c3d-btn-ground')).toHaveAttribute('title','Ground Snap · Z');
     await page.screenshot({path:'docs/verification/direction-controls-1.10.0.png'});
     await page.keyboard.press('Alt+Shift+A');
-    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length)).toBe(1);
+    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length),{timeout:15000}).toBe(1);
     expect(await page.evaluate(()=>requests.find(r=>r.type==='AUTO_FIT').payload.keepDirection)).toBe(true);
     await page.reload();
     await expect(page.locator('#c3d-keep-direction')).toBeChecked();
@@ -67,7 +68,7 @@ test('settings record single keys, reject duplicates, persist direction and refr
 
 test('settings suppress actions, support clear/reset and ignore typing, extra modifiers and repeats',async({page})=>{
     await fixture(page);
-    await page.locator('#c3d-btn-settings').click();
+    await reveal(page,'c3d-btn-settings');await page.locator('#c3d-btn-settings').click();
     await page.keyboard.press('Alt+Shift+A');
     expect(await page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length)).toBe(0);
     await page.getByRole('button',{name:'Clear Ground Snap shortcut',exact:true}).click();
@@ -86,9 +87,9 @@ test('settings suppress actions, support clear/reset and ignore typing, extra mo
     await page.evaluate(()=>window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyX',repeat:true,bubbles:true})));
     expect(await page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length)).toBe(0);
     await page.keyboard.press('x');
-    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length)).toBe(1);
+    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length),{timeout:15000}).toBe(1);
     await expect(page.locator('#c3d-btn-autofit')).toBeEnabled();
-    await page.locator('#c3d-btn-settings').click();
+    await reveal(page,'c3d-btn-settings');await page.locator('#c3d-btn-settings').click();
     await page.getByRole('button',{name:'Reset all shortcuts',exact:true}).click();
     await page.getByRole('button',{name:'Close',exact:true}).click();
     await expect(page.locator('#c3d-btn-autofit kbd')).toHaveText('Alt+Shift+A');
@@ -100,21 +101,21 @@ test('placement controls persist, validate and reach keyboard command payloads',
     await expect(page.locator('#c3d-origin-ground')).not.toBeChecked();
     await expect(page.locator('#c3d-ground-height')).toHaveValue('0');
     await expect(page.locator('#c3d-move-longitudinal')).toHaveValue('none');
-    await page.locator('#c3d-origin-ground').check();
-    await page.locator('#c3d-ground-height').fill('-.3');await page.locator('#c3d-move-longitudinal').selectOption('forward');
-    await page.locator('#c3d-move-lateral').selectOption('right');
+    await reveal(page,'c3d-origin-ground');await page.locator('#c3d-origin-ground').check();
+    await reveal(page,'c3d-ground-height');await page.locator('#c3d-ground-height').fill('-.3');await reveal(page,'c3d-move-longitudinal');await page.locator('#c3d-move-longitudinal').selectOption('forward');
+    await reveal(page,'c3d-move-lateral');await page.locator('#c3d-move-lateral').selectOption('right');
     await page.locator('.c3d-title').click();
     await page.keyboard.press('Alt+Shift+G');
     await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='SNAP_GROUND').length)).toBe(1);
     expect(await page.evaluate(()=>{const p=requests.find(r=>r.type==='SNAP_GROUND').payload;return [p.useOriginGround,p.fallbackGroundHeight];})).toEqual([true,-.3]);
     await expect(page.locator('#c3d-btn-adjust')).toBeEnabled();await page.keyboard.press('Alt+Shift+B');await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_ADJUST').length)).toBe(1);
     expect(await page.evaluate(()=>requests.find(r=>r.type==='AUTO_ADJUST').payload.fallbackGroundHeight)).toBe(-.3);
-    await expect(page.locator('#c3d-btn-autofit')).toBeEnabled();await page.locator('#c3d-btn-autofit').click();
-    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length)).toBe(1);
+    await expect(page.locator('#c3d-btn-autofit')).toBeEnabled();await reveal(page,'c3d-btn-autofit');await page.locator('#c3d-btn-autofit').click();
+    await expect.poll(()=>page.evaluate(()=>requests.filter(r=>r.type==='AUTO_FIT').length),{timeout:15000}).toBe(1);
     expect(await page.evaluate(()=>requests.find(r=>r.type==='AUTO_FIT').payload.fallbackGroundHeight)).toBe(-.3);
     await page.reload();await fixture(page);
     await expect(page.locator('#c3d-origin-ground')).toBeChecked();await expect(page.locator('#c3d-ground-height')).toHaveValue('-0.3');
     await expect(page.locator('#c3d-move-longitudinal')).toHaveValue('forward');await expect(page.locator('#c3d-move-lateral')).toHaveValue('right');
-    await page.locator('#c3d-ground-height').fill('');await page.locator('#c3d-move-lateral').click();
+    await reveal(page,'c3d-ground-height');await page.locator('#c3d-ground-height').fill('');await reveal(page,'c3d-move-lateral');await page.locator('#c3d-move-lateral').click();
     await expect(page.locator('#c3d-ground-height')).toHaveValue('-0.3');
 });

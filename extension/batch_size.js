@@ -20,8 +20,8 @@ function createBatchSizeController(env){
   const states=await s.job.annotations.get(frame,true,[]);current(s.token);
   return states.find(x=>x.clientID===s.clientId&&x.objectType==='track'&&x.shapeType==='cuboid');
  }
- function editable(state,frame){
-  if(state.lock||state.isGroundTruth)throw new Error('Frame '+frame+' bị khóa / ground truth');
+ function editable(state,frame,unlock=false){
+  if(state.lock&&!unlock||state.isGroundTruth)throw new Error('Frame '+frame+' bị khóa / ground truth');
   if(typeof state.save!=='function')throw new Error('Native save không khả dụng ở frame '+frame);
  }
  async function open(clientId){
@@ -75,11 +75,76 @@ function createBatchSizeController(env){
   s.plan=plan;s.planId=(s.planId||0)+1;
   return {token:s.token,planId:s.planId,mode:'attributes',clientId:s.clientId,from:p.from,to:p.to,frames:plan.writes.map(w=>w.frame),keyframes:plan.keyframes,boundaryFrames:plan.boundaries.map(w=>w.frame),skipped:plan.skipped,unchanged:plan.unchanged,globalAttributes:plan.global,attributes:specs.map(a=>({name:a.name,value:a.value,mutable:a.mutable}))};
  }
+ async function previewOutside(s,p,epoch){
+  if(typeof p.outside!=='boolean')throw new Error('Outside phải là true hoặc false');
+  const plan={mode:'outside',writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0},frames=[];
+  let changed=0;
+  for(let frame=p.from;frame<=p.to;frame++){
+   const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được track ở frame '+frame);editable(state,frame);
+   if(!env.math.parseCVAT16Points(state.points))throw new Error('Geometry không hợp lệ ở frame '+frame);
+   const before=Array.from(state.points);frames.push({frame,before,after:before.slice(),beforeOutside:!!state.outside,outside:p.outside});
+   if(!!state.outside!==p.outside)changed++;else plan.unchanged.push(frame);
+   if(state.keyframe)plan.keyframes++;
+   if(frame%20===0)await new Promise(r=>setTimeout(r,0));
+  }
+  if(changed){
+   // Snapshot every frame before writing: changing outside changes native
+   // interpolation behavior. Reuse these original geometries when unhiding.
+   plan.writes=frames;
+   for(const frame of [p.from-1,p.to+1]){
+    if(frame<s.job.startFrame||frame>s.job.stopFrame)continue;
+    const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame biên '+frame);editable(state,frame);
+    if(!env.math.parseCVAT16Points(state.points))throw new Error('Geometry biên không hợp lệ');
+    const before=Array.from(state.points);plan.boundaries.push({frame,before,after:before.slice(),beforeOutside:!!state.outside,outside:!!state.outside});
+   }
+  }
+  await unchanged(s);current(p.token);if(running||s.consumed||s.epoch!==epoch)throw new Error('Yêu cầu đã thay đổi; xem trước lại');
+  s.plan=plan;s.planId=(s.planId||0)+1;
+  return {token:s.token,planId:s.planId,mode:'outside',clientId:s.clientId,from:p.from,to:p.to,outside:p.outside,changedCount:changed,frames:plan.writes.map(w=>w.frame),keyframes:plan.keyframes,boundaryFrames:plan.boundaries.map(w=>w.frame),skipped:[],unchanged:plan.unchanged};
+ }
+ async function previewProperty(s,p,epoch){
+  const property=p.property;
+  if(!['lock','hidden','pinned','occluded','keyframe'].includes(property)||typeof p.value!=='boolean')throw new Error('Property hoặc giá trị không hợp lệ');
+  const global=['lock','hidden','pinned'].includes(property),plan={mode:'property',property,value:p.value,global,writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0};
+  if(global){
+   if(p.confirmGlobal!==true)throw new Error(property+' áp dụng TOÀN TRACK và chỉ lưu trạng thái editor; cần xác nhận');
+   const frame=p.from,state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được track');editable(state,frame,property==='lock'&&!p.value);
+   plan.globalBefore={lock:!!state.lock,hidden:!!state.hidden,pinned:!!state.pinned};
+   if(plan.globalBefore[property]!==p.value)plan.writes.push({frame,before:Array.from(state.points),property,value:p.value});else plan.unchanged.push(frame);
+  }else{
+   const track=await readTrack(s),keys=track.shapes.slice().sort((a,b)=>a.frame-b.frame);
+   for(let frame=p.from;frame<=p.to;frame++){
+    const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame '+frame);editable(state,frame);
+    const before=Array.from(state.points);if(!env.math.parseCVAT16Points(before))throw new Error('Geometry không hợp lệ');
+    if(property==='keyframe'&&!p.value){
+     const key=keys.find(k=>k.frame===frame),index=keys.indexOf(key),previous=keys[index-1];
+     // Removing visibility, occlusion or attribute anchors changes semantics,
+     // not just interpolation. Keep these explicit anchors in this operation.
+     if(!key){plan.unchanged.push(frame);continue;}
+     if(index===0||key.outside||previous&&!!previous.outside!==!!key.outside||previous&&!!previous.occluded!==!!key.occluded||(key.attributes||[]).length){plan.skipped.push(frame);continue;}
+     plan.writes.push({frame,before,property,value:false});
+    }else{
+     if(!!state[property]===p.value){plan.unchanged.push(frame);continue;}
+     plan.writes.push({frame,before,after:before.slice(),property,value:p.value,outside:!!state.outside});
+    }
+    if(state.keyframe)plan.keyframes++;
+    if(frame%20===0)await new Promise(r=>setTimeout(r,0));
+   }
+   if(plan.writes.length)for(const frame of [p.from-1,p.to+1]){
+    if(frame<s.job.startFrame||frame>s.job.stopFrame)continue;
+    const state=await stateAt(s,frame);if(!state)throw new Error('Không đọc được frame biên');editable(state,frame);
+    const before=Array.from(state.points);plan.boundaries.push({frame,before,after:before.slice(),outside:!!state.outside});
+   }
+  }
+  await unchanged(s);current(p.token);if(running||s.consumed||s.epoch!==epoch)throw new Error('Yêu cầu đã thay đổi');
+  s.plan=plan;s.planId=(s.planId||0)+1;
+  return {token:s.token,planId:s.planId,mode:'property',property,value:p.value,global,clientId:s.clientId,from:p.from,to:p.to,frames:plan.writes.map(w=>w.frame),boundaryFrames:plan.boundaries.map(w=>w.frame),skipped:plan.skipped,unchanged:plan.unchanged};
+ }
  function options(s,p){
-  if(p.mode&&!['size','attributes'].includes(p.mode))throw new Error('Chọn Kích thước hoặc Thuộc tính');
+  if(p.mode&&!['size','attributes','outside','property'].includes(p.mode))throw new Error('Chọn chức năng Batch Edit');
   if(!Number.isInteger(p.from)||!Number.isInteger(p.to)||p.from<s.job.startFrame||p.to>s.job.stopFrame||p.to<p.from||p.to-p.from+1>1000)
    throw new Error('Chọn khoảng 1–1000 frame trong job (tính cả hai đầu)');
-  if(p.mode==='attributes')return;
+  if(['attributes','outside','property'].includes(p.mode))return;
   if(!Array.isArray(p.dimensions)||p.dimensions.length!==3||!p.dimensions.every(v=>Number.isFinite(v)&&v>=0.01&&v<=100))
    throw new Error('L × W × H phải từ 0.01 đến 100 mét');
   if(!['bottom','center'].includes(p.anchor))throw new Error('Chọn giữ đáy hoặc giữ tâm');
@@ -88,6 +153,8 @@ function createBatchSizeController(env){
   const s=current(p.token);if(running||s.consumed)throw new Error('Mở lại Batch Edit');
   env.assertEditable();options(s,p);s.plan=null;const epoch=s.epoch=(s.epoch||0)+1;await unchanged(s);
   if(p.mode==='attributes')return previewAttributes(s,p,epoch);
+  if(p.mode==='outside')return previewOutside(s,p,epoch);
+  if(p.mode==='property')return previewProperty(s,p,epoch);
   const plan={writes:[],boundaries:[],skipped:[],unchanged:[],keyframes:0};
   for(let f=p.from;f<=p.to;f++){
    const state=await stateAt(s,f);
@@ -122,18 +189,18 @@ function createBatchSizeController(env){
    env.assertEditable();env.lock(true);locked=true;await unchanged(s);
    const boundaries=s.plan.boundaries.map(w=>({...w,boundary:true})),writes=s.plan.mode==='attributes'?[...s.plan.writes,...boundaries]:[...boundaries,...s.plan.writes];
    // Validate every target before the first native write, including protected boundaries.
-   for(const w of writes){const state=await stateAt(s,w.frame);if(!state)throw new Error('Track đã thay đổi');editable(state,w.frame);if(!same(Array.from(state.points),w.before))throw new Error('Box đã thay đổi');if(w.beforeAttrs&&s.schema.some(a=>String(state.attributes?.[a.id]??a.defaultValue)!==w.beforeAttrs[a.id]))throw new Error('Thuộc tính đã thay đổi');}
+   for(const w of writes){const state=await stateAt(s,w.frame);if(!state)throw new Error('Track đã thay đổi');editable(state,w.frame,w.property==='lock'&&!w.value);if(s.plan.mode==='property'&&s.plan.global&&Object.keys(s.plan.globalBefore).some(k=>!!state[k]!==s.plan.globalBefore[k]))throw new Error('Trạng thái editor đã thay đổi');if(!same(Array.from(state.points),w.before))throw new Error('Box đã thay đổi');if(w.beforeAttrs&&s.schema.some(a=>String(state.attributes?.[a.id]??a.defaultValue)!==w.beforeAttrs[a.id]))throw new Error('Thuộc tính đã thay đổi');}
    s.consumed=true;
    for(const w of writes){
     env.assertEditable();await unchanged(s);
-    const state=await stateAt(s,w.frame);editable(state,w.frame);
+    const state=await stateAt(s,w.frame);editable(state,w.frame,w.property==='lock'&&!w.value);
     // Re-read states after earlier saves to preserve native metadata and IDs.
-    if(w.attributes)state.attributes={...w.attributes};else state.points=w.after.slice();let saveError=null;
+    if(w.attributes)state.attributes={...w.attributes};else if(w.after)state.points=w.after.slice();if(Object.hasOwn(w,'outside'))state.outside=w.outside;if(w.property)state[w.property]=w.value;let saveError=null;
     try{await state.save();}catch(e){saveError=e;}
     const t=await readTrack(s),saved=t.shapes.find(x=>x.frame===w.frame);
     s.signature=signature(t);
-    const actual=w.attributes?await stateAt(s,w.frame):null;
-    const confirmed=w.attributes?actual&&same(actual.points,w.before)&&Object.entries(w.attributes).every(([id,v])=>String(actual.attributes?.[id]??s.schema.find(a=>String(a.id)===id)?.defaultValue)===v):saved&&same(saved.points,w.after);
+    const actual=w.attributes||w.property?await stateAt(s,w.frame):null;
+    const confirmed=w.property?actual&&!!actual[w.property]===w.value&&(w.property==='keyframe'&&!w.value?!saved:same(actual.points,w.before)):w.attributes?actual&&same(actual.points,w.before)&&Object.entries(w.attributes).every(([id,v])=>String(actual.attributes?.[id]??s.schema.find(a=>String(a.id)===id)?.defaultValue)===v):saved&&same(saved.points,w.after)&&(!Object.hasOwn(w,'outside')||!!saved.outside===w.outside);
     if(confirmed) (w.boundary?boundaryFrames:appliedFrames).push(w.frame);
     else throw saveError||new Error('Native save không lưu đúng box ở frame '+w.frame);
     if(saveError)throw saveError;
@@ -157,7 +224,7 @@ function createBatchSizeController(env){
    try{if(locked)await env.refresh(s.job);}catch(e){error=error||e.message;}
    if(locked)env.lock(false);running=false;
   }
-  return {appliedFrames,boundaryFrames,error,partial:!!error&&(appliedFrames.length+boundaryFrames.length>0),saveRequired:appliedFrames.length+boundaryFrames.length>0};
+  return {appliedFrames,boundaryFrames,error,partial:!!error&&(appliedFrames.length+boundaryFrames.length>0),editorOnly:s.plan.mode==='property'&&!!s.plan.global,saveRequired:!(s.plan.mode==='property'&&s.plan.global)&&appliedFrames.length+boundaryFrames.length>0};
  }
  function cancel(){if(running)throw new Error('Đang áp dụng Batch Edit');session=null;return {cancelled:true};}
  return {open,preview,apply,cancel};
