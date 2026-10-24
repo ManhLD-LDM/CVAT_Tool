@@ -19,13 +19,39 @@
         let flightFrame = null, lastFlightTime = 0, looking = false;
         let topPointer = null;
         let followEnabled=false,followTarget=null,followFrame=null,followReady=null,followStatus='Off';
+        let followSelection=null;
+        let lastOriginGround=null;
+        function rememberFollowSelection(clientId){
+            const ann=editor();
+            const target=ann?.annotations?.states?.find(s=>s.clientID===clientId&&s.shapeType==='cuboid');
+            if(!target)return;
+            followSelection={jobId:ann?.job?.instance?.id,clientId,serverId:target.serverID};
+            followReady=null;
+            publish();
+        }
+        function followSelected(event){
+            // Only canvas.doubleclicked is intentional; canvas.selected fires
+            // from CVAT's hover raycaster as well as from ordinary clicks.
+            if(!followEnabled)return;
+            const surfaces=Object.values(canvas?.html?.()||{});
+            if(!surfaces.some(surface=>surface===event.target||surface?.contains?.(event.target)))return;
+            rememberFollowSelection(event.detail?.clientID??null);
+            if(followSelection?.clientId===event.detail?.clientID)
+                event.target.dispatchEvent?.(new win.CustomEvent('canvas.selected',{detail:{clientID:followSelection.clientId}}));
+        }
+        function lockedSelection(event){
+            if(!followEnabled)return;
+            const surfaces=Object.values(canvas?.html?.()||{});
+            if(surfaces.some(surface=>surface===event.target||surface?.contains?.(event.target))&&
+                event.detail?.clientID!==followSelection?.clientId)event.stopImmediatePropagation?.();
+        }
         function followView(){
             const view=canvas?.view?.views?.perspective,camera=view?.camera,controls=view?.controls;
             return camera?.position?.clone && ((typeof controls?.setLookAt==='function'&&typeof controls.getTarget==='function')||controls?.target?.copy) && typeof win.requestAnimationFrame==='function' ? view : null;
         }
         function followMessage(message){if(followStatus!==message){followStatus=message;publish();}}
         function stopFollowing(){
-            win.cancelAnimationFrame?.(followFrame);followFrame=null;followTarget=null;followReady=null;
+            win.cancelAnimationFrame?.(followFrame);followFrame=null;followTarget=null;followReady=null;followSelection=null;
         }
         function followTick(){
             followFrame=null;
@@ -37,6 +63,7 @@
             const ann=editor(),jobId=ann?.job?.instance?.id,frame=ann?.player?.frame?.number;
             canvas=ann?.canvas?.instance||null;
             if(followTarget&&followTarget.jobId!==jobId){followTarget=null;followReady=null;}
+            if(followSelection&&followSelection.jobId!==jobId)followSelection=null;
             const view=followView();
             if(!view){followMessage('Unavailable: perspective camera controls missing');return;}
             if(cameraRestore){followReady=null;followMessage('Paused during Free Cam');return;}
@@ -47,13 +74,12 @@
                 (canvas.view.model?.data?.imageID!=null&&canvas.view.model.data.imageID!==frame)){
                 followReady=null;followMessage('Waiting for frame canvas');return;
             }
-            const states=ann.annotations?.states||[],active=ann.annotations?.activatedStateID;
-            const selected=states.find(s=>s.clientID===active&&(s.frame==null||s.frame===frame));
-            if(selected&&selected.objectType!=='track'){followTarget=null;followReady=null;followMessage('Select a track to follow across frames');return;}
-            const id=selected?.clientID??followTarget?.clientId;
-            const target=states.find(s=>s.clientID===id&&s.objectType==='track'&&s.shapeType==='cuboid'&&(s.frame==null||s.frame===frame));
-            if(!target||target.outside||target.hidden){followReady=null;followMessage(followTarget?'Paused: track absent or hidden in this frame':'Select a track to follow across frames');return;}
-            if(followTarget&&followTarget.clientId===id&&followTarget.serverId!==target.serverID){followTarget=null;followReady=null;followMessage('Track identity changed; reselect the track');return;}
+            // Only a double-click can choose a target while Target lock is on.
+            const states=ann.annotations?.states||[],active=followSelection?.clientId;
+            const id=active;
+            const target=states.find(s=>s.clientID===id&&s.shapeType==='cuboid'&&(s.frame==null||s.frame===frame));
+            if(!target||target.outside||target.hidden){followReady=null;followMessage(followSelection?`Target locked: #${id} · Paused: object absent or hidden`:'Double-click a box to lock target');return;}
+            if(followSelection.serverId!==target.serverID){followTarget=null;followReady=null;followMessage('Target identity changed; double-click the box again');return;}
             const drawn=canvas.view.drawnObjects?.[id],mesh=drawn?.cuboid?.perspective;
             if(!mesh?.getWorldPosition||!drawn.data?.points||drawn.data.points.length!==target.points.length||drawn.data.points.some((v,i)=>Math.abs(v-target.points[i])>1e-6)){
                 followReady=null;followMessage('Waiting for current track geometry');return;
@@ -80,11 +106,12 @@
                 // Capture manual orbit/zoom without pulling the camera every tick.
                 followTarget.offset=offset;
             }
-            followMessage(`Following track ${id}`);
+            followMessage(`Target locked: #${id}`);
         }
         function setFollowCamera(enabled){
-            if(enabled&&!followView())throw new Error('Follow selected object unavailable: perspective camera controls missing');
-            followEnabled=enabled;stopFollowing();followStatus=enabled?'Select a track to follow across frames':'Off';
+            if(enabled&&!followView())throw new Error('Target lock unavailable: perspective camera controls missing');
+            if(enabled===followEnabled)return {enabled};
+            followEnabled=enabled;stopFollowing();followStatus=enabled?'Double-click a box to lock target':'Off';
             if(enabled)followFrame=win.requestAnimationFrame(followTick);
             publish();return {enabled};
         }
@@ -193,6 +220,7 @@
             if (nextScope !== scope) {
                 clearPointer();
                 scope = nextScope; lastFitCase=null; cloudIndex = null; spatialIndex = null; cloudKey = ''; cloudLoading = null; groundCache.clear();
+                lastOriginGround=null;
                 clearAppearance();
                 if(cameraRestore&&cameraRestore.jobId!==jobId)stopCamera();
                 else if(cameraRestore){clearKeys();lastFlightTime=0;}
@@ -219,9 +247,11 @@
             const views = canvas?.view?.views;
             const is3D = job?.dimension === '3d' || (!job?.dimension && ann?.workspace === 'standard3d');
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
-                activeBoxId: ann?.annotations?.activatedStateID ?? null, boxes,
+                activeBoxId: followEnabled ? (followSelection?.jobId===job?.id ? followSelection.clientId : null) : ann?.annotations?.activatedStateID ?? null, boxes,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
                 freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0,
+                originGroundReference:originReference(followEnabled?followSelection?.clientId:ann?.annotations?.activatedStateID),
+                originGroundPlane:lastOriginGround,
                 capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
@@ -269,6 +299,8 @@
         }
         function selectObject(ref, focus = false) {
             const { target } = validate(ref);
+            if(followEnabled&&(followSelection?.jobId!==editor()?.job?.instance?.id||followSelection?.clientId!==target.clientID))
+                throw new Error('Target lock is on; double-click a box to change target or turn Target lock off');
             const perspective = canvas.html().perspective;
             perspective.dispatchEvent(new win.CustomEvent('canvas.selected', { detail: { clientID: target.clientID } }));
             if (getSnapshot().activeBoxId !== target.clientID) throw new Error('CVAT did not accept selection; verify editor state');
@@ -593,15 +625,94 @@
             if(!['none','forward','backward'].includes(moveLongitudinal)||!['none','left','right'].includes(moveLateral))throw new Error('Invalid mouse alignment direction');
             return {useOriginGround,fallbackGroundHeight,moveLongitudinal,moveLateral};
         }
-        function originGround(options){
-            // A configured geometry constraint, not measured road evidence. Never cache for QC.
-            return {...math.makePlane(0,0,options.fallbackGroundHeight),accepted:true,confidence:1,source:'coordinate-origin',configured:true};
+        function originReference(clientId){
+            const view=canvas?.view;
+            // Empty-space double-click calls fitCanvas(), which uses this stored
+            // target. The live controls target changes when focusing a cuboid.
+            const reset=view?.cameraSettings?.perspective?.lookAt;
+            let point=null,source='camera-reset-target';
+            if(reset?.length===3&&Array.from(reset).every(Number.isFinite))point=Array.from(reset);
+            else{
+                const axes=view?.views?.perspective?.scene?.children?.find(obj=>obj.type==='AxesHelper');
+                if(axes?.getWorldPosition&&axes.position?.clone){
+                    axes.updateWorldMatrix?.(true,false);
+                    const position=axes.getWorldPosition(axes.position.clone());
+                    point=[position.x,position.y,position.z];source='origin-marker';
+                }
+            }
+            if(!point?.every(Number.isFinite))return null;
+            const mesh=view?.drawnObjects?.[clientId]?.cuboid?.perspective,parent=mesh?.parent;
+            if(parent?.worldToLocal&&mesh.position?.clone){
+                parent.updateWorldMatrix?.(true,false);
+                const position=parent.worldToLocal(mesh.position.clone().set(...point));
+                point=[position.x,position.y,position.z];
+            }
+            return point.every(Number.isFinite)?{point,source}:null;
         }
-        async function operationGround(ref,payload,box=null){
+        async function originGround(options,ref,forEdit=true){
+            // A configured geometry constraint, not measured road evidence. Never cache for QC.
+            const ann=editor(),imageID=canvas?.view?.model?.data?.imageID;
+            if(ann?.player?.fetching||ann?.canvas?.ready===false||(imageID!=null&&imageID!==ann?.player?.frame?.number))
+                throw new Error('Wait for the current frame canvas before using the LiDAR camera reset point');
+            const reference=originReference(ref?.clientId);
+            if(!reference)throw new Error('LiDAR camera reset point unavailable; wait for the frame canvas before using origin ground');
+            validate(ref,forEdit);
+            // Origin mode is one fixed annotation Z for the whole frame.
+            // Measured road tilt belongs to local-road mode only; extending it
+            // from the sensor raises/sinks distant boxes in opposite directions.
+            const a=0,b=0,c=reference.point[2]+options.fallbackGroundHeight,orientationWarning=null;
+            if(forEdit)lastOriginGround={a,b,c,reference:reference.point,offset:options.fallbackGroundHeight,orientationWarning};
+            return {...math.makePlane(a,b,c),accepted:true,confidence:1,source:'lidar-reference',configured:true,originReference:reference,orientationWarning};
+        }
+        async function operationGround(ref,payload,box=null,forEdit=true){
             const options=placementOptions(payload);
-            if(options.useOriginGround)return originGround(options);
+            if(options.useOriginGround)return originGround(options,ref,forEdit);
             if(box){const index=await ensureCloud();validate(ref,true);return index.estimate(box);}
             const grounds=await getGrounds(ref,[ref.clientId]);return grounds[ref.clientId];
+        }
+        async function snapGroundCandidate(ref,payload,forEdit=true){
+            const options=placementOptions(payload);
+            let ground=await operationGround(ref,payload,null,forEdit),localGroundReason=null;
+            if(!options.useOriginGround&&!math.canManuallySnapGround(ground)){
+                localGroundReason=ground?.reason||'Ground below box is unreliable';
+                const index=await ensureCloud();validate(ref,forEdit);
+                ground=index.estimateLidarGround();
+            }
+            return {ground,localGroundReason};
+        }
+        async function inspectGround(payload){
+            const {ref}=payload,options=placementOptions(payload),{target,snap}=validate(ref);
+            const points=Array.from(target.points),box=math.parseCVAT16Points(points);
+            if(!box)throw new Error('Invalid box geometry');
+            const report={schemaVersion:1,jobId:snap.jobId,frame:snap.frame,clientId:ref.clientId,revision:snap.revision,
+                coordinateSystem:'annotation coordinates; meters',mode:options.useOriginGround?'origin':'local road',
+                offset:options.fallbackGroundHeight,box:{points,center:box.center,bottomZ:box.zBottom},
+                originReference:originReference(ref.clientId),worldOriginReference:originReference(),localRoad:null,selectedGround:null};
+            const describe=ground=>{
+                if(!ground)return null;
+                const result={...serializedGround(ground),source:ground.source||'point-cloud',configured:!!ground.configured,
+                    orientationWarning:ground.orientationWarning||null,originReference:ground.originReference||null};
+                if([ground.a,ground.b,ground.c].every(Number.isFinite)){
+                    const plane=math.makePlane(ground.a,ground.b,ground.c);
+                    result.heightAtBoxCenter=plane.getTargetZ(...box.center);
+                    result.bottomCorners=box.vertices.filter((_,i)=>i%2===0).map(([x,y,z])=>({x,y,z,groundZ:plane.getTargetZ(x,y),gap:z-plane.getTargetZ(x,y)}));
+                }
+                return result;
+            };
+            try{report.localRoad=describe((await getGrounds(ref,[ref.clientId]))[ref.clientId]);}
+            catch(error){report.localRoadError=error.message;}
+            try{
+                const {ground,localGroundReason}=await snapGroundCandidate(ref,payload,false);
+                report.selectedGround=describe(ground);report.localGroundReason=localGroundReason;
+                if(math.canManuallySnapGround(ground)){
+                    const preview=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
+                    report.preview={deltaZ:preview.deltaZ,bottomZ:math.parseCVAT16Points(preview.newPoints).zBottom,
+                        blockedByLargeAdjustment:Math.abs(preview.deltaZ)>1.5};
+                }else report.groundError=ground?.reason||'No reliable ground below box or near LiDAR origin';
+            }catch(error){report.groundError=error.message;}
+            const current=validate(ref);
+            if(current.snap.revision!==snap.revision||current.target.points.some((v,i)=>v!==points[i]))throw new Error('Box modified during inspection; inspect again');
+            return report;
         }
         async function command(type, payload = {}) {
             if(reloadHold&&!['GET_SNAPSHOT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
@@ -665,7 +776,7 @@
                     const spec = math.resolveDimensionSpec ? math.resolveDimensionSpec(target.label.name, subType) : math.DIMENSION_SPECS[target.label.name];
                     if(!spec)throw new Error(`No dimension rule configured for class: ${target.label.name}${subType ? ` (${subType})` : ''}`);
                     const ground=configuredGround;
-                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable local ground required; enable origin ground to use Z = 0 + offset');
+                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable local ground required; enable origin ground to use the LiDAR camera reset point + offset');
                     const preset=math.resolveFitPreset(target.label.name,subType);
                     const dimensions=payload.presetDimensions??preset?.dimensions;
                     if(!math.validFitPreset(dimensions))throw new Error('Configure valid L/W/H preset for this class/subtype first');
@@ -697,10 +808,11 @@
                     groundCache.delete(fittedKey);
                     const fitDone=now(),updated=await updateObject(payload.ref,{points:fitted}),done=now();
                     if(lastFitCase){lastFitCase.status='applied';lastFitCase.elapsedMs=done-started;}
-                    return {...updated,keepDirection:payload.keepDirection===true,preset:selection.preset,warning:selection.warnings.join(' · ')||null,aligned:selection.aligned,pointCount:cluster.length,groundFallback:false,groundSource:ground.source,groundHeight:ground.c,elapsedMs:done-started,
+                    return {...updated,keepDirection:payload.keepDirection===true,preset:selection.preset,warning:selection.warnings.join(' · ')||null,aligned:selection.aligned,pointCount:cluster.length,groundFallback:false,groundSource:ground.source,groundHeight:ground.c,orientationWarning:ground.orientationWarning||null,elapsedMs:done-started,
                         timingsMs:{groundAndIndex:groundDone-started,roi:roiDone-groundDone,cluster:clusterDone-roiDone,fit:fitDone-clusterDone,nativeSave:done-fitDone}};
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
+                case 'INSPECT_GROUND': return inspectGround(payload);
                 case 'AUTO_ADJUST': {
                     const options=math.autoAdjustOptions(payload);
                     const initial=validate(payload.ref,true).target;
@@ -727,7 +839,7 @@
                     if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
                     if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
                     if(adjustment.rejectedBoundaryCandidates)notes.push('Weak boundary patches ignored');
-                    const evidence={groundSource:ground.source,groundHeight:ground.c,groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints,rejectedBoundaryCandidates:adjustment.rejectedBoundaryCandidates};
+                    const evidence={groundSource:ground.source,groundHeight:ground.c,orientationWarning:ground.orientationWarning||null,groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints,rejectedBoundaryCandidates:adjustment.rejectedBoundaryCandidates};
                     if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
                     return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
                 }
@@ -738,7 +850,7 @@
                     const position=pointerWorld(target);let points=Array.from(target.points);
                     points[0]=position.x;points[1]=position.y;
                     let alignment={longitudinal:'none',lateral:'none'},alignmentWarning=null;
-                    let ground=options.useOriginGround?originGround(options):null;
+                    let ground=options.useOriginGround?await originGround(options,payload.ref):null;
                     let refined=false,pointCount=0,centerWarning=null,directionWarning=null,directionAdjusted=false,directionDeltaDegrees=0;
                     try {
                         const index=await ensureCloud();
@@ -772,22 +884,16 @@
                         else groundWarning='Ground adjustment exceeds 1.5m; kept Z';
                     }
                     validate(payload.ref,true);
-                    const warning=[centerWarning,directionWarning,alignmentWarning,groundWarning].filter(Boolean).join(' · ')||null;
-                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,groundSource:groundWarning?null:(ground?.source||'point-cloud'),alignment,warning};
+                    const warning=[centerWarning,directionWarning,alignmentWarning,groundWarning,ground?.orientationWarning].filter(Boolean).join(' · ')||null;
+                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,groundSource:groundWarning?null:(ground?.source||'point-cloud'),groundHeight:groundWarning?null:ground?.c,alignment,warning};
                 }
                 case 'SNAP_GROUND': {
-                    const options=placementOptions(payload);
                     validate(payload.ref,true);
-                    let ground=await operationGround(payload.ref,payload),localGroundReason=null;
-                    if(!options.useOriginGround&&!math.canManuallySnapGround(ground)){
-                        localGroundReason=ground?.reason||'Ground below box is unreliable';
-                        const index=await ensureCloud();validate(payload.ref,true);
-                        ground=index.estimateLidarGround();
-                    }
+                    const {ground,localGroundReason}=await snapGroundCandidate(payload.ref,payload);
                     if (!math.canManuallySnapGround(ground)) throw new Error('Không tìm được mặt đất đủ tin cậy dưới box hoặc gần gốc LiDAR');
                     const { target } = validate(payload.ref,true), plane = math.makePlane(ground.a,ground.b,ground.c), snap = math.snapGroundPoints(target.points,plane);
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
-                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud',groundFallback:ground.source==='lidar-origin-ground',localGroundReason,referenceXY:ground.referenceXY||null};
+                    const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,bottomZ:math.parseCVAT16Points(snap.newPoints).zBottom,orientationWarning:ground.orientationWarning||null,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud',groundFallback:ground.source==='lidar-origin-ground',localGroundReason,referenceXY:ground.referenceXY||null};
                 }
                 case 'EXPORT_ALL_ANNOTATIONS': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.exported(payload);
                 case 'PREVIEW_ANNOTATION_IMPORT': if(!annotationIO)throw new Error('Native JSON module unavailable');return annotationIO.preview(payload);
@@ -801,11 +907,11 @@
         }
         function start() {
             connect(); interval = win.setInterval(connect, 1200);
-            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
+            for (const [type, fn] of [['canvas.selected',lockedSelection],['canvas.doubleclicked',followSelected],['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
             if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
-            for (const [type, fn] of [['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
+            for (const [type, fn] of [['canvas.selected',lockedSelection],['canvas.doubleclicked',followSelected],['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};
     }

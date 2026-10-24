@@ -1504,7 +1504,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(el('c3d-adjust-direction')){el('c3d-adjust-direction').checked=settings.adjustMoveDirection;el('c3d-adjust-direction').disabled=!settingsReady||busy;}
         if(el('c3d-follow-selected')){
             const input=el('c3d-follow-selected');input.checked=settings.followSelected;input.disabled=!settingsReady||!snapshot?.capabilities?.followCamera;
-            input.parentElement.title=snapshot?.capabilities?.followCamera?'Follow the last selected track between frames; preserve orbit angle and zoom. Pauses when the track is absent or hidden.':'Follow unavailable: perspective camera or orbit controls missing';
+            input.parentElement.title=snapshot?.capabilities?.followCamera?'Double-click a box to lock its ID and camera target. Hover and single-click cannot change it. Double-click another box or turn Target lock off to release.':'Target lock unavailable: perspective camera or orbit controls missing';
             text('c3d-follow-status',settings.followSelected?(snapshot?.followCameraStatus||'Waiting for camera'):'');
         }
         for(const [id,key] of [['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']]){
@@ -1570,6 +1570,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
     }
     let batchSizeUI=null,batchUI=null,updateUI=null,importUI=null,serverImportPending=false;
     let root = null, snapshot = null, issues = [], grounds = {}, busy = false, disposed = false;
+    let groundDebug=null;
     let autoQc = true, qcColors = true, filter = 'ALL', selectedIssue = null, lastRevisionKey = '', seq = 0;
     let qcTimer = null, toastTimer = null, groundRun = 0, routeTimer = null;
     const el = id => root?.querySelector('#' + id);
@@ -1609,6 +1610,48 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         toastTimer=setTimeout(()=>{node.style.display='none';},5000);
     }
     function status(message) {text('c3d-status-msg',message);}
+    function groundDebugKey(){
+        const box=snapshot?.boxes.find(b=>b.id===snapshot.activeBoxId);
+        return JSON.stringify([scopeKey(snapshot),snapshot?.revision,box?.id,box?.points,settings.useOriginGround,settings.fallbackGroundHeight]);
+    }
+    async function inspectGround(){
+        if(busy||!settingsReady)return;
+        let ref;try{ref=reference();}catch(error){toast(error.message,true);return;}
+        const key=groundDebugKey();groundDebug=null;busy=true;renderInspector();status('Inspecting ground…');
+        try{
+            const report=await request('INSPECT_GROUND',{ref,useOriginGround:settings.useOriginGround,fallbackGroundHeight:settings.fallbackGroundHeight});
+            if(key!==groundDebugKey())return;
+            groundDebug={key,report};
+            console.info('[CVAT 3D TOOL] Ground inspection',report);
+            status('Ground inspected');
+        }catch(error){status('Ground inspection unavailable');toast(error.message,true);}
+        finally{busy=false;renderInspector();}
+    }
+    function renderGroundDebug(){
+        el('c3d-btn-ground-debug').disabled=!snapshot?.connected||snapshot.activeBoxId==null||busy||!settingsReady;
+        if(groundDebug?.key!==groundDebugKey())groundDebug=null;
+        const report=groundDebug?.report;
+        el('c3d-ground-debug-result').hidden=!report;
+        if(!report)return;
+        const meters=value=>Number.isFinite(value)?value.toFixed(3)+' m':'unavailable';
+        const g=report.selectedGround,preview=report.preview;
+        const gaps=g?.bottomCorners?.map(c=>c.gap)||[];
+        const summary=[`Box #${report.clientId} · Frame ${report.frame} · ${report.mode}`,
+            `Snap source: ${g?.source||'unavailable'}`,
+            `Ground Z at box center: ${meters(g?.heightAtBoxCenter)}`,
+            `Box lowest Z: ${meters(report.box?.bottomZ)}`,
+            `Bottom corner gaps (+ above / − below): ${gaps.length?gaps.map(meters).join(' / '):'unavailable'}`,
+            `Proposed ΔZ (+ up / − down): ${meters(preview?.deltaZ)}`,
+            `Lowest Z after snap: ${meters(preview?.bottomZ)}`,
+            `Local road Z at box center: ${meters(report.localRoad?.heightAtBoxCenter)}`,
+            report.originReference?`Reset point (annotation XYZ): ${report.originReference.point.map(meters).join(' / ')}`:'Reset point unavailable',
+            `Origin offset: ${meters(report.offset)}${report.mode==='origin'?'':' (unused in local mode)'}`,
+            preview?.blockedByLargeAdjustment?'BLOCKED: proposed movement exceeds 1.5 m':null,
+            g?.orientationWarning,report.localGroundReason,report.localRoadError,report.groundError,
+            'Read-only preview. Re-inspect after changing the box, frame or ground settings.'];
+        text('c3d-ground-debug-summary',summary.filter(Boolean).join('\n'));
+        el('c3d-ground-debug-report').value=summary.filter(Boolean).join('\n')+'\n\n'+JSON.stringify(report,null,2);
+    }
     async function action(type,payload={}) {
         if(busy||!settingsReady)return;
         // Capture settings and reference before asynchronous work begins.
@@ -1630,10 +1673,10 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.preset?' · '+result.preset.dimensions.join(' × ')+' m · grounded':''}${result.warning?' · '+result.warning:''} · review box and Save CVAT`)+timing);
                 if(result.timingsMs)console.info('[CVAT 3D TOOL] Auto-Fit timings (ms)',result.timingsMs);
             }
-            else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${Object.values(result.alignment||{}).some(v=>v!=='none')?' · face aligned: '+Object.values(result.alignment).filter(v=>v!=='none').join(' + '):''}${result.groundSource==='coordinate-origin'?' · origin ground Z '+payload.fallbackGroundHeight.toFixed(2)+'m':result.groundSource?' · snapped to ground':''}${result.warning?' · '+result.warning:''} · Save CVAT`);
-            else if(type==='AUTO_ADJUST')toast(result.previousFrame?result.message:result.unchanged?`Auto Adjust: no supported local correction${result.warning?' · '+result.warning:''}`:`Auto Adjust updated sides/top · direction preserved · bottom on ${result.groundSource==='coordinate-origin'?'origin ground':'local road'}${result.warning?' · '+result.warning:''} · review box and Save CVAT`);
+            else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${Object.values(result.alignment||{}).some(v=>v!=='none')?' · face aligned: '+Object.values(result.alignment).filter(v=>v!=='none').join(' + '):''}${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?' · origin ground Z '+(result.groundHeight??payload.fallbackGroundHeight).toFixed(2)+'m':result.groundSource?' · snapped to ground':''}${result.warning?' · '+result.warning:''} · Save CVAT`);
+            else if(type==='AUTO_ADJUST')toast(result.previousFrame?result.message:result.unchanged?`Auto Adjust: no supported local correction${result.warning?' · '+result.warning:''}`:`Auto Adjust updated sides/top · direction preserved · bottom on ${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?'origin ground':'local road'}${result.warning?' · '+result.warning:''} · review box and Save CVAT`);
             else if(type==='ROTATE'||type==='SNAP_GROUND'||type==='SET_LABEL') {
-                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${result.groundSource==='coordinate-origin'?'coordinate origin + offset':result.groundFallback?'road near LiDAR XY origin (fallback; verify remote terrain)':'local ground'} · ΔZ ${result.deltaZ.toFixed(2)}m · save via Save CVAT` : 'Editor updated · save via Save CVAT');
+                toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?'LiDAR reset point + offset':result.groundFallback?'road near LiDAR XY origin (fallback; verify remote terrain)':'local ground'} · bottom Z ${result.bottomZ?.toFixed(2)??'—'}m · ΔZ ${result.deltaZ.toFixed(2)}m${result.orientationWarning?' · '+result.orientationWarning:''} · save via Save CVAT` : 'Editor updated · save via Save CVAT');
             } else if(type==='FREECAM')toast(result.enabled?'Free Cam: WASD/QE · Shift fast · right-click drag to look · Esc exit':'Returned camera control to CVAT');
             acceptSnapshot(await request('GET_SNAPSHOT'));
             status('Ready');
@@ -1685,8 +1728,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                     <div class="c3d-fit-row"><button id="c3d-btn-autofit" class="c3d-btn-primary">AUTO-FIT BOX <kbd></kbd></button><label><input id="c3d-keep-direction" type="checkbox"> Keep direction</label></div>
                     <fieldset class="c3d-preset"><legend>Auto-Fit preset (metres)</legend><div id="c3d-preset-summary">Select a box</div><div class="c3d-preset-fields"><label>L <input id="c3d-preset-l" aria-label="Preset length" type="number" min="0.1" max="30" step="0.05"></label><label>W <input id="c3d-preset-w" aria-label="Preset width" type="number" min="0.1" max="8" step="0.05"></label><label>H <input id="c3d-preset-h" aria-label="Preset height" type="number" min="0.1" max="8" step="0.05"></label></div><div class="c3d-action-grid"><button id="c3d-preset-save" class="c3d-btn-mini">Save preset</button><button id="c3d-preset-reset" class="c3d-btn-mini">Reset preset</button></div></fieldset>
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
-                    <div class="c3d-fit-row c3d-placement-options"><label title="Unchecked: use surrounding road, including below Z = 0. Checked: use the coordinate origin plus offset."><input id="c3d-origin-ground" type="checkbox"> Use origin ground (Z = 0 + offset)</label></div>
-                    <div class="c3d-fit-row c3d-placement-options"><label>Origin ground offset (m) <input id="c3d-ground-height" type="number" step="any" value="0" style="width:80px" title="Signed road elevation in Z relative to the origin"></label></div>
+                    <div class="c3d-fit-row c3d-placement-options"><label title="Unchecked: use surrounding road, including below Z = 0. Checked: all boxes use the same horizontal Z: LiDAR camera reset point height plus offset. Road tilt is ignored."><input id="c3d-origin-ground" type="checkbox"> Use origin ground (fixed height + offset)</label></div>
+                    <div class="c3d-fit-row c3d-placement-options"><label>Origin ground offset (m) <input id="c3d-ground-height" type="number" step="any" value="0" style="width:80px" title="Signed ground height offset from the empty-space double-click camera reset point"></label></div>
                     <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
                     <div class="c3d-fit-row c3d-placement-options"><label>Longitudinal <select id="c3d-move-longitudinal"><option value="none">None</option><option value="forward">Push forward</option><option value="backward">Push backward</option></select></label><label>Lateral <select id="c3d-move-lateral"><option value="none">None</option><option value="left">Push left</option><option value="right">Push right</option></select></label></div>
                     <button id="c3d-btn-settings" class="c3d-btn-secondary">Settings &amp; shortcuts</button>
@@ -1694,7 +1737,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                     <div class="c3d-rot-grid"><button id="c3d-btn-rot-left" class="c3d-btn-mini" title="Alt+Shift+[">−90°</button><button id="c3d-btn-rot-right" class="c3d-btn-mini" title="Alt+Shift+]">+90°</button><button id="c3d-btn-flip" class="c3d-btn-mini" title="Alt+Shift+F">180°</button></div>
                 </div>
                 <div class="c3d-inspector-card"><div class="c3d-inspector-header"><span class="c3d-inspector-title">SELECTED BOX</span><button id="c3d-btn-focus" class="c3d-btn-mini">Focus</button></div>
-                    <label class="c3d-follow-option"><input id="c3d-follow-selected" type="checkbox"> Follow selected object</label><div id="c3d-follow-status" class="c3d-follow-status" role="status"></div>
+                    <label class="c3d-follow-option"><input id="c3d-follow-selected" type="checkbox"> Target lock</label><div id="c3d-follow-status" class="c3d-follow-status" role="status"></div>
                     <select id="c3d-select-box" aria-label="Select CVAT box" class="c3d-inspector-selector"></select>
                     <div class="c3d-class-row"><span>Class</span><select id="c3d-select-class" aria-label="Change box class" class="c3d-inspector-selector"></select></div>
                     <div class="c3d-inspector-grid">
@@ -1705,6 +1748,11 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                         <div class="c3d-prop-row"><span class="c3d-prop-label">Bottom Z</span><span class="c3d-prop-val" id="c3d-prop-zbot">—</span></div>
                     </div>
                     <div id="c3d-road-info" class="c3d-ground-info">Ground: LiDAR not loaded</div>
+                    <button id="c3d-btn-ground-debug" class="c3d-btn-secondary" title="Preview Ground Snap heights and source without moving the selected box">Inspect ground</button>
+                    <div id="c3d-ground-debug-result" hidden>
+                        <pre id="c3d-ground-debug-summary" class="c3d-ground-info" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+                        <details><summary>Debug report (select and copy)</summary><textarea id="c3d-ground-debug-report" aria-label="Ground debug report" readonly rows="12" style="width:100%;box-sizing:border-box"></textarea></details>
+                    </div>
                 </div>
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
@@ -1784,6 +1832,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         el('c3d-btn-toggle').addEventListener('click',()=>{const body=el('c3d-content-body');body.hidden=!body.hidden;el('c3d-btn-toggle').textContent=body.hidden?'+':'−';});
         el('c3d-btn-scan').addEventListener('click',()=>runQC(true));
         el('c3d-btn-ground').addEventListener('click',()=>action('SNAP_GROUND'));
+        el('c3d-btn-ground-debug').addEventListener('click',inspectGround);
         el('c3d-btn-autofit').addEventListener('click',()=>action('AUTO_FIT'));
         el('c3d-btn-adjust').addEventListener('click',()=>action('AUTO_ADJUST'));
         el('c3d-btn-export-fit').addEventListener('click',async()=>{
@@ -1820,6 +1869,10 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(placeholder){const option=document.createElement('option');option.value='';option.textContent=placeholder;select.appendChild(option);}
         for(const [value,label] of values){const option=document.createElement('option');option.value=String(value);option.textContent=label;select.appendChild(option);}
     }
+    function originGroundLabel() {
+        const reference=snapshot?.originGroundReference;
+        return reference?'Origin ground Z '+(reference.point[2]+settings.fallbackGroundHeight).toFixed(2)+'m · fixed horizontal height':'Origin ground: LiDAR reset point unavailable';
+    }
     function renderInspector() {
         if(!root)return;
         const math=geometry(false);
@@ -1841,6 +1894,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         text('c3d-val-count',s?.boxes.length||0);
         options(el('c3d-select-box'),(s?.boxes||[]).map(b=>[b.id,`#${b.id} · ${b.label_name}${b.subType ? ` (${b.subType})` : ''}${b.locked?' · locked':''}`]),'Select box…');
         el('c3d-select-box').value=box?String(box.id):'';
+        el('c3d-select-box').disabled=!!s?.followCameraEnabled;
+        el('c3d-select-box').title=s?.followCameraEnabled?'Double-click a box in the canvas to change the locked target':'';
         options(el('c3d-select-class'),(s?.labels||[]).map(l=>[l.id,l.name]),'—');el('c3d-select-class').value=box?String(box.labelId):'';
         el('c3d-select-class').title=box?.label_name==='vehicles' ? (box.subType ? `Vehicle (${box.subType})` : 'Vehicle profile') : '';
         const canEdit=!!box&&!box.locked&&!box.groundTruth&&cap.edit&&!busy;
@@ -1862,7 +1917,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         text('c3d-prop-pos',geom?geom.center.map(n=>n.toFixed(2)).join(' / ')+' m':'—');
         text('c3d-prop-size',geom?geom.dimensions.map(n=>n.toFixed(2)).join(' × ')+' m':'—');
         text('c3d-prop-yaw',geom?geom.yawDeg.toFixed(1)+'°':'—');text('c3d-prop-zbot',geom?geom.zBottom.toFixed(2)+' m':'—');
-        text('c3d-road-info',(settings.useOriginGround?`Origin ground Z ${settings.fallbackGroundHeight.toFixed(2)}m · `:'Ground base: surrounding road · ')+(ground?.accepted?`QC measured road${ground.confidence<.65 ? ' estimated · QC only' : ''} · ${(ground.confidence*100).toFixed(0)}% · ${ground.inlierCount} pts · RMSE ${(ground.rmse*100).toFixed(1)}cm`:ground?.reason?`Ground: ${ground.reason}`:'QC road: reading LiDAR points…'));
+        text('c3d-road-info',(settings.useOriginGround?originGroundLabel()+' · ':'Ground base: surrounding road · ')+(ground?.accepted?`QC measured road${ground.confidence<.65 ? ' estimated · QC only' : ''} · ${(ground.confidence*100).toFixed(0)}% · ${ground.inlierCount} pts · RMSE ${(ground.rmse*100).toFixed(1)}cm`:ground?.reason?`Ground: ${ground.reason}`:'QC road: reading LiDAR points…'));
+        renderGroundDebug();
     }
     async function loadGround() {
         const s=snapshot;if(!s?.connected||!s.capabilities.ground||!s.boxes.length)return;
@@ -1873,7 +1929,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             const math=geometry();
             grounds=Object.fromEntries(Object.entries(data).map(([id,g])=>[id,g.accepted?math.makePlane(g.a,g.b,g.c,g):g]));
             evaluateQC();renderInspector();
-        }catch(error){if(run===groundRun&&scope===scopeKey(snapshot)){status('QC road unavailable');text('c3d-road-info',`${settings.useOriginGround?'Origin ground Z '+settings.fallbackGroundHeight.toFixed(2)+'m':'Ground base: surrounding road'} · QC road unavailable: ${error.message}`);}}
+        }catch(error){if(run===groundRun&&scope===scopeKey(snapshot)){status('QC road unavailable');text('c3d-road-info',`${settings.useOriginGround?originGroundLabel():'Ground base: surrounding road'} · QC road unavailable: ${error.message}`);}}
     }
     function evaluateQC() {
         if(!snapshot)return;

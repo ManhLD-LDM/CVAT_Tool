@@ -75,6 +75,22 @@ async function command(type,payload={}){
         case 'AUTO_FIT':{const box=validate(payload.ref,true),ground=configuredGround(payload),preset=math.resolveFitPreset(box.label_name,box.subType),selection=math.fitPresetBox(cloudPoints,box.label_name,{points:box.points,ground,keepDirection:payload.keepDirection===true},boxes.filter(b=>b.id!==box.id),payload.presetDimensions??preset?.dimensions);const finalGround=ground;if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under final preset footprint; box unchanged');const fitted=math.snapGroundPoints(selection.fitted,math.makePlane(finalGround.a,finalGround.b,finalGround.c)).newPoints;return {...update(box,{points:fitted}),preset:selection.preset,warning:selection.warnings.join(' · '),groundFallback:false};}
         case 'AUTO_ADJUST':{const box=validate(payload.ref,true),ground=configuredGround(payload),adjusted=math.autoAdjustBox(cloudPoints,box,ground,boxes.filter(b=>b.id!==box.id),payload);if(!adjusted.changed)return {unchanged:true};return {...update(box,{points:adjusted.points}),warning:[adjusted.limitedFaces.length?'Some face corrections limited to 0.4m':null,adjusted.retainedFaces.length?'Faces without nearby surface support preserved':null,adjusted.rejectedBoundaryCandidates?'Weak boundary patches ignored':null].filter(Boolean).join(' · ')||null};}
         case 'GET_GROUNDS':{validate(payload.ref);const result={};for(const id of payload.ids||[]){const box=boxes.find(b=>b.id===id);if(!box)continue;const {getTargetZ,...data}=groundIndex.estimate(box);result[id]=data;if(id%5===0)await new Promise(r=>setTimeout(r,0));}return result;}
+        case 'INSPECT_GROUND':{
+            const box=validate(payload.ref),geom=math.parseCVAT16Points(box.points),ground=configuredGround(payload);
+            const describe=g=>{
+                const {getTargetZ,...data}=g,plane=math.makePlane(g.a,g.b,g.c);
+                return {...data,source:g.source||'point-cloud',heightAtBoxCenter:plane.getTargetZ(...geom.center),
+                    bottomCorners:geom.vertices.filter((_,i)=>i%2===0).map(([x,y,z])=>({x,y,z,groundZ:plane.getTargetZ(x,y),gap:z-plane.getTargetZ(x,y)}))};
+            };
+            const usable=math.canManuallySnapGround(ground),preview=usable?math.snapGroundPoints(box.points,ground):null;
+            return {schemaVersion:1,jobId:9426,frame:29,clientId:box.id,revision,coordinateSystem:'demo coordinates; meters',
+                mode:payload.useOriginGround?'origin':'local road',offset:payload.fallbackGroundHeight??0,
+                box:{points:[...box.points],center:geom.center,bottomZ:geom.zBottom},
+                originReference:{point:[0,0,0],source:'demo-coordinate-origin'},
+                localRoad:describe(groundIndex.estimate(box)),selectedGround:describe(ground),
+                groundError:usable?null:ground.reason||'No reliable demo road',
+                preview:preview?{deltaZ:preview.deltaZ,bottomZ:math.parseCVAT16Points(preview.newPoints).zBottom,blockedByLargeAdjustment:Math.abs(preview.deltaZ)>1.5}:null};
+        }
         case 'SNAP_GROUND':{const box=validate(payload.ref,true),ground=configuredGround(payload);const snap=math.snapGroundPoints(box.points,ground);if(Math.abs(snap.deltaZ)>1.5&&!payload.allowLargeAdjustment)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');return {...update(box,{points:snap.newPoints}),deltaZ:snap.deltaZ,confidence:null,groundSource:ground.source,groundHeight:ground.c};}
         case 'SET_QC_APPEARANCE':colors=new Map((payload.colors||[]).map(c=>[c.id,c.color]));updateMeshes();return {colored:colors.size};
         case 'CLEAR_QC_APPEARANCE':colors.clear();updateMeshes();return {cleared:true};

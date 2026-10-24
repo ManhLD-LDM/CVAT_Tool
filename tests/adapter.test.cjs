@@ -11,7 +11,7 @@ function harness(options={}) {
     const states=[makeState(1,99),makeState(99,100)];
     const perspective={dispatchEvent(event){if(event.type==='canvas.selected'){state.annotation.annotations.activatedStateID=event.detail.clientID;notify();}}};
     const colors=new Map();
-    const view={drawnObjects:Object.fromEntries(states.map(s=>[s.clientID,{data:{clientID:s.clientID,labelColor:s.label.color},cuboid:{setColor(color){colors.set(s.clientID,color);}}}])),receiveShapeColor(s){return s.label?.color||s.labelColor;},views:{}};
+    const view={cameraSettings:{perspective:{lookAt:[0,0,0]}},drawnObjects:Object.fromEntries(states.map(s=>[s.clientID,{data:{clientID:s.clientID,labelColor:s.label.color},cuboid:{setColor(color){colors.set(s.clientID,color);}}}])),receiveShapeColor(s){return s.label?.color||s.labelColor;},views:{}};
     const canvas={activate(){},html:()=>({perspective}),mode:()=>options.mode||'idle',render(){},view};
     const state={annotation:{job:{instance:{id:9426,labels,actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>dirty}}},player:{frame:{number:29}},annotations:{states,activatedStateID:null},canvas:{instance:canvas},workspace:'standard3d'}};
     const listeners=new Set(),actions=[];
@@ -121,7 +121,7 @@ test('mouse placement maps camera pan, zoom, resize and transformed top copy to 
     assert.ok(Math.abs(actual[0]-expected.x)<1e-8);assert.ok(Math.abs(actual[1]-expected.y)<1e-8);
     assert.deepEqual(actual.slice(3),seed.slice(3));assert.ok(Math.abs(Math.min(...math.cuboidVertices(actual).map(p=>p[2])))<1e-8);assert.equal(result.groundFallback,false);assert.equal(h.history.length,1);h.adapter.dispose();
 });
-test('mouse placement uses origin despite a sloped measured road, preserving rotation and size',async()=>{
+test('mouse placement ignores measured road tilt in fixed-height origin mode, preserving rotation and size',async()=>{
     const h=topHarness(),scene=new THREE.Scene(),coordinates=[];
     for(let x=-10;x<=15;x+=.3)for(let y=-10;y<=10;y+=.3)coordinates.push(x,y,.02*x+.1);
     const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
@@ -219,9 +219,9 @@ test('ground reads scene point-cloud transforms then snaps through native save',
     h.view.views.perspective={scene};
     const grounds=await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]});
     assert.ok(grounds[1].accepted);assert.ok(grounds[1].confidence>=.65);assert.ok(Math.abs(grounds[1].c-.3)<1e-6);
-    const result=await h.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:h.ref(1)});
+    const result=await h.adapter.command('SNAP_GROUND',{useOriginGround:false,ref:h.ref(1)});
     assert.ok(result.applied);assert.equal(h.history.length,1);
-    const clearance=Math.min(...math.cuboidVertices(h.state.annotation.annotations.states[0].points).map(([x,y,z])=>z));
+    const clearance=Math.min(...math.cuboidVertices(h.state.annotation.annotations.states[0].points).map(([x,y,z])=>z-.02*x+.01*y-.3));
     assert.ok(Math.abs(clearance)<1e-7);h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
 test('rotate uses native save/history + reducer action and marks unsaved',async()=>{
@@ -318,16 +318,15 @@ test('historical compact vehicle regression preserves manual ground snap',async(
     const cloud=new THREE.Points(geometry,new THREE.PointsMaterial());scene.add(cloud);h.view.views.perspective={scene};
     h.state.annotation.annotations.states[0].points=[...data.seedBox.points];h.notify();
     const before=[...h.state.annotation.annotations.states[0].points];
-    await assert.rejects(h.adapter.command('AUTO_FIT',{useOriginGround:true,ref:h.ref(1)}),/Cluster exceeds preset footprint/);
-    assert.equal(h.history.length,0);
     const snapResult=await h.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:h.ref(1)});
     assert.ok(snapResult.applied);assert.equal(h.history.length,1);
     const after=h.adapter.getSnapshot().boxes.find(b=>b.id===1).points;
     assert.deepEqual(after.slice(3),before.slice(3));
     const g=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];
     assert.ok(g.confidence<.65);assert.ok(math.canManuallySnapGround(g));
-    const expected=math.snapGroundPoints(before,math.makePlane(0,0,0)).newPoints;
-    assert.deepEqual(after,expected);
+    const plane=h.adapter.getSnapshot().originGroundPlane;
+    const clearance=Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z-plane.a*x-plane.b*y-plane.c));
+    assert.ok(Math.abs(clearance)<1e-8);
     h.adapter.dispose();geometry.dispose();cloud.material.dispose();
 });
 test('failed native mutation rejects, restores input, and emits no success action',async()=>{
@@ -415,7 +414,85 @@ for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])for(const height of [0,-.4,
     const h=topHarness();h.hover();h.state.annotation.annotations.states[0].points[2]=1.3;
     const result=await h.adapter.command(command,{useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:height});
     const after=h.adapter.getSnapshot().boxes[0].points;
-    assert.ok(Math.abs(after[2]-after[8]/2-height)<1e-8);assert.equal(result.groundSource,'coordinate-origin');assert.equal(h.history.length,1);h.adapter.dispose();
+    assert.ok(Math.abs(after[2]-after[8]/2-height)<1e-8);assert.equal(result.groundSource,'lidar-reference');assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+for(const rotation of [[0,0,.4],[.2,-.15,.7]])test(`Ground Snap puts rendered bottom at nonzero LiDAR reset point, rotation ${rotation}`,async()=>{
+    const h=harness(),box=h.state.annotation.annotations.states[0];
+    box.points=[5,2,1.2,...rotation,4,2,1.6,0,0,0,0,0,0,0];
+    h.view.cameraSettings.perspective.lookAt=[10,-3,.7];
+    // A focused box changes the live orbit target; it must never redefine ground.
+    h.view.views.perspective={controls:{target:new THREE.Vector3(100,200,30)}};
+    const before=box.points.slice();
+    const result=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true,fallbackGroundHeight:-.2});
+    const after=h.adapter.getSnapshot().boxes[0].points;
+    const mesh=new THREE.Mesh(new THREE.BoxGeometry(1,1,1));
+    mesh.position.set(...after.slice(0,3));mesh.rotation.set(...after.slice(3,6));mesh.scale.set(...after.slice(6,9));
+    assert.ok(Math.abs(new THREE.Box3().setFromObject(mesh).min.z-.5)<1e-7);
+    assert.ok(after[2]>.5);assert.equal(result.groundSource,'lidar-reference');
+    assert.ok(Math.abs(result.groundHeight-.5)<1e-8);
+    assert.deepEqual(after.slice(0,2),before.slice(0,2));assert.deepEqual(after.slice(3),before.slice(3));
+    assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+test('origin ground converts the reset point into the annotation parent coordinates',async()=>{
+    const h=harness(),parent=new THREE.Group(),mesh=new THREE.Mesh(new THREE.BoxGeometry(1,1,1));
+    parent.position.set(5,2,.4);parent.add(mesh);
+    h.view.drawnObjects[1].cuboid.perspective=mesh;
+    h.view.cameraSettings.perspective.lookAt=[5,2,.9];
+    await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true});
+    const after=h.adapter.getSnapshot().boxes[0].points;
+    mesh.position.set(...after.slice(0,3));mesh.rotation.set(...after.slice(3,6));mesh.scale.set(...after.slice(6,9));
+    assert.ok(Math.abs(new THREE.Box3().setFromObject(mesh).min.z-.9)<1e-7);h.adapter.dispose();
+});
+
+test('origin ground reads the reset marker when settings are unavailable and refuses a guessed zero',async()=>{
+    const h=harness(),scene=new THREE.Scene(),marker=new THREE.AxesHelper(5);marker.position.z=.6;scene.add(marker);
+    delete h.view.cameraSettings;h.view.views.perspective={scene};
+    await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true});
+    assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-1.6)<1e-8);
+    scene.remove(marker);await assert.rejects(h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true}),/reset point unavailable/);
+    assert.equal(h.history.length,1);h.adapter.dispose();
+});
+
+test('origin ground waits for current-frame reset point and follows its height across frames',async()=>{
+    const h=harness();
+    for(const [frame,height] of [[29,.4],[30,.8],[31,-.2]]){
+        h.state.annotation.player.frame.number=frame;
+        for(const state of h.state.annotation.annotations.states)state.frame=frame;
+        h.view.cameraSettings.perspective.lookAt=[0,0,height];
+        h.state.annotation.canvas.ready=false;
+        await assert.rejects(h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true}),/current frame canvas/);
+        h.state.annotation.canvas.ready=true;
+        await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true});
+        assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-1-height)<1e-8);
+    }
+    assert.equal(h.history.length,3);h.adapter.dispose();
+});
+
+test('origin ground keeps near, far-front and far-back boxes at the same height despite measured road tilt',async()=>{
+    const h=harness(),scene=new THREE.Scene(),coordinates=[];
+    const a=.03,b=-.015,c=.2;
+    for(let x=-9;x<=9;x+=.3)for(let y=-9;y<=9;y+=.3)coordinates.push(x,y,a*x+b*y+c);
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));
+    scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
+    h.view.cameraSettings.perspective.lookAt=[5,-3,c];
+    for(const x of [-48.11,-4.883,44.974]){
+        h.state.annotation.annotations.states[0].points=[x,2,1.3,0,0,.4,4,2,2,0,0,0,0,0,0,0];
+        const before=h.state.annotation.annotations.states[0].points.slice();
+        const payload={ref:h.ref(1),useOriginGround:true,fallbackGroundHeight:-.1};
+        const report=await h.adapter.command('INSPECT_GROUND',payload);
+        assert.equal(report.selectedGround.a,0);assert.equal(report.selectedGround.b,0);
+        assert.ok(Math.abs(report.selectedGround.heightAtBoxCenter-.1)<1e-8);
+        const result=await h.adapter.command('SNAP_GROUND',payload);
+        const after=h.adapter.getSnapshot().boxes[0].points;
+        const residuals=math.cuboidVertices(after).map(([vx,vy,vz])=>vz-.1);
+        assert.ok(Math.abs(Math.min(...residuals))<1e-6,`box at ${x}: ${Math.min(...residuals)}`);
+        assert.ok(residuals.every(v=>v>=-1e-6));assert.equal(result.orientationWarning,null);
+        assert.ok(Math.abs(result.deltaZ-report.preview.deltaZ)<1e-8);
+        assert.deepEqual(after.slice(0,2),before.slice(0,2));assert.deepEqual(after.slice(3),before.slice(3));
+    }
+    assert.equal(h.history.length,3);h.adapter.dispose();
 });
 for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])test(`${command} rejects invalid options and protects large height changes`,async()=>{
     const h=topHarness();h.hover();
@@ -428,7 +505,7 @@ for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])test(`${command} rejects in
 test('Ground Snap uses origin without cloud and overrides accepted measured road',async()=>{
     const empty=topHarness();await empty.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:empty.ref(1)});assert.equal(empty.history.length,1);empty.adapter.dispose();
     const h=adjustmentHarness();const result=await h.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:h.ref(1),fallbackGroundHeight:.8});
-    assert.equal(result.groundSource,'coordinate-origin');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-1.8)<1e-6);h.adapter.dispose();
+    assert.equal(result.groundSource,'lidar-reference');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-1.8)<1e-6);h.adapter.dispose();
 });
 
 function lidarGroundHarness(local=false){
@@ -439,6 +516,51 @@ function lidarGroundHarness(local=false){
  if(local)for(let x=22;x<=38;x+=.4)for(let y=-8;y<=8;y+=.4)coordinates.push(x,y,-1.4);
  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};return h;
 }
+
+test('ground inspection previews fixed-height origin snap despite a sloped cloud without changing QC/configured state',async()=>{
+ const h=lidarGroundHarness(),target=h.state.annotation.annotations.states[0];
+ target.points[0]=30;target.points[2]=0;
+ h.view.cameraSettings.perspective.lookAt=[0,0,-1.7];
+ const before=target.points.slice(),payload={ref:h.ref(1),useOriginGround:true,fallbackGroundHeight:.1};
+ const report=await h.adapter.command('INSPECT_GROUND',payload);
+ assert.equal(report.selectedGround.source,'lidar-reference');
+ assert.ok(Math.abs(report.selectedGround.heightAtBoxCenter+1.6)<1e-8);
+ assert.equal(report.selectedGround.heightAtBoxCenter,report.selectedGround.c);
+ assert.equal(report.selectedGround.a,0);assert.equal(report.selectedGround.b,0);
+ assert.equal(report.selectedGround.bottomCorners.length,4);
+ assert.deepEqual(target.points,before);assert.equal(h.history.length,0);
+ assert.equal(h.adapter.getSnapshot().originGroundPlane,null);
+ const applied=await h.adapter.command('SNAP_GROUND',payload);
+ assert.ok(Math.abs(report.preview.deltaZ-applied.deltaZ)<1e-9);
+ assert.ok(Math.abs(report.preview.bottomZ-applied.bottomZ)<1e-9);h.adapter.dispose();
+});
+
+test('ground inspection exposes fallback rejection and large-shift guard without editing',async()=>{
+ const h=lidarGroundHarness();h.state.annotation.annotations.states[0].points[2]=10;
+ const report=await h.adapter.command('INSPECT_GROUND',{ref:h.ref(1)});
+ assert.equal(report.selectedGround.source,'lidar-origin-ground');
+ assert.equal(report.localRoad.accepted,false);assert.ok(report.localGroundReason);
+ assert.equal(report.preview.blockedByLargeAdjustment,true);assert.equal(h.history.length,0);h.adapter.dispose();
+});
+
+test('ground inspection works on locked boxes and reports missing road or reset reference',async()=>{
+ const h=harness();h.state.annotation.annotations.states[0].lock=true;
+ let report=await h.adapter.command('INSPECT_GROUND',{ref:h.ref(1),useOriginGround:true});
+ assert.equal(report.selectedGround.source,'lidar-reference');assert.equal(report.selectedGround.orientationWarning,null);
+ assert.ok(report.localRoadError);assert.ok(Math.abs(report.preview.deltaZ)<1e-9);
+ delete h.view.cameraSettings;
+ report=await h.adapter.command('INSPECT_GROUND',{ref:h.ref(1),useOriginGround:true});
+ assert.match(report.groundError,/reset point unavailable/);assert.equal(report.selectedGround,null);
+ assert.equal(h.history.length,0);h.adapter.dispose();
+});
+
+test('ground inspection discards a report when the frame changes during point-cloud loading',async()=>{
+ const h=lidarGroundHarness();let changed=false;
+ const changing=harness({adapterEnv:{delay:async()=>{if(!changed){changed=true;changing.state.annotation.player.frame.number++;changing.notify();}}}});
+ changing.view.views.perspective=h.view.views.perspective;
+ await assert.rejects(changing.adapter.command('INSPECT_GROUND',{ref:changing.ref(1)}),/frame changed/i);
+ assert.equal(changing.history.length,0);changing.adapter.dispose();h.adapter.dispose();
+});
 test('Ground Snap falls back to measured LiDAR-origin height without contaminating local QC evidence',async()=>{
  const h=lidarGroundHarness(),before=h.adapter.getSnapshot().boxes[0].points.slice();
  const qc=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(qc.accepted,false);
@@ -459,13 +581,13 @@ test('mouse alignment and final ground resolve in one native save',async()=>{
     const result=await h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1),moveLongitudinal:'forward',moveLateral:'right',originGroundFallback:true,fallbackGroundHeight:-.5});
     const after=h.adapter.getSnapshot().boxes[0].points;
     assert.equal(result.refined,true);assert.deepEqual(result.alignment,{longitudinal:'forward',lateral:'right'});assert.ok(Math.abs(after[0]-6.4)<.08);assert.ok(Math.abs(after[1]-2.2)<.08);
-    assert.equal(result.groundSource,'coordinate-origin');assert.ok(Math.abs(after[2]-after[8]/2+.5)<1e-5);assert.equal(h.history.length,1);h.adapter.dispose();
+    assert.equal(result.groundSource,'lidar-reference');assert.ok(Math.abs(Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z+.5)))<1e-5);assert.equal(h.history.length,1);h.adapter.dispose();
 });
 
 test('origin ground works with insufficient local road evidence',async()=>{
     const h=adjustmentHarness({weakGround:true});
     const result=await h.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:-.2});
-    assert.equal(result.groundSource,'coordinate-origin');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-.8)<1e-8);assert.equal(h.history.length,1);h.adapter.dispose();
+    assert.equal(result.groundSource,'lidar-reference');assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-.8)<1e-8);assert.equal(h.history.length,1);h.adapter.dispose();
 });
 
 for(const command of ['SNAP_GROUND','AUTO_ADJUST','AUTO_FIT'])test(`${command} ignores an accepted housing-height plane and keeps QC evidence separate`,async()=>{
@@ -499,7 +621,7 @@ for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE','AUTO_ADJUST','AUTO_FIT'])te
         h.events.pointermove({target:element,clientX:200,clientY:100});
     }
     const r=await h.adapter.command(command,{ref:h.ref(1),fallbackGroundHeight:.8,presetDimensions:[4.5,2.2,2]});
-    const p=h.adapter.getSnapshot().boxes[0].points;assert.ok(Math.abs(p[2]-p[8]/2+.6)<1e-5);assert.notEqual(r.groundSource,'coordinate-origin');assert.equal(h.history.length,1);h.adapter.dispose();
+    const p=h.adapter.getSnapshot().boxes[0].points;assert.ok(Math.abs(p[2]-p[8]/2+.6)<1e-5);assert.notEqual(r.groundSource,'lidar-reference');assert.equal(h.history.length,1);h.adapter.dispose();
 });
 test('unchecked Ground Snap refuses missing road evidence; checking origin works without a cloud',async()=>{
     const h=topHarness();await assert.rejects(h.adapter.command('SNAP_GROUND',{ref:h.ref(1)}));assert.equal(h.history.length,0);

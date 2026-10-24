@@ -1,5 +1,15 @@
 # CVAT 3D TOOL 1.17.7
 
+Origin ground now uses a **fixed horizontal height**: camera reset point Z + the signed offset, with no measured road tilt. Near, far-front and far-back boxes use the same target bottom Z. This applies to Ground Snap, Move to mouse, Auto Adjust and Auto-Fit. With a reset point at Z=0 and offset 0, all snapped bottoms are at Z=0. Use local-road mode when ground should follow measured terrain instead.
+
+## Ground inspection
+
+Select a box and click **Inspect ground** below the ground/QC information. This previews Ground Snap without editing annotations, including on locked boxes. It shows ground Z at the box center, the box's lowest Z, each bottom corner's signed gap (positive = above ground), the proposed vertical movement, the chosen ground source and any fallback/tilt warnings. A movement over 1.5 m is marked blocked.
+
+Expand **Debug report (select and copy)** to copy the readable summary and JSON: box geometry, job/frame/client ID, plane coefficients, local road evidence, camera reset reference in world/annotation coordinates, offset and predicted result. The report is cleared when geometry, selection, frame or ground settings change; click Inspect ground again. Reports also appear in the browser console as `[CVAT 3D TOOL] Ground inspection`.
+
+For origin-snap debugging, inspect the same box with **Use origin ground** checked and unchecked and compare the reports. In origin mode, `a` and `b` are zero and `heightAtBoxCenter` equals `c` for every box. In local-road mode, the measured plane can slope; use `heightAtBoxCenter` and the corner gaps, because `c` is only its height at XY (0,0). The offline demo uses its synthetic coordinate origin; real CVAT reads the camera reset reference. Reload the unpacked extension and refresh CVAT after rebuilding.
+
 
 ## Full replacement restored — 1.17.7
 
@@ -100,10 +110,10 @@ Position refinement, ground confidence thresholds, dimensions/yaw preservation, 
 
 ## Selectable ground base — 1.14.4
 
-The **Use origin ground (Z = 0 + offset)** checkbox is available below Auto Adjust Box and is **unchecked by default**. It applies consistently to Ground Snap, Move to mouse, Auto Adjust and Auto-Fit:
+The **Use origin ground (fixed height + offset)** checkbox is available below Auto Adjust Box and is **unchecked by default**. It applies consistently to Ground Snap, Move to mouse, Auto Adjust and Auto-Fit:
 
 - **Unchecked:** use measured surrounding road, including road below Z = 0. The origin offset is ignored. Missing/uncertain local ground cannot silently become the origin plane.
-- **Checked:** use the coordinate-origin plane plus **Origin ground offset (m)**, default 0. Detected surfaces cannot override this explicit selection. Ground Snap can work without a loaded cloud in this mode.
+- **Checked:** use the height of CVAT’s stored empty-space double-click camera reset point plus **Origin ground offset (m)**, default 0. This is the reference point described as the LiDAR point; its height is not assumed to be numeric Z = 0. The current orbit target of a focused box is never used as ground. The box’s lowest corner touches the reference plane, preserving dimensions and rotation. Detected surfaces cannot override this explicit selection. If neither the reset target nor its native origin marker is available, the tool refuses to guess. The HUD shows the resulting ground Z.
 
 The mode and signed offset persist. The HUD names the selected base; measured ground remains separate for QC. Object centering, direction/face alignment, native Undo and existing large-Z safeguards are preserved. Auto Adjust and Auto-Fit still need object points. Local ground is rechecked at the final footprint after fitting/refinement.
 
@@ -380,17 +390,17 @@ Các báo cáo cũ mô tả thuật toán/profile tại thời điểm tạo, kh
 
 Demo dùng dữ liệu mô phỏng; cache Job 9426 có 61 box trong khi lần kiểm tra API/UI lịch sử có 62. Số issue của engine cũ không đại diện cho kết quả QC hiện tại.
 
-## Follow selected object (1.12.0)
+## Target lock
 
-Enable **Follow selected object** beside the selected-box controls to keep the perspective orbit centered on the last selected **track** when navigating forward, backward, or jumping frames. Your current orbit angle and distance are preserved; manual rotation and zoom are remembered for the next frame. The checkbox starts unchecked and persists across jobs and browser restarts.
+Enable **Target lock**, then double-click a box in the canvas to choose its client ID. The selected box and camera target stay locked to that ID while hovering, single-clicking, or navigating frames. Double-click another box to switch targets. Turning Target lock off releases the ID and restores ordinary selection. The box dropdown is disabled while the mode is on; enabling the mode waits for a fresh double-click instead of using the hovered box. The checkbox preference persists, but the target ID is cleared when the mode is turned off, the job changes, or the page reloads.
 
-Follow waits for the new frame canvas and rendered track geometry. It pauses for hidden/outside/missing tracks, Free Cam, and canvas interactions; the status beneath the checkbox explains why. Select another track to change the target; selecting a frame-local shape releases it. A job change drops the previous target. Hidden or absent tracks resume when available again. This changes only the perspective camera, creates no annotation edit or keyframe, and requires accessible orbit APIs. The fixed-frame offline demo does not expose this option.
+The camera preserves manual orbit angle and distance across frames. It waits for frame geometry and pauses when the locked box is hidden or absent, during Free Cam, or during canvas interactions. A locked track resumes when it reappears; a frame-local shape remains locked but is absent outside its frame. Target lock creates no annotation edit or keyframe and requires accessible perspective camera controls. The fixed-frame offline demo does not expose this option.
 
 ### Free Cam across frames (1.12.1)
 
 Free Cam stays enabled on next/previous/jumped frames within the same job and keeps its world position, viewing direction, and camera zoom through native scene resets or replacement cameras. Frame changes clear held movement/look input; press a movement key again to fly. Escape or the Free Cam toggle exits; changing jobs or disposing the extension also exits and restores native controls.
 
-While Free Cam is active, **Follow selected object** pauses without losing its checkbox preference. Focus selects the box but asks you to exit Free Cam before moving the camera. Native orbit/focus transitions cannot override flight. When flight ends, following resumes on the current track using the flight viewing direction and the previous orbit distance. No annotations or keyframes are changed.
+While Free Cam is active, **Target lock** pauses without losing its checkbox preference. Focus selects the box but asks you to exit Free Cam before moving the camera. Native orbit/focus transitions cannot override flight. When flight ends, following resumes on the current track using the flight viewing direction and the previous orbit distance. No annotations or keyframes are changed.
 
 ### Noise-resistant Auto Adjust (1.12.2)
 

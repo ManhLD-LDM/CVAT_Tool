@@ -1,6 +1,9 @@
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 const three=require('esbuild').buildSync({stdin:{contents:"window.__TEST_THREE=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
+async function lockFirst(page){
+    await page.evaluate(()=>document.getElementById('perspective').dispatchEvent(new CustomEvent('canvas.doubleclicked',{detail:{clientID:1}})));
+}
 async function fixture(page,{supported=true}={}){
     await page.goto('http://127.0.0.1:4173/extension/manifest.json');
     await page.setContent('<html data-c3d-demo="true"><body style="background:#111"><canvas id="perspective"></canvas></body></html>');
@@ -14,6 +17,9 @@ async function fixture(page,{supported=true}={}){
         const canvas={view,render(){},mode:()=> 'idle',activate(){},html:()=>({perspective:document.getElementById('perspective')})};
         const annotation={job:{instance:{id:1,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>false}}},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas,ready:true},workspace:'standard3d'};
         const subscribers=new Set();window.__store__={getState:()=>({annotation}),subscribe(fn){subscribers.add(fn);return()=>subscribers.delete(fn);},dispatch(){throw new Error('Unexpected annotation mutation');}};
+        document.getElementById('perspective').addEventListener('canvas.selected',event=>{
+            annotation.annotations.activatedStateID=event.detail.clientID;for(const fn of subscribers)fn();
+        });
         const render=()=>{view.model.data.imageID=annotation.player.frame.number;mesh.position.set(...box.points.slice(0,3));view.drawnObjects[1]={data:{points:box.points.slice()},cuboid:{perspective:mesh}};};render();
         window.testFollow={camera,target,box,history,render,advance(frame,center,ready=true){annotation.player.frame.number=frame;box.frame=frame;box.points.splice(0,3,...center);if(ready)render();for(const fn of subscribers)fn();}};
     },{supported});
@@ -22,27 +28,61 @@ async function fixture(page,{supported=true}={}){
 }
 
 test('follow checkbox preserves orbit through frame loading and persists across panel/browser reloads',async({page})=>{
-    await fixture(page);const checkbox=page.getByRole('checkbox',{name:'Follow selected object',exact:true});await expect(checkbox).not.toBeChecked();
-    await checkbox.check();await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    await fixture(page);const checkbox=page.getByRole('checkbox',{name:'Target lock',exact:true});await expect(checkbox).not.toBeChecked();
+    await checkbox.check();
+    await expect(page.locator('#c3d-follow-status')).toHaveText('Double-click a box to lock target');
+    await expect(page.locator('#c3d-select-box')).toHaveValue('');
+    await lockFirst(page);await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
     await page.evaluate(()=>{const h=testFollow;h.camera.position.copy(h.target).add(new __TEST_THREE.Vector3(-5,7,3));h.camera.lookAt(h.target);});
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await page.evaluate(()=>{testFollow.advance(1,[15,20,2],false);testFollow.camera.position.set(100,100,100);});
     await expect(page.locator('#c3d-follow-status')).toHaveText('Waiting for frame canvas');
     expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([2,3,1]);
-    await page.evaluate(()=>testFollow.render());await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    await page.evaluate(()=>testFollow.render());await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
     expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([15,20,2]);expect(await page.evaluate(()=>testFollow.camera.position.toArray())).toEqual([10,27,5]);
-    await fixture(page);await expect(checkbox).toBeChecked();await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    await fixture(page);await expect(checkbox).toBeChecked();await lockFirst(page);await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
     await checkbox.uncheck();await page.evaluate(()=>testFollow.advance(3,[100,200,3]));
     expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([2,3,1]);expect(await page.evaluate(()=>testFollow.history.length)).toBe(0);
 });
 
 test('follow checkbox explains missing camera APIs and remains disabled',async({page})=>{
-    await fixture(page,{supported:false});const checkbox=page.getByRole('checkbox',{name:'Follow selected object',exact:true});
+    await fixture(page,{supported:false});const checkbox=page.getByRole('checkbox',{name:'Target lock',exact:true});
     await expect(checkbox).toBeDisabled();await expect(page.locator('.c3d-follow-option')).toHaveAttribute('title',/camera or orbit controls missing/);
 });
 
+test('camera lock ignores hover and changes tracks on double-click selection',async({page})=>{
+    await fixture(page);await page.getByRole('checkbox',{name:'Target lock',exact:true}).check();await lockFirst(page);
+    await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
+    await page.evaluate(()=>{
+        const annotation=__store__.getState().annotation,view=annotation.canvas.instance.view;
+        const other={...testFollow.box,clientID:2,serverID:9,points:[20,30,2,...testFollow.box.points.slice(3)]};
+        annotation.annotations.states.push(other);
+        const mesh=new __TEST_THREE.Object3D();mesh.position.set(20,30,2);
+        view.drawnObjects[2]={data:{points:other.points.slice()},cuboid:{perspective:mesh}};
+        const surface=document.getElementById('perspective');
+        surface.addEventListener('pointermove',()=>surface.dispatchEvent(new CustomEvent('canvas.selected',{detail:{clientID:2}})));
+        surface.addEventListener('click',()=>surface.dispatchEvent(new CustomEvent('canvas.selected',{detail:{clientID:2}})));
+        surface.addEventListener('dblclick',()=>surface.dispatchEvent(new CustomEvent('canvas.doubleclicked',{detail:{clientID:2}})));
+    });
+    await page.locator('#perspective').hover();
+    await page.locator('#perspective').click();
+    await expect.poll(()=>page.evaluate(()=>__store__.getState().annotation.annotations.activatedStateID)).toBe(1);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([2,3,1]);
+    await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
+    await expect(page.locator('#c3d-select-box')).toHaveValue('1');
+    await expect(page.locator('#c3d-select-box')).toBeDisabled();
+    await page.locator('#perspective').dblclick();
+    await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #2');
+    expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([20,30,2]);
+    await expect(page.locator('#c3d-select-box')).toHaveValue('2');
+    await page.getByRole('checkbox',{name:'Target lock',exact:true}).uncheck();
+    await expect(page.locator('#c3d-select-box')).toBeEnabled();
+    expect(await page.evaluate(()=>testFollow.history.length)).toBe(0);
+});
+
 test('Free Cam survives frame changes while follow pauses, then resumes the current flight heading',async({page})=>{
-    await fixture(page);await page.getByRole('checkbox',{name:'Follow selected object',exact:true}).check();await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    await fixture(page);await page.getByRole('checkbox',{name:'Target lock',exact:true}).check();await lockFirst(page);await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
     await page.locator('#c3d-btn-freecam').click();await expect(page.locator('#c3d-follow-status')).toHaveText('Paused during Free Cam');
     await page.evaluate(()=>{
         const surface=document.getElementById('perspective');surface.dispatchEvent(new PointerEvent('pointerdown',{button:2,bubbles:true}));
@@ -56,7 +96,7 @@ test('Free Cam survives frame changes while follow pauses, then resumes the curr
     await expect(page.locator('#c3d-follow-status')).toHaveText('Paused during Free Cam');
     await page.locator('#c3d-btn-focus').click();await expect(page.locator('#c3d-toast')).toContainText('turn off Free Cam');
     expect(await page.evaluate(()=>__CVAT_COPILOT_BRIDGE.adapter.getSnapshot().freeCam)).toBe(true);
-    await page.keyboard.press('Escape');await expect(page.locator('#c3d-follow-status')).toHaveText('Following track 1');
+    await page.keyboard.press('Escape');await expect(page.locator('#c3d-follow-status')).toHaveText('Target locked: #1');
     expect(await page.evaluate(()=>testFollow.target.toArray())).toEqual([25,30,2]);
     const direction=await page.evaluate(()=>testFollow.camera.getWorldDirection(new __TEST_THREE.Vector3()).toArray());direction.forEach((v,i)=>expect(v).toBeCloseTo(before.direction[i],8));
     expect(await page.evaluate(()=>testFollow.history.length)).toBe(0);

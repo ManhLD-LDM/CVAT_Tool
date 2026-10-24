@@ -2,12 +2,12 @@ const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
 const THREEBundle=require('esbuild').buildSync({stdin:{contents:"window.__TEST_THREE=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
 
-async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true,nearGroundNoise=false,boundaryNoise=false,withGround=true,placement=null,groundHeight=0,useOriginGround=true}={}){
+async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_MOUSE',initialPoints=null,expectSave=true,nearGroundNoise=false,boundaryNoise=false,withGround=true,placement=null,groundHeight=0,useOriginGround=true,resetPoint=[0,0,0]}={}){
     await page.goto('http://127.0.0.1:4173/extension/manifest.json');
     await page.setContent('<html data-c3d-demo="true"><body><canvas id="perspective"></canvas><canvas id="top" style="position:absolute;left:100px;top:200px;width:800px;height:400px"></canvas></body></html>');
     await page.addStyleTag({path:'extension/styles.css'});
     await page.addScriptTag({content:THREEBundle});
-    await page.evaluate(({withObject,initialPoints,nearGroundNoise,boundaryNoise,withGround,groundHeight})=>{
+    await page.evaluate(({withObject,initialPoints,nearGroundNoise,boundaryNoise,withGround,groundHeight,resetPoint})=>{
         const THREE=window.__TEST_THREE,points=[];
         if(withGround)for(let x=-12;x<=12;x+=.3)for(let y=-12;y<=12;y+=.3)points.push(x,y,groundHeight);
         if(withObject)for(let i=0;i<=20;i++)for(let j=0;j<=10;j++)for(const z of [.6,.8,1,1.2,1.4])points.push(.6+(i/20-.5)*2,.3+(j/10-.5),z);
@@ -22,11 +22,11 @@ async function fixture(page,withObject,adjustDirection=false,{command='MOVE_TO_M
         const label={id:1,name:'vehicles',color:'#fff'},history=[];window.savedEdits=history;
         const box={clientID:1,frame:0,objectType:'track',shapeType:'cuboid',outside:false,lock:false,keyframe:false,label,points:[-4,-3,1,0,0,.2,4,2,2,0,0,0,0,0,0,0],async save(){history.push(this.points.slice());return {...this,keyframe:true,points:this.points.slice()};}};
         if(initialPoints)box.points=initialPoints;
-        const canvas={activate(){},mode:()=> 'idle',html:()=>({perspective,top}),view:{views:{perspective:{scene},top:{camera,renderer:{domElement:top}}}}};
+        const canvas={activate(){},mode:()=> 'idle',html:()=>({perspective,top}),view:{cameraSettings:{perspective:{lookAt:resetPoint}},views:{perspective:{scene},top:{camera,renderer:{domElement:top}}}}};
         const state={annotation:{job:{instance:{id:1,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>history.length>0}}},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas},workspace:'standard3d'}};
         const listeners=new Set();
         window.__store__={getState:()=>state,subscribe(fn){listeners.add(fn);return ()=>listeners.delete(fn);},dispatch(action){if(action.type==='UPDATE_ANNOTATIONS_SUCCESS')state.annotation.annotations.states=action.payload.states;for(const fn of listeners)fn();}};
-    },{withObject,initialPoints,nearGroundNoise,boundaryNoise,withGround,groundHeight});
+    },{withObject,initialPoints,nearGroundNoise,boundaryNoise,withGround,groundHeight,resetPoint});
     for(const file of ['geometry_math.js','cvat_adapter.js','main_world_bridge.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
     await expect(page.locator('#c3d-btn-move')).toBeEnabled();
     await expect(page.locator('#c3d-adjust-direction')).not.toBeChecked();
@@ -124,8 +124,21 @@ test('combined face alignment crosses the bridge in one unchanged-size edit',asy
 for(const command of ['MOVE_TO_MOUSE','SNAP_GROUND'])test(`${command} uses configured ground height when cloud is absent`,async({page})=>{
     await fixture(page,false,false,{command,withGround:false,placement:{originGroundFallback:true,fallbackGroundHeight:.25}});
     const p=await page.evaluate(()=>savedEdits[0]);expect(p[2]-p[8]/2).toBeCloseTo(.25,7);
-    await expect(page.locator('#c3d-toast')).toContainText(command==='SNAP_GROUND'?'coordinate origin + offset':'origin ground Z');
+    await expect(page.locator('#c3d-toast')).toContainText(command==='SNAP_GROUND'?'LiDAR reset point + offset':'origin ground Z');
     await expect(page.locator('#c3d-road-info')).not.toContainText('LiDAR ground');
+});
+
+test('Ground Snap places the rendered bottom at the empty-space camera reset height plus offset',async({page})=>{
+    await fixture(page,false,false,{command:'SNAP_GROUND',withGround:false,resetPoint:[10,-2,.65],placement:{fallbackGroundHeight:.1}});
+    const bounds=await page.evaluate(()=>{
+        const p=__store__.getState().annotation.annotations.states[0].points,T=__TEST_THREE;
+        const mesh=new T.Mesh(new T.BoxGeometry(1,1,1));
+        mesh.position.set(...p.slice(0,3));mesh.rotation.set(...p.slice(3,6));mesh.scale.set(...p.slice(6,9));
+        return {bottom:new T.Box3().setFromObject(mesh).min.z,center:p[2]};
+    });
+    expect(bounds.bottom).toBeCloseTo(.75,8);expect(bounds.center).toBeCloseTo(1.75,8);
+    await expect(page.locator('#c3d-road-info')).toContainText('Origin ground Z 0.75m');
+    await expect(page.locator('#c3d-toast')).toContainText('LiDAR reset point + offset');
 });
 
 test('origin base overrides an elevated plane and stays unchanged across frames',async({page})=>{
