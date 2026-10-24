@@ -8,7 +8,9 @@
     const shortcuts=window.__C3D_SHORTCUTS,settingsKey='c3d.settings.v1';
     let settings=shortcuts.defaults(),settingsReady=false,recording=null,settingsPanel=null;
     let saveQueue=Promise.resolve();
-    let followSyncKey='';
+    let followSyncKey='',controlsSyncKey='';
+    let referenceUI=null,helpUI=null;
+    function syncControls(){if(!settingsReady||!snapshot?.connected||!snapshot.capabilities?.controls)return;const key=snapshot.sessionId+JSON.stringify(settings);if(key===controlsSyncKey)return;controlsSyncKey=key;request('SET_CONTROLS',{settings}).catch(error=>{controlsSyncKey='';toast(error.message,true);});}
     function syncFollowCamera(){
         if(!settingsReady||!snapshot?.connected||!snapshot.capabilities?.followCamera)return;
         const key=`${snapshot.sessionId}:${settings.followSelected}`;
@@ -21,7 +23,7 @@
             const stored=globalThis.chrome?.storage?.local ? (await chrome.storage.local.get(settingsKey))[settingsKey] : JSON.parse(localStorage.getItem(settingsKey)||'null');
             settings=shortcuts.normalize(stored);
         }catch(error){console.warn('[CVAT 3D TOOL] Settings unavailable:',error.message);}
-        settingsReady=true;refreshShortcutHints();renderInspector();syncFollowCamera();
+        settingsReady=true;refreshShortcutHints();renderInspector();syncFollowCamera();syncControls();refreshAppearance?.();
     }
     function saveSettings(){
         const value=JSON.parse(JSON.stringify(settings));
@@ -29,7 +31,7 @@
             if(globalThis.chrome?.storage?.local)await chrome.storage.local.set({[settingsKey]:value});
             else localStorage.setItem(settingsKey,JSON.stringify(value));
         }).catch(error=>toast('Could not save settings: '+error.message,true));
-        refreshShortcutHints();
+        refreshShortcutHints();syncControls();
     }
     function refreshShortcutHints(){
         if(!root)return;
@@ -37,71 +39,60 @@
             const node=el(d.button);if(!node)continue;
             const hint=shortcuts.format(settings.bindings[d.id]);
             node.title=d.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse?'Move to mouse unavailable: top-view camera or canvas API missing':`${d.label} · ${hint}`;
-            if(d.id==='AUTO_ADJUST')node.title+=` · Shrink toward nearby supported faces within ${+(settings.maxShrinkDistance*100).toFixed(2)} cm or ${settings.maxShrinkPercent}% of the dimension, whichever is smaller`;
-            const kbd=node.querySelector('kbd');if(kbd)kbd.textContent=hint;
+            let kbd=node.querySelector('kbd');if(!kbd){kbd=document.createElement('kbd');node.append(kbd);}kbd.textContent=hint;
         }
         if(el('c3d-keep-direction')){el('c3d-keep-direction').checked=settings.keepDirection;el('c3d-keep-direction').disabled=!settingsReady||busy;}
-        if(el('c3d-adjust-direction')){el('c3d-adjust-direction').checked=settings.adjustMoveDirection;el('c3d-adjust-direction').disabled=!settingsReady||busy;}
         if(el('c3d-follow-selected')){
             const input=el('c3d-follow-selected');input.checked=settings.followSelected;input.disabled=!settingsReady||!snapshot?.capabilities?.followCamera;
             input.parentElement.title=snapshot?.capabilities?.followCamera?'Double-click a box to lock its ID and camera target. Hover and single-click cannot change it. Double-click another box or turn Target lock off to release.':'Target lock unavailable: perspective camera or orbit controls missing';
             text('c3d-follow-status',settings.followSelected?(snapshot?.followCameraStatus||'Waiting for camera'):'');
         }
-        for(const [id,key] of [['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']]){
+        for(const [id,key] of [['c3d-auto-move','autoMove'],['c3d-auto-ground','autoGround'],['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']]){
             const input=el(id);if(!input)continue;
             if(input.type==='checkbox')input.checked=settings[key];else if(document.activeElement!==input)input.value=String(settings[key]);
             input.disabled=!settingsReady||busy;
         }
         if(el('c3d-btn-settings'))el('c3d-btn-settings').disabled=!settingsReady;
+        helpUI?.refresh();
     }
     function closeSettings(){recording=null;settingsPanel?.remove();settingsPanel=null;el('c3d-btn-settings')?.focus();}
     function openSettings(){
         if(settingsPanel||!settingsReady)return;
-        settingsPanel=document.createElement('div');settingsPanel.className='c3d-shortcut-settings';settingsPanel.setAttribute('role','dialog');settingsPanel.setAttribute('aria-label','Keyboard shortcuts');
-        const shrinkHeading=document.createElement('strong');shrinkHeading.textContent='Auto Adjust Box — shrink limits';
-        const shrinkNote=document.createElement('p');shrinkNote.textContent='Use the smaller of these limits per face. Only nearby supported points permit shrinking. Zero disables shrinking; expansion and ground contact remain active.';
-        const shrinkFields=document.createElement('div');
-        const inputs={};
-        for(const [key,label,max,scale] of [['maxShrinkDistance','Maximum shrink distance (cm)',40,100],['maxShrinkPercent','Maximum shrink (%)',50,1]]){
-            const row=document.createElement('label');row.className='c3d-shrink-field';row.textContent=label;
-            const input=document.createElement('input');input.type='number';input.min='0';input.max=String(max);input.step='any';input.value=String(+(settings[key]*scale).toFixed(4));input.setAttribute('aria-label',label);inputs[key]=input;
-            input.onchange=()=>{
-                if(!input.value.trim()||!input.checkValidity()){input.setAttribute('aria-invalid','true');message.textContent=`Enter a value from 0 to ${max}`;return;}
-                input.removeAttribute('aria-invalid');settings[key]=input.valueAsNumber/scale;saveSettings();message.textContent='Shrink limits saved';
-            };
-            row.append(input);shrinkFields.append(row);
-        }
-        const resetShrink=document.createElement('button');resetShrink.className='c3d-btn-secondary';resetShrink.textContent='Reset shrink limits';resetShrink.onclick=()=>{const defaults=shortcuts.defaults();for(const key of Object.keys(inputs)){settings[key]=defaults[key];inputs[key].value=String(defaults[key]*(key==='maxShrinkDistance'?100:1));inputs[key].removeAttribute('aria-invalid');}saveSettings();message.textContent='Shrink defaults restored';};
-        const heading=document.createElement('strong');heading.textContent='Keyboard shortcuts';
-        const note=document.createElement('p');note.textContent='Click a shortcut, then press a key combination. Escape cancels recording. Browser-reserved keys may be unavailable; CVAT shortcuts may conflict.';
-        const list=document.createElement('div');
-        const message=document.createElement('p');message.setAttribute('role','status');message.id='c3d-shortcut-message';
-        function render(){
-            list.replaceChildren();
-            for(const d of shortcuts.definitions){
-                const row=document.createElement('div');row.className='c3d-shortcut-row';
-                const label=document.createElement('span');label.textContent=d.label;
-                const record=document.createElement('button');record.className='c3d-btn-mini';record.dataset.action=d.id;record.setAttribute('aria-label',`Record ${d.label} shortcut`);record.textContent=recording===d.id?'Press keys…':shortcuts.format(settings.bindings[d.id]);
-                record.onclick=()=>{recording=d.id;message.textContent='Press a key combination; Escape cancels.';render();list.querySelector(`[data-action="${d.id}"]`)?.focus();};
-                const clear=document.createElement('button');clear.className='c3d-btn-mini';clear.textContent='Clear';clear.setAttribute('aria-label',`Clear ${d.label} shortcut`);
-                const reset=document.createElement('button');reset.className='c3d-btn-mini';reset.textContent='Reset';reset.setAttribute('aria-label',`Reset ${d.label} shortcut`);
-                function set(value){try{shortcuts.assign(settings,d.id,value);recording=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}}
-                clear.onclick=()=>set(null);reset.onclick=()=>set(d.binding);
-                row.append(label,record,clear,reset);list.append(row);
-            }
-        }
-        const resetAll=document.createElement('button');resetAll.className='c3d-btn-secondary';resetAll.textContent='Reset all shortcuts';resetAll.onclick=()=>{settings.bindings=shortcuts.defaults().bindings;recording=null;saveSettings();message.textContent='Defaults restored';render();};
+        settingsPanel=document.createElement('div');settingsPanel.className='c3d-shortcut-settings';settingsPanel.setAttribute('role','dialog');settingsPanel.setAttribute('aria-label','Shortcuts & controls');
+        const heading=document.createElement('strong');heading.textContent='Shortcuts & controls';
+        const note=document.createElement('p');note.textContent='Record keyboard, mouse buttons, wheel, or held-key + mouse combinations. Mouse controls override native actions only in applicable viewports. Drag controls require a mouse button. Escape cancels.';
+        const list=document.createElement('div'),capture=document.createElement('div'),message=document.createElement('p');
+        message.id='c3d-shortcut-message';message.setAttribute('role','status');capture.className='c3d-control-capture';capture.tabIndex=0;capture.setAttribute('aria-label','Control capture area');capture.textContent='Select Record, then use your input here';
+        let held=null,pendingKey=null;
+        function commit(value){try{shortcuts.assign(settings,recording,value);recording=null;held=null;pendingKey=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}}
+        function render(){list.replaceChildren();for(const d of shortcuts.definitions){const row=document.createElement('div');row.className='c3d-shortcut-row';const label=document.createElement('span');label.textContent=d.label;
+            const record=document.createElement('button');record.className='c3d-btn-mini';record.dataset.action=d.id;record.textContent=recording===d.id?'Recording…':shortcuts.format(settings.bindings[d.id]);record.setAttribute('aria-label','Record '+d.label+' shortcut');
+            record.onclick=()=>{recording=d.id;held=null;pendingKey=null;message.textContent='Use the capture area. Release a key for keyboard-only, or hold it while clicking/scrolling. Native CVAT bindings may conflict.';render();capture.focus();};
+            const clear=document.createElement('button');clear.textContent='Clear';clear.className='c3d-btn-mini';clear.onclick=()=>{recording=d.id;commit(null);};clear.setAttribute('aria-label','Clear '+d.label+' shortcut');
+            const reset=document.createElement('button');reset.textContent='Reset';reset.className='c3d-btn-mini';reset.onclick=()=>{recording=d.id;commit(d.binding);};reset.setAttribute('aria-label','Reset '+d.label+' shortcut');row.append(label,record,clear,reset);list.append(row);
+        }}
+        capture.addEventListener('keydown',event=>{if(!recording||event.code==='Escape')return;event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;const value=shortcuts.fromEvent(event);if(value){held=event.code;pendingKey=value;}});
+        capture.addEventListener('keyup',event=>{if(!recording)return;event.preventDefault();event.stopImmediatePropagation();if(event.code===held){const value=pendingKey;held=null;pendingKey=null;if(value)commit(value);}});
+        for(const type of ['pointerdown','wheel'])capture.addEventListener(type,event=>{event.preventDefault();event.stopImmediatePropagation();if(!recording)return;const value=shortcuts.fromEvent(event,held);if(value)commit(value);},{passive:false});
+        for(const type of ['contextmenu','auxclick','pointerup'])capture.addEventListener(type,event=>{event.preventDefault();event.stopPropagation();});
+        capture.addEventListener('blur',()=>{held=null;pendingKey=null;});
+        settingsPanel.addEventListener('keydown',event=>{if(event.code!=='Escape')return;event.preventDefault();event.stopImmediatePropagation();if(recording){recording=null;held=null;pendingKey=null;message.textContent='Recording cancelled';render();}else closeSettings();});
+        const resetAll=document.createElement('button');resetAll.className='c3d-btn-secondary';resetAll.textContent='Reset all controls';resetAll.onclick=()=>{settings.bindings=shortcuts.defaults().bindings;recording=null;saveSettings();message.textContent='Defaults restored';render();};
         const close=document.createElement('button');close.className='c3d-btn-secondary';close.textContent='Close';close.onclick=closeSettings;
-        settingsPanel.addEventListener('keydown',event=>{
-            if(event.code==='Escape'){event.preventDefault();event.stopImmediatePropagation();if(recording){recording=null;message.textContent='Recording cancelled';render();}else closeSettings();return;}
-            if(!recording)return;
-            event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;
-            const value=shortcuts.fromEvent(event);
-            if(!value){message.textContent='Press a supported key, with optional modifiers';return;}
-            try{shortcuts.assign(settings,recording,value);recording=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}
-        },true);
-        settingsPanel.append(shrinkHeading,shrinkNote,shrinkFields,resetShrink,heading,note,list,message,resetAll,close);root.append(settingsPanel);render();close.focus();settingsPanel.scrollTop=0;
+        settingsPanel.append(heading,note,list,capture,message,resetAll,close);root.append(settingsPanel);render();close.focus();
     }
+    function mountAppearance(host){
+        host.innerHTML='<h3>Appearance</h3><label>Background <input id="c3d-background" type="color" aria-label="Viewport background"><input id="c3d-background-hex" type="text" aria-label="Background HEX" maxlength="7" placeholder="#000000"></label><button id="c3d-background-reset" class="c3d-btn-secondary">Reset background</button><label><input id="c3d-projection-follow" type="checkbox"> Follow CVAT point size</label><label>Top / Side / Front point size (px) <input id="c3d-projection-size" type="range" min="1" max="32" step="0.5"><input id="c3d-projection-number" type="number" min="1" max="32" step="0.5" aria-label="Projection point size"></label><button id="c3d-projection-reset" class="c3d-btn-secondary">Reset projection size</button><p class="c3d-task-note">Projection size is independent of the 3D viewport. See Box → Quick controls for your current viewport bindings.</p><button id="c3d-btn-reference" class="c3d-btn-secondary">Reference images</button>';
+        function refresh(){el('c3d-background').value=settings.background||'#000000';if(document.activeElement!==el('c3d-background-hex'))el('c3d-background-hex').value=settings.background||'';el('c3d-projection-follow').checked=settings.projectionFollow;for(const id of ['c3d-projection-size','c3d-projection-number']){if(document.activeElement!==el(id))el(id).value=settings.projectionSize;el(id).disabled=settings.projectionFollow;}}
+        el('c3d-background').oninput=e=>{settings.background=e.target.value;saveSettings();refresh();};
+        el('c3d-background-hex').onchange=e=>{if(!/^#[0-9a-f]{6}$/i.test(e.target.value)){toast('Use a six-digit HEX color, e.g. #243447',true);refresh();return;}settings.background=e.target.value.toLowerCase();saveSettings();refresh();};
+        el('c3d-background-reset').onclick=()=>{settings.background=null;saveSettings();refresh();};
+        el('c3d-projection-follow').onchange=e=>{settings.projectionFollow=e.target.checked;saveSettings();refresh();};
+        for(const id of ['c3d-projection-size','c3d-projection-number'])el(id).oninput=e=>{const value=Number(e.target.value);if(!Number.isFinite(value)||value<1||value>32)return;settings.projectionSize=value;saveSettings();refresh();};
+        el('c3d-projection-reset').onclick=()=>{settings.projectionFollow=true;settings.projectionSize=2;saveSettings();refresh();};
+        el('c3d-btn-reference').onclick=()=>{referenceUI??=window.__C3D_REFERENCE_IMAGES_UI?.mount({request,toast,getSnapshot:()=>snapshot});referenceUI?.open();};refresh();return refresh;
+    }
+    let refreshAppearance=null;
     function geometry(required=true) {
         const api=window.__CVAT_COPILOT_MATH;
         if(api && ['makePlane','parseCVAT16Points','auditFrame'].every(name=>typeof api[name]==='function'))return api;
@@ -201,21 +192,22 @@
             if(!preset?.dimensions){toast('Set and save L/W/H preset for this class/subtype first',true);return;}
             payload={...payload,keepDirection:settings.keepDirection,presetDimensions:preset.dimensions};
         }
-        if(type==='AUTO_ADJUST')payload={...payload,maxShrinkDistance:settings.maxShrinkDistance,maxShrinkPercent:settings.maxShrinkPercent};
+        if(type==='AUTO_ADJUST')payload={...payload,autoMove:settings.autoMove,autoGround:settings.autoGround,moveLongitudinal:settings.moveLongitudinal,moveLateral:settings.moveLateral};
         if(['SNAP_GROUND','MOVE_TO_MOUSE','AUTO_ADJUST','AUTO_FIT'].includes(type))payload={...payload,useOriginGround:settings.useOriginGround,fallbackGroundHeight:settings.fallbackGroundHeight};
-        if(type==='MOVE_TO_MOUSE')payload={...payload,adjustDirection:settings.adjustMoveDirection,moveLongitudinal:settings.moveLongitudinal,moveLateral:settings.moveLateral};
-        let ref;try{if(type!=='FREECAM')ref=reference();}catch(error){toast(error.message,true);return;}
+        let ref;try{if(!['FREECAM','AIM_TOP'].includes(type))ref=reference();}catch(error){toast(error.message,true);return;}
         busy=true;renderInspector();status('Processing…');
         try {
             if(type==='AUTO_FIT'){toast(payload.keepDirection?'Auto-Fitting: keeping direction…':'Auto-Fitting: applying fixed preset, aligning position/direction and checking ground…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
-            const result=await request(type,type==='FREECAM'?payload:{ref,...payload});
+            const result=await request(type,['FREECAM','AIM_TOP'].includes(type)?payload:{ref,...payload});
             if(type==='AUTO_FIT'){
                 const timing=Number.isFinite(result.elapsedMs)?` · ${(result.elapsedMs/1000).toFixed(2)}s`:'';
                 toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.preset?' · '+result.preset.dimensions.join(' × ')+' m · grounded':''}${result.warning?' · '+result.warning:''} · review box and Save CVAT`)+timing);
                 if(result.timingsMs)console.info('[CVAT 3D TOOL] Auto-Fit timings (ms)',result.timingsMs);
             }
-            else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${Object.values(result.alignment||{}).some(v=>v!=='none')?' · face aligned: '+Object.values(result.alignment).filter(v=>v!=='none').join(' + '):''}${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?' · origin ground Z '+(result.groundHeight??payload.fallbackGroundHeight).toFixed(2)+'m':result.groundSource?' · snapped to ground':''}${result.warning?' · '+result.warning:''} · Save CVAT`);
-            else if(type==='AUTO_ADJUST')toast(result.previousFrame?result.message:result.unchanged?`Auto Adjust: no supported local correction${result.warning?' · '+result.warning:''}`:`Auto Adjust updated sides/top · direction preserved · bottom on ${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?'origin ground':'local road'}${result.warning?' · '+result.warning:''} · review box and Save CVAT`);
+            else if(type==='AIM_TOP')toast(result.message);
+            else if(type==='MOVE_TO_MOUSE')toast('Box center moved to cursor · size, orientation and Z preserved · Save CVAT');
+            else if(type==='CORNER_TO_MOUSE')toast('Nearest corner moved to cursor · Save CVAT');
+            else if(type==='AUTO_ADJUST')toast(result.unchanged?'Auto Adjust: no change needed':'Auto Adjust complete · size and orientation preserved · Save CVAT');
             else if(type==='ROTATE'||type==='SNAP_GROUND'||type==='SET_LABEL') {
                 toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?'LiDAR reset point + offset':result.groundFallback?'road near LiDAR XY origin (fallback; verify remote terrain)':'local ground'} · bottom Z ${result.bottomZ?.toFixed(2)??'—'}m · ΔZ ${result.deltaZ.toFixed(2)}m${result.orientationWarning?' · '+result.orientationWarning:''} · save via Save CVAT` : 'Editor updated · save via Save CVAT');
             } else if(type==='FREECAM')toast(result.enabled?'Free Cam: WASD/QE · Shift fast · right-click drag to look · Esc exit':'Returned camera control to CVAT');
@@ -236,7 +228,7 @@
         if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
         snapshot=next;
         workUI?.onSnapshot(next);
-        syncFollowCamera();
+        syncFollowCamera();syncControls();refreshAppearance?.();void referenceUI?.onSnapshot(next);
         if(!root && shouldShow())createHUD();
         if(!root)return;
         renderInspector();
@@ -263,19 +255,20 @@
         const inspector=group('Thông tin box');inspector.append(root.querySelector('.c3d-class-row'));const geometryDetails=details('Vị trí, kích thước & ground');geometryDetails.append(root.querySelector('.c3d-inspector-grid'));move('c3d-road-info',geometryDetails);move('c3d-btn-ground-debug',geometryDetails);move('c3d-ground-debug-result',geometryDetails);inspector.append(geometryDetails);panels.box.append(inspector);
         const quick=group('Căn chỉnh nhanh'),actions=node('div','c3d-quick-actions');move('c3d-btn-autofit',actions);move('c3d-btn-ground',actions);quick.append(actions);
         quick.append(root.querySelector('.c3d-rot-grid'));panels.box.append(quick);
-        const advanced=details('Preset & căn chỉnh nâng cao');advanced.append(root.querySelector('.c3d-preset'));advanced.append(el('c3d-keep-direction').closest('label'));move('c3d-btn-adjust',advanced);
-        for(const id of ['c3d-origin-ground','c3d-ground-height','c3d-btn-move','c3d-move-longitudinal'])advanced.append(el(id).closest('.c3d-fit-row'));
+        const advanced=details('Preset & căn chỉnh nâng cao');advanced.append(root.querySelector('.c3d-preset'));advanced.append(el('c3d-keep-direction').closest('label'));
+        const auto=details('Auto Adjust options');move('c3d-btn-adjust',quick);auto.append(el('c3d-auto-move').closest('.c3d-fit-row'),el('c3d-move-longitudinal').closest('.c3d-fit-row'));quick.append(auto);
+        for(const id of ['c3d-origin-ground','c3d-ground-height','c3d-btn-move'])advanced.append(el(id).closest('.c3d-fit-row'));
         quick.append(advanced);
         const qc=panels.qc;qc.append(root.querySelector('.c3d-metrics-bar'));move('c3d-btn-scan',qc);qc.append(root.querySelector('.c3d-toggles'),root.querySelector('.c3d-issue-header-bar'),root.querySelector('.c3d-legend'));move('c3d-issue-list',qc);
         const camera=group('Điều hướng camera');move('c3d-btn-freecam',camera);camera.append(el('c3d-follow-selected').closest('label'));move('c3d-follow-status',camera);camera.append(node('p','c3d-task-note','Free Cam và Target lock chỉ thay đổi góc nhìn, không sửa annotation.'));panels.camera.append(camera);
-        const appearance=group('Hiển thị LiDAR');appearance.append(node('p','c3d-task-note','Point size sử dụng thiết lập Appearance của CVAT. Batch Review có đồng bộ và tùy chỉnh riêng ngay trong cửa sổ review.'));panels.camera.append(appearance);
+        const appearance=group('Appearance');panels.camera.append(appearance);
         const data=group('Annotation toàn job');data.append(node('p','c3d-task-note','JSON gồm mọi frame và thay đổi chưa lưu trong editor. Đối chiếu #clientID trước khi áp dụng.'));move('c3d-btn-export-ann',data);move('c3d-btn-import-replace',data);move('c3d-file-import',data);
         const danger=details('Xóa annotation & import mới');danger.classList.add('c3d-danger-zone');danger.append(node('p','c3d-task-note','Xóa toàn bộ annotation hiện tại; CVAT cấp ID mới. Có bước xác nhận và tải bản dự phòng.'));move('c3d-btn-import-recreate',danger);data.append(danger);panels.data.append(data);
         const session=details('Phiên CVAT & import/export server');move('c3d-session',session);panels.data.append(session);
-        const settingsGroup=group('Cài đặt công cụ');move('c3d-btn-settings',settingsGroup);settingsGroup.append(node('p','c3d-task-note','Phím tắt, giới hạn Auto Adjust và các thiết lập đã lưu.'));const debug=details('Chẩn đoán Auto-Fit');move('c3d-btn-export-fit',debug);settingsGroup.append(debug);panels.settings.append(settingsGroup);
+        const settingsGroup=group('Cài đặt công cụ');move('c3d-btn-settings',settingsGroup);settingsGroup.append(node('p','c3d-task-note','Keyboard, mouse buttons, wheel and drag controls.'));const debug=details('Chẩn đoán Auto-Fit');move('c3d-btn-export-fit',debug);settingsGroup.append(debug);panels.settings.append(settingsGroup);
         const batches=node('section','c3d-task-batches');batches.append(node('h3','','Nhiều frame'));const batchActions=node('div','c3d-action-grid');move('c3d-batch',batchActions);move('c3d-batch-size',batchActions);batches.append(batchActions);
-        const updater=root.querySelector('.c3d-update-row');workspace.append(nav,pages);body.replaceChildren(context,selected,workspace,batches,updater);root.append(footer);
-        const titleLabels={'c3d-btn-autofit':'Auto-Fit','c3d-btn-ground':'Snap ground','c3d-btn-adjust':'Auto Adjust','c3d-btn-scan':'Quét QC','c3d-btn-export-ann':'Export toàn job (.json)','c3d-btn-settings':'Phím tắt & Auto Adjust'};
+        const updater=root.querySelector('.c3d-update-row');workspace.append(nav,pages);body.replaceChildren(context,selected,workspace,batches,updater);root.append(footer);refreshAppearance=mountAppearance(appearance);
+        const titleLabels={'c3d-btn-autofit':'Auto-Fit','c3d-btn-ground':'Snap ground','c3d-btn-adjust':'Auto Adjust','c3d-btn-scan':'Quét QC','c3d-btn-export-ann':'Export toàn job (.json)','c3d-btn-settings':'Shortcuts & controls'};
         for(const [id,label] of Object.entries(titleLabels)){const n=el(id);n.firstChild.textContent=label+' ';}
         let active='box',expanded=false,position=null;const header=root.querySelector('.c3d-header');
         el('c3d-btn-toggle').setAttribute('aria-expanded','true');
@@ -314,7 +307,8 @@
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row c3d-placement-options"><label title="Unchecked: use surrounding road, including below Z = 0. Checked: all boxes use the same horizontal Z: LiDAR camera reset point height plus offset. Road tilt is ignored."><input id="c3d-origin-ground" type="checkbox"> Use origin ground (fixed height + offset)</label></div>
                     <div class="c3d-fit-row c3d-placement-options"><label>Origin ground offset (m) <input id="c3d-ground-height" type="number" step="any" value="0" style="width:80px" title="Signed ground height offset from the empty-space double-click camera reset point"></label></div>
-                    <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
+                    <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button></div>
+                    <div class="c3d-fit-row"><label><input id="c3d-auto-move" type="checkbox" checked> Move to mouse</label><label><input id="c3d-auto-ground" type="checkbox" checked> Ground snap</label></div>
                     <div class="c3d-fit-row c3d-placement-options"><label>Longitudinal <select id="c3d-move-longitudinal"><option value="none">None</option><option value="forward">Push forward</option><option value="backward">Push backward</option></select></label><label>Lateral <select id="c3d-move-lateral"><option value="none">None</option><option value="left">Push left</option><option value="right">Push right</option></select></label></div>
                     <button id="c3d-btn-settings" class="c3d-btn-secondary">Settings &amp; shortcuts</button>
                     <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="Chỉ export 1 box đang chọn + LiDAR xung quanh để debug thuật toán">Export Auto-Fit Case (Debug 1 Box)</button>
@@ -341,7 +335,7 @@
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.21.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.22.3 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>Promise.all([saveQueue,workUI?.flush()]),afterSave:()=>workUI?.flush(),importPending:()=>serverImportPending});
@@ -383,13 +377,12 @@
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
-        for(const [id,key] of [['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']])el(id).addEventListener('change',event=>{
+        for(const [id,key] of [['c3d-auto-move','autoMove'],['c3d-auto-ground','autoGround'],['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']])el(id).addEventListener('change',event=>{
             const input=event.target;
             if(input.type==='number'&&(!input.value.trim()||!Number.isFinite(input.valueAsNumber))){input.value=String(settings[key]);toast('Enter a finite signed ground height in meters',true);return;}
             settings[key]=input.type==='checkbox'?input.checked:input.type==='number'?input.valueAsNumber:input.value;
             saveSettings();renderInspector();
         });
-        el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
         el('c3d-follow-selected').addEventListener('change',event=>{settings.followSelected=event.target.checked;followSyncKey='';saveSettings();syncFollowCamera();});
         el('c3d-btn-settings').addEventListener('click',openSettings);
         function editPreset(reset=false){
@@ -447,6 +440,7 @@
         root.addEventListener('pointerup',()=>{drag=null;});
         taskUI=arrangeTasks();
         workUI=window.__C3D_WORK_UI?.mount({root,panel:taskUI.workPanel,request,snapshot:()=>snapshot,toast});
+        helpUI=window.__C3D_FEATURE_HELP?.create({getBinding:id=>shortcuts.format(settings.bindings[id])});helpUI?.mountPanel(root);
         renderInspector();
     }
     function options(select,values,placeholder) {
@@ -487,17 +481,17 @@
         const canEdit=!!box&&!box.locked&&!box.groundTruth&&cap.edit&&!busy;
         for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
         const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!settingsReady||(!settings.useOriginGround&&!cap.ground);
-        el('c3d-btn-ground').title='Snap xuống mặt đất cục bộ; nếu thiếu điểm, dùng cao độ đường đo gần gốc LiDAR XY (0,0). Giả định hệ tọa độ theo xe LiDAR; cần kiểm tra địa hình xa xe.';
+        el('c3d-btn-ground').title='Use reliable local ground, or the explicitly enabled origin ground. Missing local ground leaves the box unchanged.';
         el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
         el('c3d-btn-autofit').disabled ||= !settingsReady;
-        el('c3d-btn-adjust').disabled=!canEdit||!cap.ground||!settingsReady;
+        el('c3d-btn-adjust').disabled=!canEdit||!settingsReady;
         el('c3d-btn-move').disabled=!canEdit||!cap.moveToMouse||!settingsReady;
         refreshShortcutHints();
         el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
         el('c3d-batch-size').disabled=!box||box.objectType!=='track'||box.groundTruth||!cap.batchSize||!cap.edit||busy;
         el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
-        el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
+        el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);el('c3d-btn-freecam').setAttribute('aria-pressed',String(!!s?.freeCam));el('c3d-btn-freecam').firstChild.textContent=s?.freeCam?'Free Cam · ON ':'Free Cam ';
         el('c3d-btn-focus').disabled=!box||!cap.selection;el('c3d-btn-scan').disabled=!s?.connected;
         text('c3d-prop-subtype',box?.subType ? box.subType.toUpperCase() : (box ? 'None' : '—'));
         text('c3d-prop-pos',geom?geom.center.map(n=>n.toFixed(2)).join(' / ')+' m':'—');
@@ -567,6 +561,7 @@
         container.scrollTop=scroll;
     }
     function keydown(event) {
+        if(snapshot?.capabilities?.controls)return;
         if(event.target?.closest?.('.c3d-task-nav'))return;
         if(!root||!settingsReady||settingsPanel||event.repeat||event.isComposing||event.target?.closest?.('input:not([type="checkbox"]):not([type="radio"]),textarea,select,[contenteditable]:not([contenteditable="false"]),[role="dialog"],dialog')||document.querySelector('[role="dialog"],dialog[open]'))return;
         const pressed=shortcuts.fromEvent(event);if(!pressed)return;
@@ -577,6 +572,11 @@
         if(match.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse){toast('Move to mouse unavailable: top-view camera or canvas API missing',true);return;}
         actions[match.id]();
     }
+    function control(event){let data;try{data=JSON.parse(event.detail);}catch(_){return;}if(data.error){toast(data.error,true);return;}if(busy||settingsPanel||!settingsReady)return;
+        const type=data.action,payload={pointer:data.pointer};
+        const actions={AUTO_FIT:()=>action('AUTO_FIT',payload),AUTO_ADJUST:()=>action('AUTO_ADJUST',payload),SNAP_GROUND:()=>action('SNAP_GROUND'),MOVE_TO_MOUSE:()=>action(data.pointer?.name==='perspective'?'AIM_TOP':'MOVE_TO_MOUSE',payload),CORNER_TO_MOUSE:()=>action('CORNER_TO_MOUSE',payload),FLIP:()=>action('ROTATE',{degrees:180}),ROTATE_LEFT:()=>action('ROTATE',{degrees:-90}),ROTATE_RIGHT:()=>action('ROTATE',{degrees:90}),QC:()=>runQC(true),FREECAM:()=>action('FREECAM',{enabled:!snapshot?.freeCam})};actions[type]?.();
+    }
+    window.addEventListener('c3d:control:v3',control);
     function shouldShow(){
         if(document.documentElement.dataset.c3dDemo==='true')return true;
         const path=window.location.pathname;
@@ -586,11 +586,11 @@
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){helpUI?.dispose();helpUI=null;referenceUI?.dispose();referenceUI=null;refreshAppearance=null;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
-        window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
+        helpUI?.dispose();helpUI=null;referenceUI?.dispose();referenceUI=null;disposed=true;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);window.removeEventListener('c3d:control:v3',control);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
     const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args),onImportSubmitted:()=>{serverImportPending=true;}});

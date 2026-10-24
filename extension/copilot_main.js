@@ -372,108 +372,36 @@
         return seededClusters(points, currentBox, ground, distance)[0]?.cluster || [];
     }
 
-    // Local cleanup of five faces. Ground fixes the bottom; heading is immutable.
-    // Unlike Auto-Fit, this does not impose class dimensions or search for a heading.
-    function autoAdjustOptions(options = {}) {
-        const {maxShrinkDistance = .1,maxShrinkPercent = 5}=options;
-        if(!Number.isFinite(maxShrinkDistance)||maxShrinkDistance<0||maxShrinkDistance>.4||!Number.isFinite(maxShrinkPercent)||maxShrinkPercent<0||maxShrinkPercent>50)throw new Error('Shrink limits must be 0–40 cm and 0–50%');
-        return {maxShrinkDistance,maxShrinkPercent};
+    // Position-only adjustment: close gaps without changing dimensions or orientation.
+    function autoAdjustOptions(options={}) {
+        return {autoMove:options.autoMove!==false,autoGround:options.autoGround!==false,
+            moveLongitudinal:['forward','backward'].includes(options.moveLongitudinal)?options.moveLongitudinal:'none',
+            moveLateral:['left','right'].includes(options.moveLateral)?options.moveLateral:'none'};
     }
-    function autoAdjustBox(points, currentBox, ground, neighborBoxes = [], options = {}) {
-        const {maxShrinkDistance,maxShrinkPercent}=autoAdjustOptions(options);
-        const original=Array.from(currentBox.points||currentBox);
-        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
-        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
-        if(!canManuallySnapGround(ground)||(ground.confidence!=null&&ground.confidence<.65))throw new Error('Reliable ground required for Auto Adjust; box unchanged');
-        const plane=makePlane(ground.a,ground.b,ground.c),snap=snapGroundPoints(original,plane);
-        if(Math.abs(snap.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
-        const base=snap.newPoints,c=Math.cos(base[5]),s=Math.sin(base[5]),owned=new Set();
-        const roi=extractBoxROI(points,{points:base},.4);
-        const rmse=Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0;
-        const groundClearance=Math.max(.2,3*rmse);
-        // Remove the entire near-ground band before clustering. Otherwise road
-        // returns can bridge into the object and supply false face evidence.
-        // Use each point's local plane height so slopes are handled correctly.
-        const local=roi.filter(p=>p[2]-plane.getTargetZ(p[0],p[1])>groundClearance+1e-6);
-        const excludedNearGroundPoints=roi.length-local.length;
-        for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(local,box,.02))owned.add(p);
-        const clusters=seededClusters(local.filter(p=>!owned.has(p)),{points:base},ground,.45).map(({cluster})=>{
-            const interior=extractBoxROI(cluster,{points:base},0),cells=new Set(interior.map(p=>p.map(v=>Math.floor(v/.08)).join(',')));
-            return {cluster,inside:cells.size};
-        }).filter(item=>item.inside>=10&&item.cluster.length>=20).sort((a,b)=>b.inside-a.inside);
-        if(!clusters.length)throw new Error(`Insufficient object points above the ${(groundClearance*100).toFixed(0)}cm ground exclusion band; box unchanged`);
-        if(clusters[1]&&clusters[1].inside>=clusters[0].inside*.8)throw new Error('Ambiguous object clusters inside this box; Auto Adjust left it unchanged');
-        const cluster=clusters[0].cluster,cells=new Map();
-        for(const p of cluster){const key=p.map(v=>Math.floor(v/.08)).join(',');if(!cells.has(key))cells.set(key,[c*(p[0]-base[0])+s*(p[1]-base[1]),-s*(p[0]-base[0])+c*(p[1]-base[1]),p[2]]);}
-        const support=[...cells.values()];
-        if(support.length<12)throw new Error('Too few occupied object cells; box unchanged');
-        const extent=(band,axis)=>{let lo=Infinity,hi=-Infinity;for(const p of band){lo=Math.min(lo,p[axis]);hi=Math.max(hi,p[axis]);}return hi-lo;};
-        let rejectedBoundaryCandidates=0;
-        function supportedPatch(band,other){
-            // A few returns or a one-dimensional noise streak are not a surface.
-            // Work in occupied cells, so duplicated returns cannot buy confidence.
-            const grid=new Map(),radius=.24,key=p=>p.map(v=>Math.floor(v/radius));
-            for(const p of band){const k=key(p).join(',');if(!grid.has(k))grid.set(k,[]);grid.get(k).push(p);}
-            const seen=new Set();
-            for(const seed of band){
-                if(seen.has(seed))continue;
-                const patch=[seed];seen.add(seed);
-                for(let i=0;i<patch.length;i++){
-                    const p=patch[i],[x,y,z]=key(p);
-                    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)for(let dz=-1;dz<=1;dz++)for(const q of grid.get(`${x+dx},${y+dy},${z+dz}`)||[]){
-                        if(!seen.has(q)&&Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2])<=radius+1e-8){seen.add(q);patch.push(q);}
-                    }
-                }
-                if(patch.length>=6&&other.every(a=>extent(patch,a)>=Math.min(.15,base[6+a]*.15)-1e-8)&&other.some(a=>extent(patch,a)>=Math.min(.25,base[6+a]*.25)-1e-8))return patch;
-            }
-            return null;
+    function autoAdjustBox(points,currentBox,ground,neighborBoxes=[],options={}) {
+        const original=Array.from(currentBox.points||currentBox),result=original.slice(),opts=autoAdjustOptions(options);
+        if(!parseCVAT16Points(original))throw Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw Error('Auto Adjust push supports upright boxes only');
+        if(!canManuallySnapGround(ground))throw Error('Reliable ground required to exclude road points from pushing');
+        const clearance=Math.max(.2,3*(Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0));
+        const aboveGround=points.filter(q=>q[2]-(ground.a*q[0]+ground.b*q[1]+ground.c)>clearance+1e-6);
+        const owned=new Set();for(const b of neighborBoxes)if(parseCVAT16Points(b.points))for(const q of extractBoxROI(aboveGround,b,.02))owned.add(q);
+        const candidates=seededClusters(aboveGround.filter(q=>!owned.has(q)),{points:original},ground,.45).filter(c=>c.cluster.length>=20);
+        if(!candidates.length)throw Error('No supported object points; box unchanged');
+        if(candidates[1]?.overlap>=candidates[0].overlap*.6)throw Error('Ambiguous object clusters; box unchanged');
+        const cells=new Map();for(const q of candidates[0].cluster){const k=q.map(v=>Math.floor(v/.12)).join(',');if(!cells.has(k))cells.set(k,q);}
+        if(cells.size<10)throw Error('Too few occupied cells for supported contact');
+        const c=Math.cos(original[5]),s=Math.sin(original[5]),xs=[],ys=[];
+        for(const q of cells.values()){const x=q[0]-original[0],y=q[1]-original[1];xs.push(c*x+s*y);ys.push(-s*x+c*y);}
+        const bounds=values=>{values.sort((a,b)=>a-b);return [values[Math.floor((values.length-1)*.01)],values[Math.ceil((values.length-1)*.99)]];};
+        const shifts=[0,0],alignment={longitudinal:opts.moveLongitudinal,lateral:opts.moveLateral};
+        for(const [axis,choice,values] of [[0,opts.moveLongitudinal,xs],[1,opts.moveLateral,ys]]){
+            if(choice==='none')continue;const [lo,hi]=bounds(values),size=original[6+axis];
+            if(hi-lo>size+1e-6||lo < -size/2-.02||hi>size/2+.02)throw Error('Supported object extends beyond the box; resize manually before pushing');
+            shifts[axis]=choice==='forward'||choice==='left'?Math.max(0,lo+size/2):Math.min(0,hi-size/2);
         }
-        function edge(axis,sign){
-            const sorted=support.slice().sort((a,b)=>sign*(a[axis]-b[axis]));
-            for(let i=0;i<sorted.length;i++){
-                if(i&&sorted[i][axis]===sorted[i-1][axis])continue;
-                let j=i;while(j<sorted.length&&sign*(sorted[j][axis]-sorted[i][axis])<=.06+1e-8)j++;
-                if(j-i<6){rejectedBoundaryCandidates++;continue;}
-                const band=sorted.slice(i,j),other=[0,1,2].filter(a=>a!==axis);
-                const patch=supportedPatch(band,other);
-                if(patch){
-                    const values=patch.map(p=>p[axis]).sort((a,b)=>a-b);
-                    // A local surface estimate, not the extreme of a mixed band.
-                    const value=values[Math.floor(values.length/2)],uncertainOutside=support.filter(p=>sign*(p[axis]-value)<-.03-1e-8).length>=3;
-                    return {value,band:patch,uncertainOutside};
-                }
-                rejectedBoundaryCandidates++;
-            }
-            return null;
-        }
-        const old=[-base[6]/2,base[6]/2,-base[7]/2,base[7]/2,base[2]+base[8]/2],next=old.slice();
-        const names=['rear','front','right','left','top'],limitedFaces=[],retainedFaces=[];
-        for(let face=0;face<5;face++){
-            const axis=face<2?0:face<4?1:2,sign=face<4&&face%2===0?1:-1,e=edge(axis,sign);
-            if(!e){retainedFaces.push(names[face]);continue;}
-            const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
-            // Weak outlying returns cannot justify expansion, but may be a real
-            // thin part. Do not shrink through a group of such uncertain returns.
-            if(shrinking&&e.uncertainOutside){retainedFaces.push(names[face]);continue;}
-            // Never walk a face across an occluded region, even on repeated
-            // presses: distant evidence means preserve, not clamp-and-shrink.
-            const shrinkLimit=Math.min(maxShrinkDistance,base[6+axis]*maxShrinkPercent/100);
-            if(shrinking&&sign*(e.value-old[face])>shrinkLimit+1e-8){retainedFaces.push(names[face]);continue;}
-            // Empty space alone is not evidence of a hidden surface. Side
-            // shrinking needs vertical surface support; top needs an XY patch.
-            if(shrinking&&(axis<2?extent(e.band,2)<Math.min(.25,base[8]*.2):extent(e.band,0)<Math.min(.25,base[6]*.2)||extent(e.band,1)<Math.min(.2,base[7]*.2))){retainedFaces.push(names[face]);continue;}
-            const delta=desired-old[face];if(!shrinking&&Math.abs(delta)>.4+1e-8)limitedFaces.push(names[face]);
-            if(Math.abs(delta)>.01)next[face]=old[face]+Math.max(-.4,Math.min(.4,delta));
-        }
-        const dx=(next[0]+next[1])/2,dy=(next[2]+next[3])/2,result=original.slice();
-        result[0]=base[0]+c*dx-s*dy;result[1]=base[1]+s*dx+c*dy;
-        result[6]=next[1]-next[0];result[7]=next[3]-next[2];
-        const bottom=Math.max(...[[-1,-1],[-1,1],[1,-1],[1,1]].map(([x,y])=>plane.getTargetZ(result[0]+c*x*result[6]/2-s*y*result[7]/2,result[1]+s*x*result[6]/2+c*y*result[7]/2)));
-        result[8]=next[4]-bottom;result[2]=bottom+result[8]/2;
-        if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
-        if(result[8]<base[8]-Math.min(maxShrinkDistance,base[8]*maxShrinkPercent/100)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
-        return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
-            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints,rejectedBoundaryCandidates};
+        result[0]+=c*shifts[0]-s*shifts[1];result[1]+=s*shifts[0]+c*shifts[1];
+        return {points:result,alignment,pointCount:cells.size,shifts};
     }
 
     // Mouse placement is a position correction, not a dimension or heading fit.
@@ -857,6 +785,198 @@
     root.__CVAT_COPILOT_MATH = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
+
+;
+/* Shared shortcut definitions and validation. Storage belongs to the isolated HUD. */
+(function(root){
+    'use strict';
+    const definitions = [
+        ['AUTO_FIT','Auto-Fit','KeyA','c3d-btn-autofit'],
+        ['AUTO_ADJUST','Auto Adjust Box','KeyB','c3d-btn-adjust'],
+        ['SNAP_GROUND','Ground Snap','KeyG','c3d-btn-ground'],
+        ['MOVE_TO_MOUSE','Move to mouse','KeyM','c3d-btn-move'],
+        ['QC','Run QC','KeyL','c3d-btn-scan'],
+        ['FREECAM','Free Cam toggle','KeyC','c3d-btn-freecam'],
+        ['ROTATE_LEFT','Rotate −90°','BracketLeft','c3d-btn-rot-left'],
+        ['ROTATE_RIGHT','Rotate +90°','BracketRight','c3d-btn-rot-right'],
+        ['FLIP','Rotate 180°','KeyF','c3d-btn-flip'],
+    ].map(([id,label,code,button])=>({id,label,button,binding:{code,alt:true,shift:true,ctrl:false,meta:false}}));
+    definitions.find(d=>d.id==='MOVE_TO_MOUSE').binding={code:'KeyM',alt:false,shift:false,ctrl:false,meta:false};
+    definitions.push({id:'CORNER_TO_MOUSE',label:'Nearest corner to cursor · Top/Side/Front',binding:{code:'KeyE',alt:false,shift:false,ctrl:false,meta:false}},
+        {id:'ROTATE_DRAG',label:'Rotate by circular drag · 3D',gesture:true,binding:{code:'Mouse0',hold:'KeyR',alt:false,shift:false,ctrl:false,meta:false}});
+    const validCode=code=>typeof code==='string'&&/^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-9]|1[0-9]|2[0-4])|Arrow(Up|Down|Left|Right)|BracketLeft|BracketRight|Backquote|Backslash|Comma|Period|Slash|Semicolon|Quote|Minus|Equal|Space|Enter|Tab|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Numpad(Add|Subtract|Multiply|Divide|Decimal|Enter))$/.test(code);
+    function binding(value){
+        if(!value||!(validCode(value.code)||/^(Mouse[0-4]|WheelUp|WheelDown)$/.test(value.code))||!['alt','shift','ctrl','meta'].every(k=>typeof value[k]==='boolean'))return null;
+        if(value.hold&&(!validCode(value.hold)||! /^(Mouse|Wheel)/.test(value.code)))return null;
+        return {code:value.code,...(value.hold?{hold:value.hold}:{}),alt:value.alt,shift:value.shift,ctrl:value.ctrl,meta:value.meta};
+    }
+    const signature=b=>b?`${b.code}:${b.hold||''}:${+b.alt}${+b.shift}${+b.ctrl}${+b.meta}`:'';
+    const fromEvent=(e,hold)=>binding({code:e.type==='wheel'?(e.deltaY<0?'WheelUp':e.deltaY>0?'WheelDown':''):e.type==='pointerdown'||e.type==='mousedown'?`Mouse${e.button}`:e.code,...(hold?{hold}:{}),alt:!!e.altKey,shift:!!e.shiftKey,ctrl:!!e.ctrlKey,meta:!!e.metaKey});
+    function format(b){
+        if(!b)return 'Unassigned';
+        const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
+        const mouse={Mouse0:'Left mouse',Mouse1:'Middle mouse',Mouse2:'Right mouse',Mouse3:'Mouse back',Mouse4:'Mouse forward',WheelUp:'Wheel up',WheelDown:'Wheel down'};
+        return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',b.hold?.replace(/^Key|^Digit/,''),mouse[b.code]||names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
+    }
+    const defaults=()=>({version:2,keepDirection:false,useOriginGround:false,fallbackGroundHeight:0,moveLongitudinal:'none',moveLateral:'none',presetOverrides:{},followSelected:false,autoMove:true,autoGround:true,background:null,projectionFollow:true,projectionSize:2,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    function normalize(raw){
+        const result=defaults();
+        if(!raw||![1,2].includes(raw.version))return result;
+        result.keepDirection=raw.keepDirection===true;
+        result.autoMove=raw.autoMove!==false;result.autoGround=raw.autoGround!==false;
+        result.background=/^#[0-9a-f]{6}$/i.test(raw.background)?raw.background:null;
+        result.projectionFollow=raw.projectionFollow!==false;
+        if(Number.isFinite(raw.projectionSize)&&raw.projectionSize>=1&&raw.projectionSize<=32)result.projectionSize=raw.projectionSize;
+        result.useOriginGround=raw.useOriginGround===true;
+        if(Number.isFinite(raw.fallbackGroundHeight))result.fallbackGroundHeight=raw.fallbackGroundHeight;
+        if(['none','forward','backward'].includes(raw.moveLongitudinal))result.moveLongitudinal=raw.moveLongitudinal;
+        if(['none','left','right'].includes(raw.moveLateral))result.moveLateral=raw.moveLateral;
+        if(raw.presetOverrides&&typeof raw.presetOverrides==='object')for(const [key,value] of Object.entries(raw.presetOverrides)){
+            if(/^(vehicles:[a-z-]+|two-wheels|pedestrian|Animal|Obstacle)$/.test(key)&&Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]))result.presetOverrides[key]=value.slice();
+        }
+        result.followSelected=raw.followSelected===true;
+        // Load valid custom bindings first so a default cannot steal a saved key.
+        const seen=new Set(),missing=[];
+        for(const d of definitions){
+            if(raw.bindings?.[d.id]===null){result.bindings[d.id]=null;continue;}
+            const b=binding(raw.bindings?.[d.id]);
+            if(b&&(!d.gesture||/^Mouse[0-4]$/.test(b.code))&&!seen.has(signature(b))){result.bindings[d.id]=b;seen.add(signature(b));}
+            else {result.bindings[d.id]=null;missing.push(d);}
+        }
+        for(const d of missing)if(!seen.has(signature(d.binding))){result.bindings[d.id]={...d.binding};seen.add(signature(d.binding));}
+        return result;
+    }
+    function assign(settings,id,value){
+        if(!definitions.some(d=>d.id===id))throw new Error('Unknown action');
+        const b=value===null?null:binding(value);
+        if(value!==null&&!b)throw new Error('Press a supported key or mouse input, with optional modifiers');
+        if(b&&definitions.find(d=>d.id===id).gesture&&!/^Mouse[0-4]$/.test(b.code))throw new Error('Drag controls require a mouse button, optionally with a held key');
+        const duplicate=b&&definitions.find(d=>d.id!==id&&signature(settings.bindings[d.id])===signature(b));
+        if(duplicate)throw new Error(`Already assigned to ${duplicate.label}; clear that binding first`);
+        settings.bindings[id]=b;
+    }
+    const api={definitions,defaults,normalize,assign,format,fromEvent,signature};
+    root.__C3D_SHORTCUTS=api;
+    if(typeof module!=='undefined'&&module.exports)module.exports=api;
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+/* Viewport controls run in MAIN so native camera handlers cannot consume gestures first. */
+(function(root){
+ 'use strict';
+ function createViewportTools({win,doc,math,shortcuts,getCanvas,getSnapshot,getContext=getSnapshot,isBusy=()=>false,validate,updateObject,emit}){
+  let settings=null,pointer=null,lastTop=null,gesture=null,blockedUntil=0,blockedButton=null,appearance=null;
+  const held=new Set(),materials=new Map(),backgrounds=new Map(),events=[];
+  const canvas=()=>getCanvas(),views=()=>canvas()?.view?.views||{};
+  const stop=e=>{e.preventDefault?.();e.stopImmediatePropagation?.();};
+  const notice=message=>emit({error:message});
+  function surface(target){return Object.entries(views()).find(([,v])=>v.renderer?.domElement===target)?.[0]||null;}
+  function locate(e){const name=surface(e.target);if(!name)return null;const snap=getContext();return {name,x:e.clientX,y:e.clientY,frame:snap.frame,jobId:snap.jobId,clientId:snap.activeBoxId};}
+  function validPointer(p){const s=getContext();return p&&p.frame===s.frame&&p.jobId===s.jobId&&p.clientId===s.activeBoxId;}
+  function ref(){const s=getSnapshot();return {sessionId:s.sessionId,jobId:s.jobId,frame:s.frame,revision:s.revision,clientId:s.activeBoxId};}
+  function current(p=pointer){if(!validPointer(p))throw Error('Hover the current viewport again');const v=views()[p.name],r=v?.renderer?.domElement?.getBoundingClientRect();if(!v?.camera||!r?.width||!r?.height)throw Error('Viewport camera unavailable');if(p.x<r.left||p.x>=r.left+r.width||p.y<r.top||p.y>=r.top+r.height)throw Error('Pointer is outside the viewport');if(doc.elementFromPoint&&doc.elementFromPoint(p.x,p.y)!==v.renderer.domElement)throw Error('Viewport is covered');return {v,r,p};}
+  function parent(target,name){return canvas()?.view?.drawnObjects?.[target.clientID]?.cuboid?.[name]?.parent;}
+  function ray(target,p){const {v,r}=current(p);v.camera.updateMatrixWorld?.(true);const x=(p.x-r.left)/r.width*2-1,y=1-(p.y-r.top)/r.height*2;
+   const a=v.camera.position.clone().set(x,y,-1).unproject(v.camera),b=v.camera.position.clone().set(x,y,1).unproject(v.camera),owner=parent(target,p.name);
+   owner?.updateWorldMatrix?.(true,false);owner?.worldToLocal(a);owner?.worldToLocal(b);return {a,b,v,r,owner};}
+  function project(target,name,q){const v=views()[name],r=v.renderer.domElement.getBoundingClientRect(),point=v.camera.position.clone().fromArray(q),owner=parent(target,name);owner?.updateWorldMatrix?.(true,false);owner?.localToWorld(point);v.camera.updateMatrixWorld?.(true);point.project(v.camera);return {x:r.left+(point.x+1)*r.width/2,y:r.top+(1-point.y)*r.height/2};}
+  function axes(points){const verts=math.cuboidVertices([0,0,0,...points.slice(3,6),2,2,2]);return [4,2,1].map(i=>verts[i].map((v,j)=>(v-verts[0][j])/2));}
+  const dot=(a,b)=>a.reduce((sum,v,i)=>sum+v*b[i],0);
+  function topPosition(target,p){if(p?.name!=='top')throw Error('Move to mouse requires Top view; use M in 3D to aim Top view first');const {a,b}=ray(target,p);const d=b.clone().sub(a);if(Math.abs(d.z)<1e-9)throw Error('Top view cannot project onto the box center plane');return a.addScaledVector(d,(target.points[2]-a.z)/d.z);}
+  async function moveToMouse(payload){const {target}=validate(payload.ref,true),p=payload.pointer||pointer||lastTop,points=Array.from(target.points),at=topPosition(target,p);points[0]=at.x;points[1]=at.y;return updateObject(payload.ref,{points});}
+  async function cornerToMouse(payload){const {target}=validate(payload.ref,true),p=payload.pointer||pointer;if(!['top','side','front'].includes(p?.name))throw Error('Corner placement requires Top, Side or Front view');
+   const points=Array.from(target.points),basis=axes(points),visible=p.name==='top'?[0,1]:p.name==='side'?[0,2]:[1,2],hidden=[0,1,2].find(i=>!visible.includes(i));
+   const verts=math.cuboidVertices(points);let index=0,distance=Infinity;verts.forEach((q,i)=>{const s=project(target,p.name,q),d=(s.x-p.x)**2+(s.y-p.y)**2;if(d<distance){distance=d;index=i;}});
+   const signs=[index&4?1:-1,index&2?1:-1,index&1?1:-1],{a,b}=ray(target,p),d=b.clone().sub(a),normal=basis[hidden],center=points.slice(0,3),den=dot(normal,d.toArray());if(Math.abs(den)<1e-9)throw Error('Cannot project corner onto this view');
+   // Intersect the ray with the plane through the chosen corner, parallel to the visible box axes.
+   const corner=verts[index],t=dot(normal,corner.map((v,i)=>v-a.getComponent(i)))/den,at=a.addScaledVector(d,t).toArray(),local=basis.map(axis=>dot(axis,at.map((v,i)=>v-center[i]))),shift=[0,0,0];
+   for(const axis of visible){const opposite=-signs[axis]*points[6+axis]/2,extent=signs[axis]*(local[axis]-opposite);if(extent<.1)throw Error('Corner cannot cross the opposite corner; minimum size is 0.1 m');points[6+axis]=extent;shift[axis]=(local[axis]+opposite)/2;}
+   for(let i=0;i<3;i++)points[i]+=basis.reduce((sum,axis,j)=>sum+axis[i]*shift[j],0);
+   return updateObject(payload.ref,{points});
+  }
+  function aimTop(p){const {v,r}=current(p),top=views().top;if(p.name!=='perspective'||!top?.camera)throw Error('Aim Top view from the 3D viewport');
+   const raycaster=v.rayCaster?.renderer||v.raycaster;if(!raycaster?.setFromCamera)throw Error('CVAT point-cloud raycaster unavailable');
+   const mouse={x:(p.x-r.left)/r.width*2-1,y:1-(p.y-r.top)/r.height*2};v.camera.updateMatrixWorld?.(true);
+   raycaster.setFromCamera(mouse,v.camera);const clouds=[];v.scene?.traverse?.(o=>{if(o.isPoints&&o.visible!==false)clouds.push(o);});
+   const hits=raycaster.intersectObjects(clouds,false);if(!hits.length)throw Error('No LiDAR point under the cursor; aim at a visible point');
+   const point=hits[0].point,cam=top.camera,controls=top.controls,old=cam.position.clone();
+   const target=typeof controls?.getTarget==='function'?controls.getTarget(old.clone(),false):controls?.target?.clone?.()||old.clone().set(0,0,0).unproject(cam);
+   const offset=old.sub(target),next=point.clone().add(offset);
+   if(controls?.setLookAt){controls.setLookAt(next.x,next.y,next.z,point.x,point.y,point.z,false);controls.update?.(0);}
+   else {cam.position.copy(next);controls?.target?.copy(point);cam.lookAt(point);controls?.update?.();}
+   cam.updateMatrixWorld?.(true);canvas().render?.();showMarker(p);return {aimed:true,message:'Top view aimed · move into Top view and use Move to mouse'};
+  }
+  let marker=null,markerTimer=null;
+  function showMarker(p){if(!doc.createElement)return;marker?.remove();win.clearTimeout?.(markerTimer);marker=doc.createElement('div');marker.className='c3d-aim-marker';marker.style.cssText=`position:fixed;left:${p.x-9}px;top:${p.y-9}px;width:18px;height:18px;border:2px solid #60a5fa;border-radius:50%;pointer-events:none;z-index:2147483646`;doc.body?.append(marker);markerTimer=win.setTimeout?.(()=>{marker?.remove();marker=null;},900);}
+  function restoreGesture(){if(!gesture)return;const g=gesture;gesture=null;for(const [mesh,z] of g.meshes){mesh.rotation.z=z;mesh.updateMatrixWorld?.(true);}if(g.controls)g.controls.enabled=g.enabled;canvas()?.render?.();}
+  function begin(p,binding){if(isBusy())throw Error('Previous operation or save/reload in progress');const reference=ref(),{target}=validate(reference,true),{v}=current(p);if(p.name!=='perspective')return false;
+   const meshes=Object.values(canvas().view.drawnObjects?.[target.clientID]?.cuboid||{}).filter(o=>o?.isObject3D&&o.rotation),center=project(target,'perspective',target.points.slice(0,3));
+   if(Math.hypot(p.x-center.x,p.y-center.y)<8)throw Error('Start rotation away from the projected box center');
+   gesture={ref:reference,points:Array.from(target.points),center,last:Math.atan2(p.y-center.y,p.x-center.x),angle:0,meshes:meshes.map(m=>[m,m.rotation.z]),controls:v.controls,enabled:v.controls?.enabled,binding};if(v.controls)v.controls.enabled=false;return true;
+  }
+  function gestureValid(){if(!gesture)return false;try{if(isBusy())throw Error('Operation in progress');validate(gesture.ref,true);const s=getSnapshot();if(s.activeBoxId!==gesture.ref.clientId)throw Error('Selection changed');return true;}catch(_){restoreGesture();return false;}}
+  function drag(e){if(!gestureValid())return;const g=gesture,dx=e.clientX-g.center.x,dy=e.clientY-g.center.y;if(Math.hypot(dx,dy)<8)return;const angle=Math.atan2(dy,dx),delta=Math.atan2(Math.sin(angle-g.last),Math.cos(angle-g.last));g.last=angle;
+   // Looking from below reverses the screen orientation of world Z.
+   const camera=views().perspective.camera,worldZ=camera.position.z-(canvas().view.drawnObjects?.[g.ref.clientId]?.cuboid?.perspective?.getWorldPosition?.(camera.position.clone())?.z??g.points[2]);g.angle+=(worldZ>=0?-1:1)*delta;
+   for(const [mesh,z] of g.meshes){mesh.rotation.z=z+g.angle;mesh.updateMatrixWorld?.(true);}canvas().render?.();stop(e);
+  }
+  async function end(e){if(!gesture){block(e);return;}if(e.button!==Number(gesture.binding.code.slice(5)))return;if(!gestureValid())return;stop(e);blockedUntil=Date.now()+650;blockedButton=e.button;const g=gesture;restoreGesture();if(Math.abs(g.angle)<1e-8)return;const points=g.points.slice();points[5]+=g.angle;try{await updateObject(g.ref,{points});}catch(error){notice(error.message);}}
+  function allowed(e){return settings&&!e.isComposing&&!e.target?.closest?.('input,textarea,select,[contenteditable="true"],[role="dialog"],dialog,#cvat-3d-copilot-root')&&!doc.querySelector?.('[role="dialog"],dialog[open]');}
+  function input(e){if(e.type==='keydown'){if(e.code==='Escape'&&gesture){stop(e);restoreGesture();return;}if(shortcuts.fromEvent(e))held.add(e.code);}
+   if(!allowed(e)||e.repeat)return;
+   const p=locate(e)||pointer;if(!validPointer(p))return;
+   if(e.type==='keydown'&&shortcuts.definitions.some(d=>settings.bindings[d.id]?.hold===e.code&&(d.id!=='ROTATE_DRAG'||p.name==='perspective')&&(d.id!=='CORNER_TO_MOUSE'||['top','side','front'].includes(p.name)))){stop(e);return;}
+   const hold=[...held].filter(k=>k!==e.code).at(-1),pressed=shortcuts.fromEvent(e,/^(pointerdown|wheel)$/.test(e.type)?hold:undefined);
+   if(!pressed)return;const match=shortcuts.definitions.find(d=>shortcuts.signature(settings.bindings[d.id])===shortcuts.signature(pressed));if(!match)return;
+   if(match.id==='CORNER_TO_MOUSE'&&!['top','side','front'].includes(p.name)||match.id==='ROTATE_DRAG'&&p.name!=='perspective'||match.id==='MOVE_TO_MOUSE'&&!['top','perspective'].includes(p.name))return;
+   if(getSnapshot().freeCam&&['CORNER_TO_MOUSE','ROTATE_DRAG'].includes(match.id))return;
+   pointer=p;try{if(match.gesture){if(!begin(p,settings.bindings[match.id]))return;}else emit({action:match.id,pointer:p});stop(e);if(e.type==='pointerdown'){blockedUntil=Date.now()+650;blockedButton=e.button;}}catch(error){notice(error.message);stop(e);}
+  }
+  function move(e){const p=locate(e);pointer=p;if(p?.name==='top')lastTop=p;else if(p)lastTop=null;if(gesture)drag(e);}
+  function up(e){held.delete(e.code);if(gesture?.binding.hold===e.code)restoreGesture();}
+  function block(e){if(surface(e.target)&&(Date.now()<blockedUntil&&e.button===blockedButton||gesture&&e.button===Number(gesture.binding.code.slice(5))))stop(e);}
+  function blur(){held.clear();pointer=null;lastTop=null;restoreGesture();}
+  function tick(){if(gesture)gestureValid();applyAppearance();}
+  function configure(raw){restoreGesture();settings=shortcuts.normalize(raw);appearance={background:settings.background,follow:settings.projectionFollow,size:settings.projectionSize};applyAppearance();return {configured:true};}
+  function applyAppearance(){if(!appearance)return;let changed=false;const livePoints=new Set(),liveScenes=new Set();for(const [name,v] of Object.entries(views())){
+   if(!v.scene)continue;
+   liveScenes.add(v.scene);
+   const desired=appearance.background;
+   if(desired&&!backgrounds.has(v.scene))backgrounds.set(v.scene,v.scene.background?.clone?.()||v.scene.background);
+   if(desired&&v.scene.background?.set&&v.scene.background.getHexString?.()!==desired.slice(1)){v.scene.background=v.scene.background.clone();v.scene.background.set(desired);changed=true;}
+   if(!desired&&backgrounds.has(v.scene)){v.scene.background=backgrounds.get(v.scene);backgrounds.delete(v.scene);changed=true;}
+   if(name==='perspective')continue;
+   v.scene.traverse?.(o=>{if(!o.isPoints||!o.material?.clone)return;livePoints.add(o);let record=materials.get(o);if(record&&o.material!==record.clone){record.clone.dispose?.();materials.delete(o);record=null;}if(appearance.follow){if(record){o.material=record.original;record.clone.dispose?.();materials.delete(o);changed=true;}return;}if(!record){record={original:o.material,clone:o.material.clone()};materials.set(o,record);o.material=record.clone;changed=true;}if(o.material.size!==appearance.size||o.material.sizeAttenuation!==false){o.material.size=appearance.size;o.material.sizeAttenuation=false;o.material.needsUpdate=true;changed=true;}});
+  }for(const [o,r] of materials)if(!livePoints.has(o)){if(o.material===r.clone)o.material=r.original;r.clone.dispose?.();materials.delete(o);}for(const scene of backgrounds.keys())if(!liveScenes.has(scene))backgrounds.delete(scene);if(changed)canvas()?.render?.();}
+  function dispose(){blur();marker?.remove();win.clearTimeout?.(markerTimer);for(const [type,fn,opts] of events)win.removeEventListener?.(type,fn,opts);for(const [o,r] of materials){if(o.material===r.clone)o.material=r.original;r.clone.dispose?.();}materials.clear();for(const [s,b] of backgrounds)s.background=b;backgrounds.clear();}
+  function start(){for(const [type,fn] of [['keydown',input],['keyup',up],['pointerdown',input],['wheel',input],['pointermove',move],['pointerup',end],['pointercancel',blur],['blur',blur],['contextmenu',block],['auxclick',block],['click',block]]){const opts={capture:true,passive:false};events.push([type,fn,opts]);win.addEventListener?.(type,fn,opts);}}
+  return {start,dispose,configure,tick,moveToMouse,cornerToMouse,topPosition,aimTop,clearPointer:blur,get pointer(){return pointer;},get lastTop(){return validPointer(lastTop)?lastTop:null;}};
+ }
+ root.__C3D_CREATE_VIEWPORT_TOOLS=createViewportTools;
+ if(typeof module!=='undefined'&&module.exports)module.exports={createViewportTools};
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+/* Shared direction wheel model: clockwise degrees, vehicle forward = zero. */
+(function(root){
+ 'use strict';
+ const wrap=a=>((a%360)+360)%360;
+ const difference=(a,b)=>((a-b+540)%360)-180;
+ function defaults(){return {version:1,heading:0,slots:[['Back',180,0],['Front',0,1],['Front-left',315,2],['Left',270,3],['Back-left',225,4],['Front-right',45,5],['Right',90,6],['Back-right',135,7]].map(([name,angle,image],i)=>({id:'pov-'+i,name,angle,image,start:null}))};}
+ function normalize(raw){const out=defaults();if(raw?.version!==1)return out;if(Number.isFinite(raw.heading))out.heading=wrap(raw.heading);if(!Array.isArray(raw.slots)||raw.slots.length>32)return out;
+  const ids=new Set(),angles=new Set();out.slots=[];for(const s of raw.slots){if(!s||typeof s.id!=='string'||!s.id||s.id.length>80||ids.has(s.id)||typeof s.name!=='string'||!Number.isFinite(s.angle)||angles.has(wrap(s.angle))||!(s.image===null||Number.isInteger(s.image)&&s.image>=0&&s.image<64))continue;ids.add(s.id);angles.add(wrap(s.angle));out.slots.push({id:s.id,name:s.name.slice(0,80),angle:wrap(s.angle),image:s.image,start:Number.isFinite(s.start)?wrap(s.start):null});}return out;}
+ function sectors(config){const slots=[...config.slots].sort((a,b)=>a.angle-b.angle);return slots.map((s,i)=>{const previous=slots[(i+slots.length-1)%slots.length],gap=slots.length===1?360:wrap(s.angle-previous.angle),mid=wrap(previous.angle+gap/2),custom=s.start;
+  const start=Number.isFinite(custom)&&wrap(custom-previous.angle)>0&&wrap(custom-previous.angle)<gap?custom:mid;return {...s,start};});}
+ function select(config,bearing,previousId=null){if(!Number.isFinite(bearing))return null;const slots=sectors(config);if(!slots.length)return null;if(slots.length===1)return slots[0];const angle=wrap(bearing-config.heading);
+  const inside=(s,i,margin=0)=>{const end=slots[(i+1)%slots.length].start;return wrap(angle-s.start)>=margin&&wrap(angle-s.start)<=wrap(end-s.start)-margin;};
+  let i=slots.findIndex((s,i)=>inside(s,i));if(i<0)i=0;const next=slots[i],previous=slots.find(s=>s.id===previousId);
+  // A 3 degree dead band prevents flicker when crossing a boundary.
+  if(previous&&previous.id!==next.id&&Math.min(Math.abs(difference(angle,next.start)),Math.abs(difference(angle,slots[(i+1)%slots.length].start)))<3)return previous;
+  return next;
+ }
+ function bearing(origin,target){if(!origin||!target||![...origin,...target].every(Number.isFinite)||Math.hypot(target[0]-origin[0],target[1]-origin[1])<.05)return null;return wrap(-Math.atan2(target[1]-origin[1],target[0]-origin[0])*180/Math.PI);}
+ const api={defaults,normalize,sectors,select,bearing,wrap};root.__C3D_REFERENCE_IMAGES=api;if(typeof module!=='undefined'&&module.exports)module.exports=api;
+})(typeof window!=='undefined'?window:globalThis);
 
 ;
 /* Local workload ledger. No credentials, annotation coordinates or network calls. */
@@ -5007,7 +5127,7 @@ function createAnnotationIO(env){
   const {s,job}=context(payload),data=clone(await job.annotations.export());context({jobId:s.jobId,sessionId:s.sessionId});
   const identities=kinds.flatMap(kind=>(data[kind]||[]).map(t=>t.clientID));
   if(identities.some(id=>!Number.isInteger(id))||new Set(identities).size!==identities.length)throw new Error('Native export lacks unique display IDs; reload extension and the CVAT tab before exporting');
-  data.c3d={toolVersion:'1.21.1',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,frameRange:{start:job.startFrame,stop:job.stopFrame},replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
+  data.c3d={toolVersion:'1.22.3',exportedAt:new Date().toISOString(),schema:'cvat-3d-tool-annotations/v2',jobId:s.jobId,origin:env.origin(),sessionId:s.sessionId,frameRange:{start:job.startFrame,stop:job.stopFrame},replaceIdentity:'clientID',identity:'clientID is the CVAT display ID used for in-place editing; id is database metadata only',source:'native-editor-including-unsaved'};
   data.labels_manifest=clone(job.labels||[]);
   return {success:true,jobId:s.jobId,data,trackCount:data.tracks?.length||0,shapeCount:data.shapes?.length||0};
  }
@@ -5215,7 +5335,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
         const workLog=env.workLog||win.__C3D_WORK_LOG;
         const later = env.delay || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));
         const sessionId = `c3d-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        let store = env.store || null, canvas = null, unsubscribe = null, interval = null, disposed = false;
+        let store = env.store || null, canvas = null, unsubscribe = null, interval = null, viewportInterval=null, disposed = false;
         let signature = '', revision = 0, scope = '', currentSnapshot = null;
         let lastFitCase = null;
         let appearanceReadAt=0,reviewAppearance={pointSize:2,source:'review-default'};
@@ -5252,6 +5372,12 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
         let followEnabled=false,followTarget=null,followFrame=null,followReady=null,followStatus='Off';
         let followSelection=null;
         let lastOriginGround=null;
+        const viewportFactory=env.viewportFactory||win.__C3D_CREATE_VIEWPORT_TOOLS;
+        const viewport=viewportFactory?.({win,doc,math,shortcuts:env.shortcuts||win.__C3D_SHORTCUTS,getCanvas:()=>editor()?.canvas?.instance||canvas,getSnapshot,getContext:()=>{
+            const ann=editor(),jobId=Number(ann?.job?.instance?.id)||null;
+            return {jobId,frame:ann?.player?.frame?.number??null,activeBoxId:followEnabled?(followSelection?.jobId===jobId?followSelection.clientId:null):ann?.annotations?.activatedStateID??null};
+        },isBusy:()=>pendingObjects.size>0||!!reloadHold,validate,updateObject,
+            emit:data=>win.dispatchEvent?.(new win.CustomEvent('c3d:control:v3',{detail:JSON.stringify(data)}))});
         function rememberFollowSelection(clientId){
             const ann=editor();
             const target=ann?.annotations?.states?.find(s=>s.clientID===clientId&&s.shapeType==='cuboid');
@@ -5440,7 +5566,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                 unsubscribe = store.subscribe?.(publish) || null;
             } else if (store && !unsubscribe) unsubscribe = store.subscribe?.(publish) || null;
             canvas = editor()?.canvas?.instance || null;
-            publish();
+            viewport?.tick();publish();
         }
         function getSnapshot() {
             const ann = editor(), job = ann?.job?.instance;
@@ -5479,11 +5605,12 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
             const is3D = job?.dimension === '3d' || (!job?.dimension && ann?.workspace === 'standard3d');
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
                 activeBoxId: followEnabled ? (followSelection?.jobId===job?.id ? followSelection.clientId : null) : ann?.annotations?.activatedStateID ?? null, boxes,
+                taskId:job?.taskId??null,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
                 freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0, reviewAppearance:readReviewAppearance(),
                 originGroundReference:originReference(followEnabled?followSelection?.clientId:ann?.annotations?.activatedStateID),
                 originGroundPlane:lastOriginGround,
-                capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
+                capabilities: { controls:!!viewport, read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
                     batchSize: !!(env.batchSizeFactory||win.__C3D_CREATE_BATCH_SIZE_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get,
@@ -5904,11 +6031,6 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
         async function snapGroundCandidate(ref,payload,forEdit=true){
             const options=placementOptions(payload);
             let ground=await operationGround(ref,payload,null,forEdit),localGroundReason=null;
-            if(!options.useOriginGround&&!math.canManuallySnapGround(ground)){
-                localGroundReason=ground?.reason||'Ground below box is unreliable';
-                const index=await ensureCloud();validate(ref,forEdit);
-                ground=index.estimateLidarGround();
-            }
             return {ground,localGroundReason};
         }
         async function inspectGround(payload){
@@ -5939,11 +6061,35 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                     const preview=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
                     report.preview={deltaZ:preview.deltaZ,bottomZ:math.parseCVAT16Points(preview.newPoints).zBottom,
                         blockedByLargeAdjustment:Math.abs(preview.deltaZ)>1.5};
-                }else report.groundError=ground?.reason||'No reliable ground below box or near LiDAR origin';
+                }else report.groundError=ground?.reason||'No reliable local ground below box; origin ground is disabled';
             }catch(error){report.groundError=error.message;}
             const current=validate(ref);
             if(current.snap.revision!==snap.revision||current.target.points.some((v,i)=>v!==points[i]))throw new Error('Box modified during inspection; inspect again');
             return report;
+        }
+        let contextCache=null;
+        function validateFrame(payload){const s=getSnapshot();if(!s.connected||payload.sessionId!==s.sessionId||payload.jobId!==s.jobId||payload.frame!==s.frame)throw Error('Job or frame changed; retry in the current frame');return s;}
+        async function contextImages(payload){
+            validateFrame(payload);const job=editor().job.instance,key=`${sessionId}:${payload.jobId}:${payload.frame}`;
+            if(contextCache?.key===key)return contextCache.promise;
+            const promise=(async()=>{if(typeof job.frames?.contextImage!=='function')throw Error('CVAT context-image API unavailable');
+                const native=await job.frames.contextImage(payload.frame);validateFrame(payload);
+                const images=[];
+                for(const [name,image] of Object.entries(native).slice(0,64)){
+                    if(!image?.width||!image?.height)continue;
+                    const surface=doc.createElement('canvas'),scale=Math.min(1,1600/Math.max(image.width,image.height));surface.width=Math.max(1,Math.round(image.width*scale));surface.height=Math.max(1,Math.round(image.height*scale));
+                    const ctx=surface.getContext('2d');if(!ctx)throw Error('Context-image conversion unavailable');ctx.drawImage(image,0,0,surface.width,surface.height);
+                    images.push({name,url:surface.toDataURL('image/jpeg',.88),width:image.width,height:image.height});
+                }
+                validateFrame(payload);return {images,frame:payload.frame};
+            })();contextCache={key,promise};try{return await promise;}catch(error){if(contextCache?.promise===promise)contextCache=null;throw error;}
+        }
+        function referenceView(payload){
+            const s=validateFrame(payload),origin=originReference(s.activeBoxId)?.point||null,box=s.boxes.find(b=>b.id===s.activeBoxId);
+            if(box)return {origin,target:box.points.slice(0,3),source:'box'};
+            const view=canvas?.view?.views?.perspective,controls=view?.controls,camera=view?.camera;
+            const target=camera&&(typeof controls?.getTarget==='function'?controls.getTarget(camera.position.clone(),false):controls?.target?.clone?.());
+            return {origin,target:target?.toArray?.()||null,source:'look-at'};
         }
         async function command(type, payload = {}) {
             if(reloadHold&&!['GET_SNAPSHOT','GET_WORK_DOCUMENT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
@@ -5976,6 +6122,8 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                 }
                 case 'RELEASE_RELOAD': reloadHold=null;pendingObjects.delete('reload');publish();return {released:true};
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
+                case 'GET_CONTEXT_IMAGES': return contextImages(payload);
+                case 'GET_REFERENCE_VIEW': return referenceView(payload);
                 case 'GET_WORK_DOCUMENT': {
                     const s=getSnapshot(),job=editor()?.job?.instance;
                     if(!s.connected||typeof job?.annotations?.export!=='function'||!workLog)throw Error('Work log requires native annotation export');
@@ -6026,7 +6174,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.21.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.22.3',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -6052,84 +6200,34 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
                 case 'INSPECT_GROUND': return inspectGround(payload);
+                case 'SET_CONTROLS': if(!viewport)throw Error('Viewport controls unavailable');return viewport.configure(payload.settings);
+                case 'AIM_TOP': if(!viewport)throw Error('Viewport controls unavailable');return viewport.aimTop(payload.pointer||viewport.pointer);
+                case 'CORNER_TO_MOUSE': if(!viewport)throw Error('Viewport controls unavailable');return viewport.cornerToMouse(payload);
                 case 'AUTO_ADJUST': {
-                    const options=math.autoAdjustOptions(payload);
-                    const initial=validate(payload.ref,true).target;
-                    if(pendingObjects.size)throw new Error('Previous operation in progress');
-                    if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
-                    const ground=await operationGround(payload.ref,payload);
+                    const options=math.autoAdjustOptions(payload),initial=validate(payload.ref,true).target;
+                    if(pendingObjects.size)throw Error('Previous operation in progress');
+                    let points=Array.from(initial.points),ground=null;
+                    if(options.autoMove){const p=viewport?viewport.topPosition(initial,payload.pointer||viewport.pointer||viewport.lastTop):pointerWorld(initial);points[0]=p.x;points[1]=p.y;}
+                    const pushing=options.moveLongitudinal!=='none'||options.moveLateral!=='none';
+                    if(options.autoGround||pushing){ground=await operationGround(payload.ref,payload,{points});validate(payload.ref,true);if(!math.canManuallySnapGround(ground))throw Error('Reliable ground unavailable; box unchanged');}
+                    if(options.autoGround){const snap=math.snapGroundPoints(points,ground);if(Math.abs(snap.deltaZ)>1.5)throw Error('Ground adjustment exceeds 1.5m; box unchanged');points=snap.newPoints;}
+                    let adjustment={alignment:{longitudinal:'none',lateral:'none'},pointCount:0};
+                    if(pushing){const nearby=await extractLocalPoints(payload.ref,.4,{points});validate(payload.ref,true);adjustment=math.autoAdjustBox(nearby,{points},ground,getSnapshot().boxes.filter(b=>b.id!==initial.clientID),options);points=adjustment.points;}
                     validate(payload.ref,true);
-                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for Auto Adjust; box unchanged');
-                    const base=math.snapGroundPoints(initial.points,math.makePlane(ground.a,ground.b,ground.c));
-                    if(Math.abs(base.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
-                    const nearby=await extractLocalPoints(payload.ref,.4,{points:base.newPoints});
-                    const {target}=validate(payload.ref,true),neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors,options),points=adjustment.points;
-                    const finalGround=await operationGround(payload.ref,payload,{points});
-                    if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under adjusted box; box unchanged');
-                    // Preserve the fitted world-space top while the final footprint's
-                    // ground fixes the bottom. This changes height, never heading.
-                    const snap=math.snapGroundPoints(points,math.makePlane(finalGround.a,finalGround.b,finalGround.c));
-                    if(Math.abs(snap.deltaZ)>1.5||points[8]-snap.deltaZ<.1)throw new Error('Final ground adjustment is unsuitable; box unchanged');
-                    points[2]+=snap.deltaZ/2;points[8]-=snap.deltaZ;
-                    if(points[8]<target.points[8]-Math.min(options.maxShrinkDistance,target.points[8]*options.maxShrinkPercent/100)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
-                    validate(payload.ref,true);
-                    const notes=[];
-                    if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
-                    if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
-                    if(adjustment.rejectedBoundaryCandidates)notes.push('Weak boundary patches ignored');
-                    const evidence={groundSource:ground.source,groundHeight:ground.c,orientationWarning:ground.orientationWarning||null,groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints,rejectedBoundaryCandidates:adjustment.rejectedBoundaryCandidates};
-                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
-                    return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                    if(points.slice(3,9).some((v,i)=>v!==initial.points[i+3]))throw Error('Auto Adjust must preserve size and orientation');
+                    const evidence={alignment:adjustment.alignment,pointCount:adjustment.pointCount,groundSource:options.autoGround?ground?.source:null};
+                    if(points.every((v,i)=>Math.abs(v-initial.points[i])<=1e-8))return {unchanged:true,...evidence};
+                    return {...await updateObject(payload.ref,{points}),...evidence};
                 }
                 case 'MOVE_TO_MOUSE': {
-                    const options=placementOptions(payload);
-                    const {target}=validate(payload.ref,true);
-                    if(pendingObjects.size)throw new Error('Previous operation in progress');
-                    const position=pointerWorld(target);let points=Array.from(target.points);
-                    points[0]=position.x;points[1]=position.y;
-                    let alignment={longitudinal:'none',lateral:'none'},alignmentWarning=null;
-                    let ground=options.useOriginGround?await originGround(options,payload.ref):null;
-                    let refined=false,pointCount=0,centerWarning=null,directionWarning=null,directionAdjusted=false,directionDeltaDegrees=0;
-                    try {
-                        const index=await ensureCloud();
-                        validate(payload.ref,true);
-                        if(!options.useOriginGround)ground=index.estimate({points});
-                        const search=points.slice();search[6]*=2;search[7]*=2;
-                        if(math.canManuallySnapGround(ground)){
-                            search[2]=ground.a*points[0]+ground.b*points[1]+ground.c+points[8]*.75;
-                            search[8]=points[8]*1.5;
-                        }
-                        const nearby=await extractLocalPoints(payload.ref,.4,{points:search});
-                        validate(payload.ref,true);
-                        const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                        const refinement=math.refineCenterNearPointer(nearby,{points},ground,neighbors,{adjustDirection:payload.adjustDirection===true,...options});
-                        alignment=refinement.alignment||alignment;alignmentWarning=refinement.alignmentWarning||null;
-                        refined=refinement.refined;pointCount=refinement.pointCount;
-                        directionAdjusted=refinement.directionAdjusted===true;directionDeltaDegrees=refinement.directionDeltaDegrees||0;directionWarning=refinement.directionWarning||null;
-                        if(refined){
-                            points=refinement.points;
-                            if(!options.useOriginGround){ground=null;ground=cloudIndex.estimate({points});}
-                        }else centerWarning=refinement.reason;
-                    } catch(error) {
-                        // A cloud failure permits XY placement; a stale edit never does.
-                        validate(payload.ref,true);
-                        centerWarning='Nearby object refinement unavailable: '+error.message;
-                    }
-                    let groundWarning='Ground unavailable or uncertain; kept Z';
-                    if(math.canManuallySnapGround(ground)){
-                        const snapped=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
-                        if(Math.abs(snapped.deltaZ)<=1.5){points[2]=snapped.newPoints[2];groundWarning=null;}
-                        else groundWarning='Ground adjustment exceeds 1.5m; kept Z';
-                    }
-                    validate(payload.ref,true);
-                    const warning=[centerWarning,directionWarning,alignmentWarning,groundWarning,ground?.orientationWarning].filter(Boolean).join(' · ')||null;
-                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,groundSource:groundWarning?null:(ground?.source||'point-cloud'),groundHeight:groundWarning?null:ground?.c,alignment,warning};
+                    if(viewport)return viewport.moveToMouse(payload);
+                    const {target}=validate(payload.ref,true),position=pointerWorld(target),points=Array.from(target.points);points[0]=position.x;points[1]=position.y;
+                    return updateObject(payload.ref,{points});
                 }
                 case 'SNAP_GROUND': {
                     validate(payload.ref,true);
                     const {ground,localGroundReason}=await snapGroundCandidate(payload.ref,payload);
-                    if (!math.canManuallySnapGround(ground)) throw new Error('Không tìm được mặt đất đủ tin cậy dưới box hoặc gần gốc LiDAR');
+                    if (!math.canManuallySnapGround(ground)) throw new Error('Reliable local ground unavailable; box unchanged. Enable Use origin ground explicitly to use the configured origin height.');
                     const { target } = validate(payload.ref,true), plane = math.makePlane(ground.a,ground.b,ground.c), snap = math.snapGroundPoints(target.points,plane);
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
                     const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,bottomZ:math.parseCVAT16Points(snap.newPoints).zBottom,orientationWarning:ground.orientationWarning||null,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud',groundFallback:ground.source==='lidar-origin-ground',localGroundReason,referenceXY:ground.referenceXY||null};
@@ -6145,11 +6243,11 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
             }
         }
         function start() {
-            connect(); interval = win.setInterval(connect, 1200);
+            viewport?.start();connect(); interval = win.setInterval(connect, 1200);if(viewport)viewportInterval=win.setInterval(()=>viewport.tick(),250);
             for (const [type, fn] of [['canvas.selected',lockedSelection],['canvas.doubleclicked',followSelected],['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
-            if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
+            if (disposed) return; disposed = true; viewport?.dispose(); unsubscribe?.(); win.clearInterval?.(interval);win.clearInterval?.(viewportInterval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
             for (const [type, fn] of [['canvas.selected',lockedSelection],['canvas.doubleclicked',followSelected],['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};
@@ -6183,7 +6281,7 @@ root.__C3D_ANNOTATION_IO={createAnnotationIO};if(typeof module!=='undefined')mod
         let response;
         try { response = {requestId:request.requestId,ok:true,result:await adapter.command(request.type,request.payload || {})}; }
         catch (error) { response = {requestId:request.requestId,ok:false,error:error.message || 'Lệnh thất bại'}; }
-        inflight.delete(request.requestId); if(!['BATCH_FRAME','GET_WORK_DOCUMENT'].includes(request.type) && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
+        inflight.delete(request.requestId); if(!['BATCH_FRAME','GET_WORK_DOCUMENT','GET_CONTEXT_IMAGES','GET_REFERENCE_VIEW'].includes(request.type) && !request.type.includes('_ALL_ANNOTATIONS')) completed.set(request.requestId,response);
         if (completed.size > 150) completed.delete(completed.keys().next().value);
         if (!disposed) dispatch(responseEvent,response);
     }

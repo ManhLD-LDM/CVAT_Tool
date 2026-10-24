@@ -9,7 +9,7 @@
         const workLog=env.workLog||win.__C3D_WORK_LOG;
         const later = env.delay || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));
         const sessionId = `c3d-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        let store = env.store || null, canvas = null, unsubscribe = null, interval = null, disposed = false;
+        let store = env.store || null, canvas = null, unsubscribe = null, interval = null, viewportInterval=null, disposed = false;
         let signature = '', revision = 0, scope = '', currentSnapshot = null;
         let lastFitCase = null;
         let appearanceReadAt=0,reviewAppearance={pointSize:2,source:'review-default'};
@@ -46,6 +46,12 @@
         let followEnabled=false,followTarget=null,followFrame=null,followReady=null,followStatus='Off';
         let followSelection=null;
         let lastOriginGround=null;
+        const viewportFactory=env.viewportFactory||win.__C3D_CREATE_VIEWPORT_TOOLS;
+        const viewport=viewportFactory?.({win,doc,math,shortcuts:env.shortcuts||win.__C3D_SHORTCUTS,getCanvas:()=>editor()?.canvas?.instance||canvas,getSnapshot,getContext:()=>{
+            const ann=editor(),jobId=Number(ann?.job?.instance?.id)||null;
+            return {jobId,frame:ann?.player?.frame?.number??null,activeBoxId:followEnabled?(followSelection?.jobId===jobId?followSelection.clientId:null):ann?.annotations?.activatedStateID??null};
+        },isBusy:()=>pendingObjects.size>0||!!reloadHold,validate,updateObject,
+            emit:data=>win.dispatchEvent?.(new win.CustomEvent('c3d:control:v3',{detail:JSON.stringify(data)}))});
         function rememberFollowSelection(clientId){
             const ann=editor();
             const target=ann?.annotations?.states?.find(s=>s.clientID===clientId&&s.shapeType==='cuboid');
@@ -234,7 +240,7 @@
                 unsubscribe = store.subscribe?.(publish) || null;
             } else if (store && !unsubscribe) unsubscribe = store.subscribe?.(publish) || null;
             canvas = editor()?.canvas?.instance || null;
-            publish();
+            viewport?.tick();publish();
         }
         function getSnapshot() {
             const ann = editor(), job = ann?.job?.instance;
@@ -273,11 +279,12 @@
             const is3D = job?.dimension === '3d' || (!job?.dimension && ann?.workspace === 'standard3d');
             return { sessionId, mode: 'live', connected: !!ann && !!job && !!canvas && is3D, jobId, frame, revision,
                 activeBoxId: followEnabled ? (followSelection?.jobId===job?.id ? followSelection.clientId : null) : ann?.annotations?.activatedStateID ?? null, boxes,
+                taskId:job?.taskId??null,
                 labels: (job?.labels || []).map(l => ({ id: l.id, name: l.name, color: l.color })), saveState,
                 freeCam: !!cameraRestore, followCameraEnabled:followEnabled, followCameraStatus:followStatus, pointCount: cloudIndex?.count || 0, reviewAppearance:readReviewAppearance(),
                 originGroundReference:originReference(followEnabled?followSelection?.clientId:ann?.annotations?.activatedStateID),
                 originGroundPlane:lastOriginGround,
-                capabilities: { read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
+                capabilities: { controls:!!viewport, read: !!ann, selection: !!canvas?.activate && !!canvas?.html,
                     edit: !!store && states.some(s => typeof s.save === 'function') && typeof job?.actions?.get === 'function',
                     appearance: !!canvas?.view?.drawnObjects && typeof canvas?.view?.receiveShapeColor === 'function',
                     batchSize: !!(env.batchSizeFactory||win.__C3D_CREATE_BATCH_SIZE_CONTROLLER)&&!!job?.annotations?.export&&!!job?.annotations?.get,
@@ -698,11 +705,6 @@
         async function snapGroundCandidate(ref,payload,forEdit=true){
             const options=placementOptions(payload);
             let ground=await operationGround(ref,payload,null,forEdit),localGroundReason=null;
-            if(!options.useOriginGround&&!math.canManuallySnapGround(ground)){
-                localGroundReason=ground?.reason||'Ground below box is unreliable';
-                const index=await ensureCloud();validate(ref,forEdit);
-                ground=index.estimateLidarGround();
-            }
             return {ground,localGroundReason};
         }
         async function inspectGround(payload){
@@ -733,11 +735,35 @@
                     const preview=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
                     report.preview={deltaZ:preview.deltaZ,bottomZ:math.parseCVAT16Points(preview.newPoints).zBottom,
                         blockedByLargeAdjustment:Math.abs(preview.deltaZ)>1.5};
-                }else report.groundError=ground?.reason||'No reliable ground below box or near LiDAR origin';
+                }else report.groundError=ground?.reason||'No reliable local ground below box; origin ground is disabled';
             }catch(error){report.groundError=error.message;}
             const current=validate(ref);
             if(current.snap.revision!==snap.revision||current.target.points.some((v,i)=>v!==points[i]))throw new Error('Box modified during inspection; inspect again');
             return report;
+        }
+        let contextCache=null;
+        function validateFrame(payload){const s=getSnapshot();if(!s.connected||payload.sessionId!==s.sessionId||payload.jobId!==s.jobId||payload.frame!==s.frame)throw Error('Job or frame changed; retry in the current frame');return s;}
+        async function contextImages(payload){
+            validateFrame(payload);const job=editor().job.instance,key=`${sessionId}:${payload.jobId}:${payload.frame}`;
+            if(contextCache?.key===key)return contextCache.promise;
+            const promise=(async()=>{if(typeof job.frames?.contextImage!=='function')throw Error('CVAT context-image API unavailable');
+                const native=await job.frames.contextImage(payload.frame);validateFrame(payload);
+                const images=[];
+                for(const [name,image] of Object.entries(native).slice(0,64)){
+                    if(!image?.width||!image?.height)continue;
+                    const surface=doc.createElement('canvas'),scale=Math.min(1,1600/Math.max(image.width,image.height));surface.width=Math.max(1,Math.round(image.width*scale));surface.height=Math.max(1,Math.round(image.height*scale));
+                    const ctx=surface.getContext('2d');if(!ctx)throw Error('Context-image conversion unavailable');ctx.drawImage(image,0,0,surface.width,surface.height);
+                    images.push({name,url:surface.toDataURL('image/jpeg',.88),width:image.width,height:image.height});
+                }
+                validateFrame(payload);return {images,frame:payload.frame};
+            })();contextCache={key,promise};try{return await promise;}catch(error){if(contextCache?.promise===promise)contextCache=null;throw error;}
+        }
+        function referenceView(payload){
+            const s=validateFrame(payload),origin=originReference(s.activeBoxId)?.point||null,box=s.boxes.find(b=>b.id===s.activeBoxId);
+            if(box)return {origin,target:box.points.slice(0,3),source:'box'};
+            const view=canvas?.view?.views?.perspective,controls=view?.controls,camera=view?.camera;
+            const target=camera&&(typeof controls?.getTarget==='function'?controls.getTarget(camera.position.clone(),false):controls?.target?.clone?.());
+            return {origin,target:target?.toArray?.()||null,source:'look-at'};
         }
         async function command(type, payload = {}) {
             if(reloadHold&&!['GET_SNAPSHOT','GET_WORK_DOCUMENT','PREPARE_RELOAD','RELEASE_RELOAD'].includes(type))throw new Error('Đang lưu để reload; chờ hoàn tất hoặc hủy reload');
@@ -770,6 +796,8 @@
                 }
                 case 'RELEASE_RELOAD': reloadHold=null;pendingObjects.delete('reload');publish();return {released:true};
                 case 'GET_SNAPSHOT': connect(); return getSnapshot();
+                case 'GET_CONTEXT_IMAGES': return contextImages(payload);
+                case 'GET_REFERENCE_VIEW': return referenceView(payload);
                 case 'GET_WORK_DOCUMENT': {
                     const s=getSnapshot(),job=editor()?.job?.instance;
                     if(!s.connected||typeof job?.annotations?.export!=='function'||!workLog)throw Error('Work log requires native annotation export');
@@ -820,7 +848,7 @@
                     const points = await extractLocalPoints(payload.ref,.4,searchBox);
                     const roiDone=now();
                     validate(payload.ref,true);
-                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.21.1',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
+                    lastFitCase={schema:'cvat-3d-tool-fit-case/v1',toolVersion:'1.22.3',jobId:payload.ref.jobId,frame:payload.ref.frame,clientId:target.clientID,
                         coordinateSystem:'world metres, Z up, Euler XYZ radians',seedBox:{points:Array.from(target.points),label:target.label.name,subType,attributes:attrs},
                         searchBox:{points:search,margin:.4},ground,roiPoints:points,groundSupport:cloudIndex.query(target.points[0],target.points[1],15),
                         parameters:{mode:'preset',preset:{key:preset.key,dimensions},clusterRadius:.45,xyzVoxel:.12,groundOffset:.08,keepDirection:payload.keepDirection===true},status:'fit-started'};
@@ -846,84 +874,34 @@
                 }
                 case 'GET_GROUNDS': return getGrounds(payload.ref, payload.ids || [payload.ref.clientId]);
                 case 'INSPECT_GROUND': return inspectGround(payload);
+                case 'SET_CONTROLS': if(!viewport)throw Error('Viewport controls unavailable');return viewport.configure(payload.settings);
+                case 'AIM_TOP': if(!viewport)throw Error('Viewport controls unavailable');return viewport.aimTop(payload.pointer||viewport.pointer);
+                case 'CORNER_TO_MOUSE': if(!viewport)throw Error('Viewport controls unavailable');return viewport.cornerToMouse(payload);
                 case 'AUTO_ADJUST': {
-                    const options=math.autoAdjustOptions(payload);
-                    const initial=validate(payload.ref,true).target;
-                    if(pendingObjects.size)throw new Error('Previous operation in progress');
-                    if(Math.abs(initial.points[3])>1e-6||Math.abs(initial.points[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
-                    const ground=await operationGround(payload.ref,payload);
+                    const options=math.autoAdjustOptions(payload),initial=validate(payload.ref,true).target;
+                    if(pendingObjects.size)throw Error('Previous operation in progress');
+                    let points=Array.from(initial.points),ground=null;
+                    if(options.autoMove){const p=viewport?viewport.topPosition(initial,payload.pointer||viewport.pointer||viewport.lastTop):pointerWorld(initial);points[0]=p.x;points[1]=p.y;}
+                    const pushing=options.moveLongitudinal!=='none'||options.moveLateral!=='none';
+                    if(options.autoGround||pushing){ground=await operationGround(payload.ref,payload,{points});validate(payload.ref,true);if(!math.canManuallySnapGround(ground))throw Error('Reliable ground unavailable; box unchanged');}
+                    if(options.autoGround){const snap=math.snapGroundPoints(points,ground);if(Math.abs(snap.deltaZ)>1.5)throw Error('Ground adjustment exceeds 1.5m; box unchanged');points=snap.newPoints;}
+                    let adjustment={alignment:{longitudinal:'none',lateral:'none'},pointCount:0};
+                    if(pushing){const nearby=await extractLocalPoints(payload.ref,.4,{points});validate(payload.ref,true);adjustment=math.autoAdjustBox(nearby,{points},ground,getSnapshot().boxes.filter(b=>b.id!==initial.clientID),options);points=adjustment.points;}
                     validate(payload.ref,true);
-                    if(!math.canManuallySnapGround(ground)||ground.confidence<.65)throw new Error('Reliable ground required for Auto Adjust; box unchanged');
-                    const base=math.snapGroundPoints(initial.points,math.makePlane(ground.a,ground.b,ground.c));
-                    if(Math.abs(base.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
-                    const nearby=await extractLocalPoints(payload.ref,.4,{points:base.newPoints});
-                    const {target}=validate(payload.ref,true),neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                    const adjustment=math.autoAdjustBox(nearby,target,ground,neighbors,options),points=adjustment.points;
-                    const finalGround=await operationGround(payload.ref,payload,{points});
-                    if(!math.canManuallySnapGround(finalGround)||finalGround.confidence<.65)throw new Error('Reliable ground unavailable under adjusted box; box unchanged');
-                    // Preserve the fitted world-space top while the final footprint's
-                    // ground fixes the bottom. This changes height, never heading.
-                    const snap=math.snapGroundPoints(points,math.makePlane(finalGround.a,finalGround.b,finalGround.c));
-                    if(Math.abs(snap.deltaZ)>1.5||points[8]-snap.deltaZ<.1)throw new Error('Final ground adjustment is unsuitable; box unchanged');
-                    points[2]+=snap.deltaZ/2;points[8]-=snap.deltaZ;
-                    if(points[8]<target.points[8]-Math.min(options.maxShrinkDistance,target.points[8]*options.maxShrinkPercent/100)-1e-8)throw new Error('Final ground would shrink height beyond the local limit; box unchanged');
-                    validate(payload.ref,true);
-                    const notes=[];
-                    if(adjustment.limitedFaces.length)notes.push('Some outward corrections limited to 0.4m');
-                    if(adjustment.retainedFaces.length)notes.push('Faces without nearby surface support preserved');
-                    if(adjustment.rejectedBoundaryCandidates)notes.push('Weak boundary patches ignored');
-                    const evidence={groundSource:ground.source,groundHeight:ground.c,orientationWarning:ground.orientationWarning||null,groundClearance:adjustment.groundClearance,excludedNearGroundPoints:adjustment.excludedNearGroundPoints,rejectedBoundaryCandidates:adjustment.rejectedBoundaryCandidates};
-                    if(points.every((v,i)=>Math.abs(v-target.points[i])<=1e-6))return {applied:false,unchanged:true,...evidence,warning:notes.join(' · ')||null};
-                    return {...await updateObject(payload.ref,{points}),...evidence,pointCount:adjustment.pointCount,faceChanges:adjustment.faceChanges,warning:notes.join(' · ')||null};
+                    if(points.slice(3,9).some((v,i)=>v!==initial.points[i+3]))throw Error('Auto Adjust must preserve size and orientation');
+                    const evidence={alignment:adjustment.alignment,pointCount:adjustment.pointCount,groundSource:options.autoGround?ground?.source:null};
+                    if(points.every((v,i)=>Math.abs(v-initial.points[i])<=1e-8))return {unchanged:true,...evidence};
+                    return {...await updateObject(payload.ref,{points}),...evidence};
                 }
                 case 'MOVE_TO_MOUSE': {
-                    const options=placementOptions(payload);
-                    const {target}=validate(payload.ref,true);
-                    if(pendingObjects.size)throw new Error('Previous operation in progress');
-                    const position=pointerWorld(target);let points=Array.from(target.points);
-                    points[0]=position.x;points[1]=position.y;
-                    let alignment={longitudinal:'none',lateral:'none'},alignmentWarning=null;
-                    let ground=options.useOriginGround?await originGround(options,payload.ref):null;
-                    let refined=false,pointCount=0,centerWarning=null,directionWarning=null,directionAdjusted=false,directionDeltaDegrees=0;
-                    try {
-                        const index=await ensureCloud();
-                        validate(payload.ref,true);
-                        if(!options.useOriginGround)ground=index.estimate({points});
-                        const search=points.slice();search[6]*=2;search[7]*=2;
-                        if(math.canManuallySnapGround(ground)){
-                            search[2]=ground.a*points[0]+ground.b*points[1]+ground.c+points[8]*.75;
-                            search[8]=points[8]*1.5;
-                        }
-                        const nearby=await extractLocalPoints(payload.ref,.4,{points:search});
-                        validate(payload.ref,true);
-                        const neighbors=getSnapshot().boxes.filter(b=>b.id!==target.clientID);
-                        const refinement=math.refineCenterNearPointer(nearby,{points},ground,neighbors,{adjustDirection:payload.adjustDirection===true,...options});
-                        alignment=refinement.alignment||alignment;alignmentWarning=refinement.alignmentWarning||null;
-                        refined=refinement.refined;pointCount=refinement.pointCount;
-                        directionAdjusted=refinement.directionAdjusted===true;directionDeltaDegrees=refinement.directionDeltaDegrees||0;directionWarning=refinement.directionWarning||null;
-                        if(refined){
-                            points=refinement.points;
-                            if(!options.useOriginGround){ground=null;ground=cloudIndex.estimate({points});}
-                        }else centerWarning=refinement.reason;
-                    } catch(error) {
-                        // A cloud failure permits XY placement; a stale edit never does.
-                        validate(payload.ref,true);
-                        centerWarning='Nearby object refinement unavailable: '+error.message;
-                    }
-                    let groundWarning='Ground unavailable or uncertain; kept Z';
-                    if(math.canManuallySnapGround(ground)){
-                        const snapped=math.snapGroundPoints(points,math.makePlane(ground.a,ground.b,ground.c));
-                        if(Math.abs(snapped.deltaZ)<=1.5){points[2]=snapped.newPoints[2];groundWarning=null;}
-                        else groundWarning='Ground adjustment exceeds 1.5m; kept Z';
-                    }
-                    validate(payload.ref,true);
-                    const warning=[centerWarning,directionWarning,alignmentWarning,groundWarning,ground?.orientationWarning].filter(Boolean).join(' · ')||null;
-                    return {...await updateObject(payload.ref,{points}),refined,pointCount,directionAdjusted,directionDeltaDegrees,groundFallback:!!groundWarning,groundSource:groundWarning?null:(ground?.source||'point-cloud'),groundHeight:groundWarning?null:ground?.c,alignment,warning};
+                    if(viewport)return viewport.moveToMouse(payload);
+                    const {target}=validate(payload.ref,true),position=pointerWorld(target),points=Array.from(target.points);points[0]=position.x;points[1]=position.y;
+                    return updateObject(payload.ref,{points});
                 }
                 case 'SNAP_GROUND': {
                     validate(payload.ref,true);
                     const {ground,localGroundReason}=await snapGroundCandidate(payload.ref,payload);
-                    if (!math.canManuallySnapGround(ground)) throw new Error('Không tìm được mặt đất đủ tin cậy dưới box hoặc gần gốc LiDAR');
+                    if (!math.canManuallySnapGround(ground)) throw new Error('Reliable local ground unavailable; box unchanged. Enable Use origin ground explicitly to use the configured origin height.');
                     const { target } = validate(payload.ref,true), plane = math.makePlane(ground.a,ground.b,ground.c), snap = math.snapGroundPoints(target.points,plane);
                     if (Math.abs(snap.deltaZ) > 1.5 && !payload.allowLargeAdjustment) throw new Error('ΔZ > 1.5m: verify ground plane before snapping');
                     const result = await updateObject(payload.ref,{points:snap.newPoints}); return {...result,deltaZ:snap.deltaZ,bottomZ:math.parseCVAT16Points(snap.newPoints).zBottom,orientationWarning:ground.orientationWarning||null,confidence:ground.configured?null:ground.confidence,configured:!!ground.configured,groundHeight:ground.c,groundSource:ground.source||'point-cloud',groundFallback:ground.source==='lidar-origin-ground',localGroundReason,referenceXY:ground.referenceXY||null};
@@ -939,11 +917,11 @@
             }
         }
         function start() {
-            connect(); interval = win.setInterval(connect, 1200);
+            viewport?.start();connect(); interval = win.setInterval(connect, 1200);if(viewport)viewportInterval=win.setInterval(()=>viewport.tick(),250);
             for (const [type, fn] of [['canvas.selected',lockedSelection],['canvas.doubleclicked',followSelected],['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.addEventListener?.(type,fn,true);
         }
         function dispose() {
-            if (disposed) return; disposed = true; unsubscribe?.(); win.clearInterval?.(interval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
+            if (disposed) return; disposed = true; viewport?.dispose(); unsubscribe?.(); win.clearInterval?.(interval);win.clearInterval?.(viewportInterval); stopFollowing();stopCamera(); clearAppearance(); listeners.clear();
             for (const [type, fn] of [['canvas.selected',lockedSelection],['canvas.doubleclicked',followSelected],['keydown',keyDown],['keyup',keyUp],['blur',clearKeys],['pointerdown',pointerDown],['pointerup',pointerUp],['pointermove',pointerMove],['pointerout',pointerOut],['contextmenu',contextMenu]]) win.removeEventListener?.(type,fn,true);
         }
         return {start,dispose,getSnapshot,command,extractLocalPoints,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},_connect:connect};

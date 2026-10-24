@@ -9,6 +9,7 @@ async function main(){
         const code=(file?fs.readFileSync(path.join(root,file),'utf8'):bundle).replace(/<\/script/gi,'<\\/script');
         html=html.replace(`<script src="${url}"></script>`,()=>'<script>'+code+'</script>');
     }
+    for(const name of ['feature_help.js','reference_images.js','reference_images_ui.js'])html=html.replace(`<script src="../extension/${name}"></script>`,()=>'<script>'+fs.readFileSync(path.join(root,'extension',name),'utf8').replace(/<\/script/gi,'<\\/script')+'</script>');
     const out=path.join(root,'dist');fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'CVAT-3D-Copilot-Demo.html'),html);
     fs.writeFileSync(path.join(out,'THIRD_PARTY_LICENSES.txt'),fs.readFileSync(path.join(root,'node_modules/three/LICENSE'),'utf8'));
     console.log('Built standalone offline demo: dist/CVAT-3D-Copilot-Demo.html');

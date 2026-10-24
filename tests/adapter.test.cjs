@@ -82,81 +82,30 @@ function adjustmentHarness({occluded=false,weakGround=false,bodyTop}={}){
     return h;
 }
 
-test('Auto Adjust saves one fixed-heading grounded edit and skips a repeat that has no correction',async()=>{
-    const h=adjustmentHarness(),before=h.adapter.getSnapshot().boxes[0].points;
-    const result=await h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1)}),after=h.adapter.getSnapshot().boxes[0].points;
-    assert.equal(result.applied,true);assert.equal(h.history.length,1);assert.deepEqual(after.slice(3,6),before.slice(3,6));
-    assert.ok(after[6]>before[6]);assert.ok(after[7]>before[7]);assert.ok(after[8]<before[8]&&after[8]>=before[8]-.1);
-    assert.ok(Math.abs(after[2]-after[8]/2)<1e-6);
-    const repeat=await h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1)});assert.equal(repeat.unchanged,true);assert.equal(h.history.length,1);h.adapter.dispose();
+test('Auto Adjust grounds once, preserves all dimensions and direction, and skips no-op',async()=>{
+ const h=adjustmentHarness();h.state.annotation.annotations.states[0].points[2]=1.3;
+ const before=h.adapter.getSnapshot().boxes[0].points;
+ const r=await h.adapter.command('AUTO_ADJUST',{autoMove:false,useOriginGround:true,ref:h.ref(1)}),after=h.adapter.getSnapshot().boxes[0].points;
+ assert.equal(r.applied,true);assert.equal(h.history.length,1);assert.equal(after[2],1);assert.deepEqual(after.slice(3),before.slice(3));
+ assert.equal((await h.adapter.command('AUTO_ADJUST',{autoMove:false,useOriginGround:true,ref:h.ref(1)})).unchanged,true);assert.equal(h.history.length,1);h.adapter.dispose();
+});
+test('Auto Adjust failure at push leaves earlier planned ground movement uncommitted',async()=>{
+ const h=adjustmentHarness({weakGround:true});h.state.annotation.annotations.states[0].points[2]=1.3;const before=h.adapter.getSnapshot().boxes[0].points;
+ await assert.rejects(h.adapter.command('AUTO_ADJUST',{autoMove:false,useOriginGround:true,moveLongitudinal:'forward',ref:h.ref(1)}),/extends beyond/);
+ assert.deepEqual(h.adapter.getSnapshot().boxes[0].points,before);assert.equal(h.history.length,0);h.adapter.dispose();
+});
+test('Auto Adjust toggles off permit a no-op without cloud or pointer and protected objects still fail',async()=>{
+ const h=harness();assert.equal((await h.adapter.command('AUTO_ADJUST',{autoMove:false,autoGround:false,ref:h.ref(1)})).unchanged,true);
+ h.state.annotation.annotations.states[0].lock=true;await assert.rejects(h.adapter.command('AUTO_ADJUST',{autoMove:false,autoGround:false,ref:h.ref(1)}),/locked/);assert.equal(h.history.length,0);h.adapter.dispose();
+});
+test('exact mouse placement maps pan, zoom, resize and transformed copies while preserving Z and rotation',async()=>{
+ const h=topHarness();h.camera.position.x=10;h.camera.position.y=4;h.camera.zoom=2;h.camera.updateProjectionMatrix();h.rect.width=400;h.rect.height=200;
+ const parent=new THREE.Group();parent.position.set(2,3,0);parent.rotation.z=.3;h.view.drawnObjects[1].cuboid.top=new THREE.Object3D();parent.add(h.view.drawnObjects[1].cuboid.top);
+ const before=h.state.annotation.annotations.states[0].points.slice();before[3]=.15;before[5]=.7;h.state.annotation.annotations.states[0].points=before;h.hover(400,250);
+ const at=parent.worldToLocal(new THREE.Vector3(12.5,5.25,1));await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1),useOriginGround:true,fallbackGroundHeight:100,adjustDirection:true});
+ const after=h.adapter.getSnapshot().boxes[0].points;assert.ok(Math.abs(after[0]-at.x)<1e-8);assert.ok(Math.abs(after[1]-at.y)<1e-8);assert.deepEqual(after.slice(2),before.slice(2));assert.equal(h.history.length,1);h.adapter.dispose();
 });
 
-test('Auto Adjust preserves distant unsupported faces without creating a keyframe',async()=>{
-    const h=adjustmentHarness({occluded:true}),before=h.adapter.getSnapshot().boxes[0].points.slice();
-    const result=await h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1)});
-    assert.equal(result.unchanged,true);assert.match(result.warning,/nearby surface/);assert.equal(h.history.length,0);assert.deepEqual(h.adapter.getSnapshot().boxes[0].points,before);h.adapter.dispose();
-});
-
-test('Auto Adjust native adapter applies configured height limit through final ground correction',async()=>{
-    for(const [options,expectedHeight] of [[{},2],[{maxShrinkDistance:.3,maxShrinkPercent:20},1.83],[{maxShrinkDistance:0,maxShrinkPercent:20},2]]){
-        const h=adjustmentHarness({bodyTop:1.8});
-        await h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1),...options});
-        const after=h.adapter.getSnapshot().boxes[0].points;
-        assert.ok(Math.abs(after[8]-expectedHeight)<1e-5);assert.equal(h.history.length,1);h.adapter.dispose();
-    }
-    const h=adjustmentHarness();await assert.rejects(h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1),maxShrinkDistance:4}),/Shrink limits/);assert.equal(h.history.length,0);h.adapter.dispose();
-});
-
-test('Auto Adjust uses origin without road evidence and still refuses locked/review edits',async()=>{
-    const h=adjustmentHarness({weakGround:true});
-    await h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1)});assert.ok(Math.abs(h.adapter.getSnapshot().boxes[0].points[2]-h.adapter.getSnapshot().boxes[0].points[8]/2)<1e-8);
-    h.state.annotation.annotations.states[0].lock=true;
-    await assert.rejects(h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1)}),/locked/);
-    h.state.annotation.annotations.states[0].lock=false;h.state.annotation.job.instance.dimension='3d';h.state.annotation.workspace='Review';
-    await assert.rejects(h.adapter.command('AUTO_ADJUST',{useOriginGround:true,ref:h.ref(1)}),/review/);assert.equal(h.history.length,1);h.adapter.dispose();
-});
-test('mouse placement maps camera pan, zoom, resize and transformed top copy to native coordinates',async()=>{
-    const h=topHarness();
-    h.camera.position.x=10;h.camera.position.y=4;h.camera.zoom=2;h.camera.updateProjectionMatrix();
-    h.rect.width=400;h.rect.height=200;
-    const parent=new THREE.Group();parent.position.set(2,3,0);parent.rotation.z=.3;
-    h.view.drawnObjects[1].cuboid.top=new THREE.Object3D();parent.add(h.view.drawnObjects[1].cuboid.top);
-    const seed=h.state.annotation.annotations.states[0].points.slice();seed[3]=.15;seed[5]=.7;h.state.annotation.annotations.states[0].points=seed;
-    h.hover(400,250);
-    const expected=parent.worldToLocal(new THREE.Vector3(12.5,5.25,1));
-    const result=await h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1)});
-    const actual=h.adapter.getSnapshot().boxes[0].points;
-    assert.ok(Math.abs(actual[0]-expected.x)<1e-8);assert.ok(Math.abs(actual[1]-expected.y)<1e-8);
-    assert.deepEqual(actual.slice(3),seed.slice(3));assert.ok(Math.abs(Math.min(...math.cuboidVertices(actual).map(p=>p[2])))<1e-8);assert.equal(result.groundFallback,false);assert.equal(h.history.length,1);h.adapter.dispose();
-});
-test('mouse placement ignores measured road tilt in fixed-height origin mode, preserving rotation and size',async()=>{
-    const h=topHarness(),scene=new THREE.Scene(),coordinates=[];
-    for(let x=-10;x<=15;x+=.3)for(let y=-10;y<=10;y+=.3)coordinates.push(x,y,.02*x+.1);
-    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
-    const before=h.adapter.getSnapshot().boxes[0].points;h.hover();
-    const result=await h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1)}),after=h.adapter.getSnapshot().boxes[0].points;
-    assert.equal(result.groundFallback,false);assert.ok(Math.abs(after[0]-5)<1e-8);assert.ok(Math.abs(after[1]-2.5)<1e-8);
-    const clearance=Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z));
-    assert.ok(Math.abs(clearance)<1e-6);assert.deepEqual(after.slice(3),before.slice(3));assert.equal(h.history.length,1);h.adapter.dispose();
-});
-
-for(const adjustDirection of [false,true])test(`mouse placement refines center and final ground in one save; direction option ${adjustDirection}`,async()=>{
-    const h=topHarness(),scene=new THREE.Scene(),coordinates=[],yaw=.35,c=Math.cos(yaw),s=Math.sin(yaw);
-    for(let x=-10;x<=15;x+=.3)for(let y=-10;y<=10;y+=.3)coordinates.push(x,y,.02*x+.1);
-    for(let i=0;i<=24;i++)for(let j=0;j<=12;j++)for(const z of [.8,1,1.2,1.4]){
-        const x=(i/24-.5)*2.6,y=(j/12-.5)*1.2;coordinates.push(5.6+c*x-s*y,2.8+s*x+c*y,z);
-    }
-    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coordinates,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};
-    h.state.annotation.annotations.states[0].points[5]=.2;
-    const before=h.adapter.getSnapshot().boxes[0].points;h.hover();
-    const result=await h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1),adjustDirection}),after=h.adapter.getSnapshot().boxes[0].points;
-    assert.equal(result.refined,true);assert.equal(result.groundFallback,false);
-    assert.ok(Math.abs(after[0]-5.6)<.07);assert.ok(Math.abs(after[1]-2.8)<.07);
-    assert.equal(result.directionAdjusted,adjustDirection);
-    if(adjustDirection)assert.ok(Math.abs(after[5]-yaw)<.04);else assert.equal(after[5],before[5]);
-    assert.deepEqual(after.slice(3,5),before.slice(3,5));assert.deepEqual(after.slice(6),before.slice(6));assert.equal(h.history.length,1);
-    const clearance=Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z));assert.ok(Math.abs(clearance)<1e-6);h.adapter.dispose();
-});
 test('mouse placement drops stale pointer and refuses locked, busy, drawing and review edits',async()=>{
     const h=topHarness();
     await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1)}),/Hover/);
@@ -174,12 +123,10 @@ test('mouse placement drops stale pointer and refuses locked, busy, drawing and 
     const drawing=topHarness({mode:'draw'});drawing.hover();await assert.rejects(drawing.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:drawing.ref(1)}),/drawing/);drawing.adapter.dispose();
 });
 
-test('large configured ground adjustment falls back to XY and preserves exact Z',async()=>{
-    const h=topHarness({adapterEnv:{math:{...math,GroundIndex:class{estimate(){return {a:0,b:0,c:10,accepted:true,confidence:1};}}}}});
-    const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute([0,0,10],3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};h.hover();
-    const before=h.adapter.getSnapshot().boxes[0].points;
-    const result=await h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1),fallbackGroundHeight:10});
-    assert.match(result.warning,/1.5m/);assert.deepEqual(h.adapter.getSnapshot().boxes[0].points.slice(2),before.slice(2));h.adapter.dispose();
+test('exact mouse placement never loads ground or applies former refinement settings',async()=>{
+ const h=topHarness();h.hover();const before=h.adapter.getSnapshot().boxes[0].points;
+ await h.adapter.command('MOVE_TO_MOUSE',{ref:h.ref(1),useOriginGround:true,fallbackGroundHeight:10,moveLongitudinal:'forward',adjustDirection:true});
+ const after=h.adapter.getSnapshot().boxes[0].points;assert.ok(Math.abs(after[0]-5)<1e-8);assert.ok(Math.abs(after[1]-2.5)<1e-8);assert.deepEqual(after.slice(2),before.slice(2));h.adapter.dispose();
 });
 
 test('track placement delegates current-frame keyframe creation to native save once',async()=>{
@@ -192,12 +139,10 @@ test('track placement delegates current-frame keyframe creation to native save o
     assert.deepEqual(keyframes[0],before);assert.deepEqual(keyframes[29],fitted);assert.deepEqual(undo.pop(),before);assert.deepEqual(redo,fitted);h.adapter.dispose();
 });
 
-test('frame change during cloud read discards placement before any native save',async()=>{
-    let h;
-    h=topHarness({adapterEnv:{delay:async()=>{h.state.annotation.player.frame.number=30;h.adapter.getSnapshot();}}});
-    const scene=new THREE.Scene(),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(new Float32Array(32769*3),3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};h.hover();
-    await assert.rejects(h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1)}),/frame changed/i);assert.equal(h.history.length,0);h.adapter.dispose();
+test('frame change during Auto Adjust cloud read prevents a native save',async()=>{
+ let h;h=adjustmentHarness();const prior=h.ref(1);h.state.annotation.player.frame.number++;h.notify();await assert.rejects(h.adapter.command('AUTO_ADJUST',{autoMove:false,ref:prior}),/frame changed/i);assert.equal(h.history.length,0);h.adapter.dispose();
 });
+
 test('selection uses clientID even when another object has the same serverID',async()=>{
     const h=harness();await h.adapter.command('SELECT_OBJECT',{ref:h.ref(99)});assert.equal(h.adapter.getSnapshot().activeBoxId,99);assert.equal(h.actions.length,0);h.adapter.dispose();
 });
@@ -418,9 +363,9 @@ test('batch commands use native unsaved collection and protect clientID keyframe
  assert.equal(h.history.length,0);h.adapter.dispose();
 });
 
-for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])for(const height of [0,-.4,.4])test(`${command} origin ground without cloud at ${height}`,async()=>{
+for(const command of ['SNAP_GROUND'])for(const height of [0,-.4,.4])test(`${command} origin ground without cloud at ${height}`,async()=>{
     const h=topHarness();h.hover();h.state.annotation.annotations.states[0].points[2]=1.3;
-    const result=await h.adapter.command(command,{useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:height});
+    const result=await h.adapter.command(command,{autoMove:false,useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:height});
     const after=h.adapter.getSnapshot().boxes[0].points;
     assert.ok(Math.abs(after[2]-after[8]/2-height)<1e-8);assert.equal(result.groundSource,'lidar-reference');assert.equal(h.history.length,1);h.adapter.dispose();
 });
@@ -502,12 +447,12 @@ test('origin ground keeps near, far-front and far-back boxes at the same height 
     }
     assert.equal(h.history.length,3);h.adapter.dispose();
 });
-for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE'])test(`${command} rejects invalid options and protects large height changes`,async()=>{
+for(const command of ['SNAP_GROUND'])test(`${command} rejects invalid options and protects large height changes`,async()=>{
     const h=topHarness();h.hover();
-    for(const options of [{useOriginGround:'yes'},{fallbackGroundHeight:Infinity},{fallbackGroundHeight:'0'},{moveLongitudinal:'left'},{moveLateral:'forward'}])await assert.rejects(h.adapter.command(command,{useOriginGround:true,ref:h.ref(1),...options}),/Invalid/);
+    for(const options of [{useOriginGround:'yes'},{fallbackGroundHeight:Infinity},{fallbackGroundHeight:'0'},{moveLongitudinal:'left'},{moveLateral:'forward'}])await assert.rejects(h.adapter.command(command,{autoMove:false,useOriginGround:true,ref:h.ref(1),...options}),/Invalid/);
     assert.equal(h.history.length,0);
-    if(command==='SNAP_GROUND')await assert.rejects(h.adapter.command(command,{useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:10}),/1.5m/);
-    else {const r=await h.adapter.command(command,{useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:10});assert.equal(r.groundSource,null);assert.match(r.warning,/1.5m/);assert.equal(h.adapter.getSnapshot().boxes[0].points[2],1);}
+    if(command==='SNAP_GROUND')await assert.rejects(h.adapter.command(command,{autoMove:false,useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:10}),/1.5m/);
+    else {const r=await h.adapter.command(command,{autoMove:false,useOriginGround:true,ref:h.ref(1),originGroundFallback:true,fallbackGroundHeight:10});assert.equal(r.groundSource,null);assert.match(r.warning,/1.5m/);assert.equal(h.adapter.getSnapshot().boxes[0].points[2],1);}
     h.adapter.dispose();
 });
 test('Ground Snap uses origin without cloud and overrides accepted measured road',async()=>{
@@ -543,12 +488,9 @@ test('ground inspection previews fixed-height origin snap despite a sloped cloud
  assert.ok(Math.abs(report.preview.bottomZ-applied.bottomZ)<1e-9);h.adapter.dispose();
 });
 
-test('ground inspection exposes fallback rejection and large-shift guard without editing',async()=>{
- const h=lidarGroundHarness();h.state.annotation.annotations.states[0].points[2]=10;
- const report=await h.adapter.command('INSPECT_GROUND',{ref:h.ref(1)});
- assert.equal(report.selectedGround.source,'lidar-origin-ground');
- assert.equal(report.localRoad.accepted,false);assert.ok(report.localGroundReason);
- assert.equal(report.preview.blockedByLargeAdjustment,true);assert.equal(h.history.length,0);h.adapter.dispose();
+test('ground inspection reports missing local road without using origin fallback',async()=>{
+ const h=lidarGroundHarness();h.state.annotation.annotations.states[0].points[2]=10;const r=await h.adapter.command('INSPECT_GROUND',{ref:h.ref(1)});
+ assert.equal(r.localRoad.accepted,false);assert.equal(r.selectedGround.accepted,false);assert.equal(r.preview,undefined);assert.ok(r.groundError);assert.notEqual(r.selectedGround.source,'lidar-origin-ground');assert.equal(h.history.length,0);h.adapter.dispose();
 });
 
 test('ground inspection works on locked boxes and reports missing road or reset reference',async()=>{
@@ -569,27 +511,14 @@ test('ground inspection discards a report when the frame changes during point-cl
  await assert.rejects(changing.adapter.command('INSPECT_GROUND',{ref:changing.ref(1)}),/frame changed/i);
  assert.equal(changing.history.length,0);changing.adapter.dispose();h.adapter.dispose();
 });
-test('Ground Snap falls back to measured LiDAR-origin height without contaminating local QC evidence',async()=>{
- const h=lidarGroundHarness(),before=h.adapter.getSnapshot().boxes[0].points.slice();
- const qc=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(qc.accepted,false);
- const r=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)}),p=h.adapter.getSnapshot().boxes[0].points;
- assert.equal(r.groundSource,'lidar-origin-ground');assert.equal(r.groundFallback,true);assert.ok(Math.abs(p[2]-p[8]/2+1.7)<.02);assert.deepEqual(p.slice(0,2),before.slice(0,2));assert.deepEqual(p.slice(3),before.slice(3));assert.equal(h.history.length,1);
- const after=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(after.accepted,false);assert.equal(after.source,'point-cloud');h.adapter.dispose();
+test('Ground Snap refuses automatic origin fallback but allows explicit origin mode',async()=>{
+ const h=lidarGroundHarness(),before=h.adapter.getSnapshot().boxes[0].points;
+ await assert.rejects(h.adapter.command('SNAP_GROUND',{ref:h.ref(1)}),/Reliable local ground/);assert.deepEqual(h.adapter.getSnapshot().boxes[0].points,before);assert.equal(h.history.length,0);
+ await h.adapter.command('SNAP_GROUND',{ref:h.ref(1),useOriginGround:true});assert.equal(h.history.length,1);h.adapter.dispose();
 });
-test('Ground Snap prefers local road to origin fallback and still blocks excessive vertical shifts',async()=>{
- const h=lidarGroundHarness(true),r=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)});assert.equal(r.groundFallback,false);assert.equal(r.groundSource,'point-cloud');assert.ok(Math.abs(r.groundHeight+1.4)<.02);h.adapter.dispose();
- const far=lidarGroundHarness();far.state.annotation.annotations.states[0].points[2]=10;await assert.rejects(far.adapter.command('SNAP_GROUND',{ref:far.ref(1)}),/1.5m/);assert.equal(far.history.length,0);far.adapter.dispose();
-});
-test('mouse alignment and final ground resolve in one native save',async()=>{
-    const h=topHarness(),scene=new THREE.Scene(),coords=[];
-    h.state.annotation.annotations.states[1].points[0]=30;
-    for(let x=-10;x<16;x+=.3)for(let y=-10;y<10;y+=.3)coords.push(x,y,.02*x);
-    for(let i=0;i<=20;i++)for(let j=0;j<=10;j++)for(const z of [.8,1,1.2])coords.push(5.4+(i/20-.5)*2,2.7+(j/10-.5),z);
-    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(coords,3));scene.add(new THREE.Points(geometry,new THREE.PointsMaterial()));h.view.views.perspective={scene};h.hover();
-    const result=await h.adapter.command('MOVE_TO_MOUSE',{useOriginGround:true,ref:h.ref(1),moveLongitudinal:'forward',moveLateral:'right',originGroundFallback:true,fallbackGroundHeight:-.5});
-    const after=h.adapter.getSnapshot().boxes[0].points;
-    assert.equal(result.refined,true);assert.deepEqual(result.alignment,{longitudinal:'forward',lateral:'right'});assert.ok(Math.abs(after[0]-6.4)<.08);assert.ok(Math.abs(after[1]-2.2)<.08);
-    assert.equal(result.groundSource,'lidar-reference');assert.ok(Math.abs(Math.min(...math.cuboidVertices(after).map(([x,y,z])=>z+.5)))<1e-5);assert.equal(h.history.length,1);h.adapter.dispose();
+test('Ground Snap uses local road and still rejects excessive explicit-origin shifts',async()=>{
+ const h=lidarGroundHarness(true),r=await h.adapter.command('SNAP_GROUND',{ref:h.ref(1)});assert.equal(r.groundFallback,false);assert.equal(r.groundSource,'point-cloud');h.adapter.dispose();
+ const far=lidarGroundHarness();far.state.annotation.annotations.states[0].points[2]=10;await assert.rejects(far.adapter.command('SNAP_GROUND',{useOriginGround:true,ref:far.ref(1)}),/1.5m/);assert.equal(far.history.length,0);far.adapter.dispose();
 });
 
 test('origin ground works with insufficient local road evidence',async()=>{
@@ -604,7 +533,7 @@ for(const command of ['SNAP_GROUND','AUTO_ADJUST','AUTO_FIT'])test(`${command} i
     const original=math.GroundIndex;math.GroundIndex=geometryMath.GroundIndex;
     try{
         const measured=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(measured.c,1.1);
-        await h.adapter.command(command,{useOriginGround:true,ref:h.ref(1),fallbackGroundHeight:.2,presetDimensions:[4.5,2.2,2]});
+        await h.adapter.command(command,{autoMove:false,useOriginGround:true,ref:h.ref(1),fallbackGroundHeight:.2,presetDimensions:[4.5,2.2,2]});
         const p=h.adapter.getSnapshot().boxes[0].points;assert.ok(Math.abs(p[2]-p[8]/2-.2)<1e-6);assert.equal(h.history.length,1);
         const qc=(await h.adapter.command('GET_GROUNDS',{ref:h.ref(1),ids:[1]}))[1];assert.equal(qc.c,1.1);assert.equal(qc.source,'point-cloud');
     }finally{math.GroundIndex=original;h.adapter.dispose();}
@@ -621,14 +550,14 @@ test('origin snap remains at the configured base across frames with changing clo
     assert.equal(h.history.length,3);h.adapter.dispose();
 });
 
-for(const command of ['SNAP_GROUND','MOVE_TO_MOUSE','AUTO_ADJUST','AUTO_FIT'])test(`${command} defaults to local road below origin and ignores the origin offset`,async()=>{
+for(const command of ['SNAP_GROUND','AUTO_ADJUST','AUTO_FIT'])test(`${command} defaults to local road below origin and ignores the origin offset`,async()=>{
     const h=adjustmentHarness();h.view.views.perspective.scene.position.z=-.6;
     if(command==='MOVE_TO_MOUSE'){
         const camera=new THREE.OrthographicCamera(-10,10,5,-5,.1,100);camera.position.set(0,0,20);camera.lookAt(0,0,0);camera.updateProjectionMatrix();camera.updateMatrixWorld();
         const element={getBoundingClientRect:()=>({left:0,top:0,width:400,height:200})};h.view.views.top={camera,renderer:{domElement:element}};
         h.events.pointermove({target:element,clientX:200,clientY:100});
     }
-    const r=await h.adapter.command(command,{ref:h.ref(1),fallbackGroundHeight:.8,presetDimensions:[4.5,2.2,2]});
+    const r=await h.adapter.command(command,{autoMove:false,ref:h.ref(1),fallbackGroundHeight:.8,presetDimensions:[4.5,2.2,2]});
     const p=h.adapter.getSnapshot().boxes[0].points;assert.ok(Math.abs(p[2]-p[8]/2+.6)<1e-5);assert.notEqual(r.groundSource,'lidar-reference');assert.equal(h.history.length,1);h.adapter.dispose();
 });
 test('unchecked Ground Snap refuses missing road evidence; checking origin works without a cloud',async()=>{

@@ -371,108 +371,36 @@
         return seededClusters(points, currentBox, ground, distance)[0]?.cluster || [];
     }
 
-    // Local cleanup of five faces. Ground fixes the bottom; heading is immutable.
-    // Unlike Auto-Fit, this does not impose class dimensions or search for a heading.
-    function autoAdjustOptions(options = {}) {
-        const {maxShrinkDistance = .1,maxShrinkPercent = 5}=options;
-        if(!Number.isFinite(maxShrinkDistance)||maxShrinkDistance<0||maxShrinkDistance>.4||!Number.isFinite(maxShrinkPercent)||maxShrinkPercent<0||maxShrinkPercent>50)throw new Error('Shrink limits must be 0–40 cm and 0–50%');
-        return {maxShrinkDistance,maxShrinkPercent};
+    // Position-only adjustment: close gaps without changing dimensions or orientation.
+    function autoAdjustOptions(options={}) {
+        return {autoMove:options.autoMove!==false,autoGround:options.autoGround!==false,
+            moveLongitudinal:['forward','backward'].includes(options.moveLongitudinal)?options.moveLongitudinal:'none',
+            moveLateral:['left','right'].includes(options.moveLateral)?options.moveLateral:'none'};
     }
-    function autoAdjustBox(points, currentBox, ground, neighborBoxes = [], options = {}) {
-        const {maxShrinkDistance,maxShrinkPercent}=autoAdjustOptions(options);
-        const original=Array.from(currentBox.points||currentBox);
-        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
-        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
-        if(!canManuallySnapGround(ground)||(ground.confidence!=null&&ground.confidence<.65))throw new Error('Reliable ground required for Auto Adjust; box unchanged');
-        const plane=makePlane(ground.a,ground.b,ground.c),snap=snapGroundPoints(original,plane);
-        if(Math.abs(snap.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
-        const base=snap.newPoints,c=Math.cos(base[5]),s=Math.sin(base[5]),owned=new Set();
-        const roi=extractBoxROI(points,{points:base},.4);
-        const rmse=Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0;
-        const groundClearance=Math.max(.2,3*rmse);
-        // Remove the entire near-ground band before clustering. Otherwise road
-        // returns can bridge into the object and supply false face evidence.
-        // Use each point's local plane height so slopes are handled correctly.
-        const local=roi.filter(p=>p[2]-plane.getTargetZ(p[0],p[1])>groundClearance+1e-6);
-        const excludedNearGroundPoints=roi.length-local.length;
-        for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(local,box,.02))owned.add(p);
-        const clusters=seededClusters(local.filter(p=>!owned.has(p)),{points:base},ground,.45).map(({cluster})=>{
-            const interior=extractBoxROI(cluster,{points:base},0),cells=new Set(interior.map(p=>p.map(v=>Math.floor(v/.08)).join(',')));
-            return {cluster,inside:cells.size};
-        }).filter(item=>item.inside>=10&&item.cluster.length>=20).sort((a,b)=>b.inside-a.inside);
-        if(!clusters.length)throw new Error(`Insufficient object points above the ${(groundClearance*100).toFixed(0)}cm ground exclusion band; box unchanged`);
-        if(clusters[1]&&clusters[1].inside>=clusters[0].inside*.8)throw new Error('Ambiguous object clusters inside this box; Auto Adjust left it unchanged');
-        const cluster=clusters[0].cluster,cells=new Map();
-        for(const p of cluster){const key=p.map(v=>Math.floor(v/.08)).join(',');if(!cells.has(key))cells.set(key,[c*(p[0]-base[0])+s*(p[1]-base[1]),-s*(p[0]-base[0])+c*(p[1]-base[1]),p[2]]);}
-        const support=[...cells.values()];
-        if(support.length<12)throw new Error('Too few occupied object cells; box unchanged');
-        const extent=(band,axis)=>{let lo=Infinity,hi=-Infinity;for(const p of band){lo=Math.min(lo,p[axis]);hi=Math.max(hi,p[axis]);}return hi-lo;};
-        let rejectedBoundaryCandidates=0;
-        function supportedPatch(band,other){
-            // A few returns or a one-dimensional noise streak are not a surface.
-            // Work in occupied cells, so duplicated returns cannot buy confidence.
-            const grid=new Map(),radius=.24,key=p=>p.map(v=>Math.floor(v/radius));
-            for(const p of band){const k=key(p).join(',');if(!grid.has(k))grid.set(k,[]);grid.get(k).push(p);}
-            const seen=new Set();
-            for(const seed of band){
-                if(seen.has(seed))continue;
-                const patch=[seed];seen.add(seed);
-                for(let i=0;i<patch.length;i++){
-                    const p=patch[i],[x,y,z]=key(p);
-                    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)for(let dz=-1;dz<=1;dz++)for(const q of grid.get(`${x+dx},${y+dy},${z+dz}`)||[]){
-                        if(!seen.has(q)&&Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2])<=radius+1e-8){seen.add(q);patch.push(q);}
-                    }
-                }
-                if(patch.length>=6&&other.every(a=>extent(patch,a)>=Math.min(.15,base[6+a]*.15)-1e-8)&&other.some(a=>extent(patch,a)>=Math.min(.25,base[6+a]*.25)-1e-8))return patch;
-            }
-            return null;
+    function autoAdjustBox(points,currentBox,ground,neighborBoxes=[],options={}) {
+        const original=Array.from(currentBox.points||currentBox),result=original.slice(),opts=autoAdjustOptions(options);
+        if(!parseCVAT16Points(original))throw Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw Error('Auto Adjust push supports upright boxes only');
+        if(!canManuallySnapGround(ground))throw Error('Reliable ground required to exclude road points from pushing');
+        const clearance=Math.max(.2,3*(Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0));
+        const aboveGround=points.filter(q=>q[2]-(ground.a*q[0]+ground.b*q[1]+ground.c)>clearance+1e-6);
+        const owned=new Set();for(const b of neighborBoxes)if(parseCVAT16Points(b.points))for(const q of extractBoxROI(aboveGround,b,.02))owned.add(q);
+        const candidates=seededClusters(aboveGround.filter(q=>!owned.has(q)),{points:original},ground,.45).filter(c=>c.cluster.length>=20);
+        if(!candidates.length)throw Error('No supported object points; box unchanged');
+        if(candidates[1]?.overlap>=candidates[0].overlap*.6)throw Error('Ambiguous object clusters; box unchanged');
+        const cells=new Map();for(const q of candidates[0].cluster){const k=q.map(v=>Math.floor(v/.12)).join(',');if(!cells.has(k))cells.set(k,q);}
+        if(cells.size<10)throw Error('Too few occupied cells for supported contact');
+        const c=Math.cos(original[5]),s=Math.sin(original[5]),xs=[],ys=[];
+        for(const q of cells.values()){const x=q[0]-original[0],y=q[1]-original[1];xs.push(c*x+s*y);ys.push(-s*x+c*y);}
+        const bounds=values=>{values.sort((a,b)=>a-b);return [values[Math.floor((values.length-1)*.01)],values[Math.ceil((values.length-1)*.99)]];};
+        const shifts=[0,0],alignment={longitudinal:opts.moveLongitudinal,lateral:opts.moveLateral};
+        for(const [axis,choice,values] of [[0,opts.moveLongitudinal,xs],[1,opts.moveLateral,ys]]){
+            if(choice==='none')continue;const [lo,hi]=bounds(values),size=original[6+axis];
+            if(hi-lo>size+1e-6||lo < -size/2-.02||hi>size/2+.02)throw Error('Supported object extends beyond the box; resize manually before pushing');
+            shifts[axis]=choice==='forward'||choice==='left'?Math.max(0,lo+size/2):Math.min(0,hi-size/2);
         }
-        function edge(axis,sign){
-            const sorted=support.slice().sort((a,b)=>sign*(a[axis]-b[axis]));
-            for(let i=0;i<sorted.length;i++){
-                if(i&&sorted[i][axis]===sorted[i-1][axis])continue;
-                let j=i;while(j<sorted.length&&sign*(sorted[j][axis]-sorted[i][axis])<=.06+1e-8)j++;
-                if(j-i<6){rejectedBoundaryCandidates++;continue;}
-                const band=sorted.slice(i,j),other=[0,1,2].filter(a=>a!==axis);
-                const patch=supportedPatch(band,other);
-                if(patch){
-                    const values=patch.map(p=>p[axis]).sort((a,b)=>a-b);
-                    // A local surface estimate, not the extreme of a mixed band.
-                    const value=values[Math.floor(values.length/2)],uncertainOutside=support.filter(p=>sign*(p[axis]-value)<-.03-1e-8).length>=3;
-                    return {value,band:patch,uncertainOutside};
-                }
-                rejectedBoundaryCandidates++;
-            }
-            return null;
-        }
-        const old=[-base[6]/2,base[6]/2,-base[7]/2,base[7]/2,base[2]+base[8]/2],next=old.slice();
-        const names=['rear','front','right','left','top'],limitedFaces=[],retainedFaces=[];
-        for(let face=0;face<5;face++){
-            const axis=face<2?0:face<4?1:2,sign=face<4&&face%2===0?1:-1,e=edge(axis,sign);
-            if(!e){retainedFaces.push(names[face]);continue;}
-            const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
-            // Weak outlying returns cannot justify expansion, but may be a real
-            // thin part. Do not shrink through a group of such uncertain returns.
-            if(shrinking&&e.uncertainOutside){retainedFaces.push(names[face]);continue;}
-            // Never walk a face across an occluded region, even on repeated
-            // presses: distant evidence means preserve, not clamp-and-shrink.
-            const shrinkLimit=Math.min(maxShrinkDistance,base[6+axis]*maxShrinkPercent/100);
-            if(shrinking&&sign*(e.value-old[face])>shrinkLimit+1e-8){retainedFaces.push(names[face]);continue;}
-            // Empty space alone is not evidence of a hidden surface. Side
-            // shrinking needs vertical surface support; top needs an XY patch.
-            if(shrinking&&(axis<2?extent(e.band,2)<Math.min(.25,base[8]*.2):extent(e.band,0)<Math.min(.25,base[6]*.2)||extent(e.band,1)<Math.min(.2,base[7]*.2))){retainedFaces.push(names[face]);continue;}
-            const delta=desired-old[face];if(!shrinking&&Math.abs(delta)>.4+1e-8)limitedFaces.push(names[face]);
-            if(Math.abs(delta)>.01)next[face]=old[face]+Math.max(-.4,Math.min(.4,delta));
-        }
-        const dx=(next[0]+next[1])/2,dy=(next[2]+next[3])/2,result=original.slice();
-        result[0]=base[0]+c*dx-s*dy;result[1]=base[1]+s*dx+c*dy;
-        result[6]=next[1]-next[0];result[7]=next[3]-next[2];
-        const bottom=Math.max(...[[-1,-1],[-1,1],[1,-1],[1,1]].map(([x,y])=>plane.getTargetZ(result[0]+c*x*result[6]/2-s*y*result[7]/2,result[1]+s*x*result[6]/2+c*y*result[7]/2)));
-        result[8]=next[4]-bottom;result[2]=bottom+result[8]/2;
-        if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
-        if(result[8]<base[8]-Math.min(maxShrinkDistance,base[8]*maxShrinkPercent/100)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
-        return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
-            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints,rejectedBoundaryCandidates};
+        result[0]+=c*shifts[0]-s*shifts[1];result[1]+=s*shifts[0]+c*shifts[1];
+        return {points:result,alignment,pointCount:cells.size,shifts};
     }
 
     // Mouse placement is a position correction, not a dimension or heading fit.

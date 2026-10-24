@@ -1,4 +1,36 @@
-# CVAT 3D TOOL 1.21.1
+# CVAT 3D TOOL 1.22.3
+
+## Visible controls and feature guides — 1.22.3
+
+Free Cam now has a green **ON** state while active. **Box → Quick controls** shows current keyboard/mouse bindings for aiming Top view, moving the box, nearest-corner resizing and direction rotation. Action buttons also show their current bindings in compact mode.
+
+Small right-side **?** buttons open read-only guides beside the feature, including annotation, ground, camera, appearance, POV images, batch editing, import/export, updates and work-log controls. Escape, × or clicking outside closes the guide. Help remains available when an action is disabled; it never runs the action. Shortcut hints and guide bindings update when controls are rebound.
+
+## Mouse-wheel POV zoom — 1.22.2
+
+Scroll over the POV image or enlarged preview to zoom in/out around the cursor. Left-drag an enlarged image to pan. Wheel input stays inside the image viewer, leaving the page and CVAT cameras unchanged. The magnify buttons and Fit remain available.
+
+## POV image magnification and larger previews — 1.22.1
+
+The floating reference image now has **Zoom in**, **Zoom out**, a percentage indicator and **Fit**. Drag an enlarged image to pan; magnification stays set when Auto changes direction. These controls affect the reference image only.
+
+In **Configure wheel**, use the small magnify button at the top-right of a wheel thumbnail or image-list thumbnail to open a larger, resizable preview with its own zoom and Fit controls. Opening a preview does not assign the image. Close with × or Escape; previews close when the CVAT frame changes to avoid displaying stale imagery.
+
+Build/application notes: [POV image QoL 1.22.1](docs/verification/pov-images-1.22.1.md).
+
+## Manual controls, directional images and explicit ground selection — 1.22.0
+
+New defaults: **R + left-drag** rotates yaw by circling the selected box in 3D; **E** moves the nearest projected corner to the cursor in Top/Side/Front using native opposite-corner resizing; **M** in 3D aims Top view at a LiDAR point, while **M** in Top moves the box center exactly to cursor XY. Exact placement preserves Z, size and orientation. Existing saved bindings are preserved; use **Shortcuts & controls → Reset all controls** to adopt the new defaults.
+
+**Shortcuts & controls** supports keyboard, left/middle/right/side mouse buttons, wheel up/down, and held-key/modifier + mouse combinations. Rotation's held key and mouse button are configurable, including mouse-only dragging. Record inside the dedicated capture area. Native controls are intercepted only for applicable tool bindings; typing and dialogs retain their normal behavior.
+
+The replacement **Auto Adjust** is position-only: optional Move to mouse → optional Ground snap → Forward/Backward/Off → Left/Right/Off along the box's axes. Pushing closes gaps around supported enclosed object points, excluding ground and isolated noise. Size and orientation never change. All enabled stages must succeed before one native geometry write; failures leave the box unchanged. Expand **Auto Adjust options** in Box to configure it. The old shrink limits and automatic direction refinement during mouse placement are removed.
+
+**Camera → Appearance** has one background color for all views and independent **1–32 px** Top/Side/Front point sizes, Follow CVAT and Reset. **Camera → Reference images** opens a draggable, resizable current-frame context-image viewer. Auto follows the locked/selected box relative to the LiDAR reset origin, otherwise the camera look-at target. **Configure wheel** opens the editable direction wheel: image thumbnails, add/remove slots, direction angles, draggable coverage boundaries and forward-heading calibration. Mappings persist per CVAT server/task. The default image order is Back, Front, Front-left, Left, Back-left, Front-right, Right, Back-right; verify the order and heading for your dataset.
+
+With **Use origin ground OFF**, Ground Snap uses reliable local road only. Missing local evidence leaves the box unchanged; there is no automatic origin fallback. Enabling origin mode explicitly uses the reset-reference height plus signed offset.
+
+Local build and test instructions: [1.22.0 testing guide](docs/verification/manual-images-1.22.0.md). The standalone demo has one 3D viewport; native Top/Side/Front interaction and context images require CVAT. No live annotations were edited and no release was published.
 
 ## Combined update — 1.21.1
 

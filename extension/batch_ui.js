@@ -44,7 +44,7 @@ function mount(env){
    dialog.querySelector('[data-page-size]').onchange=e=>{model.pageSize=Number(e.target.value);model.page=model.from+Math.floor((model.page-model.from)/model.pageSize)*model.pageSize;dialog.dataset.density=model.pageSize;renderPage();};
    dialog.querySelector('[data-action="apply"]').onclick=apply;
    dialog.querySelector('[data-action="export"]').onclick=()=>{
-    const data={schema:'cvat-batch-preview/v1',version:'1.21.1',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
+    const data={schema:'cvat-batch-preview/v1',version:'1.22.3',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
      keyframes:model.keyframes,baseline:model.baseline,frames:[...model.cards.values()],note:'Diagnostic preview; sampled ROI only, not a full point-cloud sequence or certified ground truth'};
     const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'})),link=document.createElement('a');
     link.href=url;link.download='batch-job'+model.jobId+'-track'+model.clientId+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);

@@ -1,5 +1,6 @@
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');
+const {reveal}=require('./ui-helpers.cjs');
 async function open(page){await page.goto('http://127.0.0.1:4173/demo/index.html');await page.locator('[data-case="2"]').click();await expect(page.locator('#c3d-btn-autofit')).toBeEnabled();}
 test('floating tasks retain one instance of controls and navigation never edits annotations',async({page})=>{
  const errors=[];page.on('pageerror',e=>errors.push(e.message));await open(page);
@@ -13,7 +14,7 @@ test('floating tasks retain one instance of controls and navigation never edits 
 });
 test('expand, keyboard tabs and collapse retain selection and editable input values',async({page})=>{
  await open(page);const selected=await page.locator('#c3d-select-box').inputValue();
- await page.locator('#c3d-task-box .c3d-quick-actions + .c3d-rot-grid + .c3d-task-details summary').click();await page.locator('#c3d-preset-l').fill('4.75');
+ await reveal(page,'c3d-preset-l');await page.locator('#c3d-preset-l').fill('4.75');
  await page.locator('#c3d-btn-expand').click();await expect(page.locator('#cvat-3d-copilot-root')).toHaveClass(/c3d-expanded/);
  await page.evaluate(()=>{window.tabArrowLeaks=0;document.addEventListener('keydown',e=>{if(e.key==='ArrowRight')tabArrowLeaks++;});});await page.locator('#c3d-tab-box').focus();await page.keyboard.press('ArrowRight');expect(await page.evaluate(()=>tabArrowLeaks)).toBe(0);await expect(page.locator('#c3d-tab-qc')).toHaveAttribute('aria-selected','true');
  await page.locator('#c3d-tab-box').click();await expect(page.locator('#c3d-preset-l')).toHaveValue('4.75');await expect(page.locator('#c3d-select-box')).toHaveValue(selected);

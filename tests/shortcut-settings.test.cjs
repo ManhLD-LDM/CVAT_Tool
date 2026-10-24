@@ -1,53 +1,23 @@
-const {test}=require('node:test');
-const assert=require('node:assert/strict');
-const s=require('../extension/shortcut_settings.js');
-test('shrink settings persist, migrate old settings, and reject invalid stored values',()=>{
-    const settings={...s.defaults(),maxShrinkDistance:.25,maxShrinkPercent:20};
-    assert.deepEqual(s.normalize(JSON.parse(JSON.stringify(settings))),settings);
-    assert.equal(s.normalize({version:1}).maxShrinkDistance,.1);assert.equal(s.normalize({version:1}).maxShrinkPercent,5);
-    for(const bad of [-1,Infinity,NaN,'10',null,51])assert.equal(s.normalize({version:1,maxShrinkPercent:bad}).maxShrinkPercent,5);
-    assert.equal(s.normalize({version:1,maxShrinkDistance:.41}).maxShrinkDistance,.1);
-    assert.equal(s.normalize({version:1,maxShrinkDistance:0,maxShrinkPercent:0}).maxShrinkDistance,0);
+const {test}=require('node:test'),assert=require('node:assert/strict'),s=require('../extension/shortcut_settings.js');
+test('v1 migration preserves custom and cleared keyboard bindings and removes shrink settings',()=>{
+ const raw={version:1,keepDirection:true,maxShrinkDistance:.4,maxShrinkPercent:20,bindings:{MOVE_TO_MOUSE:{code:'KeyZ',alt:true,shift:false,ctrl:false,meta:false},AUTO_FIT:null}},value=s.normalize(raw);
+ assert.equal(value.version,2);assert.equal(value.keepDirection,true);assert.deepEqual(value.bindings.MOVE_TO_MOUSE,raw.bindings.MOVE_TO_MOUSE);assert.equal(value.bindings.AUTO_FIT,null);assert.equal('maxShrinkDistance'in value,false);assert.equal('maxShrinkPercent'in value,false);assert.equal('adjustMoveDirection'in value,false);
+ assert.equal(s.format(s.defaults().bindings.MOVE_TO_MOUSE),'M');assert.equal(s.format(value.bindings.CORNER_TO_MOUSE),'E');assert.equal(s.format(value.bindings.ROTATE_DRAG),'R+Left mouse');
 });
-test('shortcut settings preserve valid choices and clear assignments across serialization',()=>{
-    const settings=s.defaults();settings.keepDirection=true;settings.adjustMoveDirection=true;settings.followSelected=true;
-    s.assign(settings,'SNAP_GROUND',s.fromEvent({code:'KeyZ'}));
-    s.assign(settings,'AUTO_FIT',null);
-    assert.deepEqual(s.normalize(JSON.parse(JSON.stringify(settings))),settings);
-    assert.equal(s.format(settings.bindings.SNAP_GROUND),'Z');
-    assert.equal(s.format(settings.bindings.MOVE_TO_MOUSE),'Alt+Shift+M');
+test('keyboard, mouse buttons, wheel and held-key combinations round-trip',()=>{
+ for(const event of [{code:'KeyZ'},...[0,1,2,3,4].map(button=>({type:'pointerdown',button})),{type:'wheel',deltaY:-1},{type:'wheel',deltaY:1}])for(const hold of [undefined,...(event.type?['KeyR']:[])]){
+  const settings=s.defaults(),value=s.fromEvent({...event,ctrlKey:true},hold);s.assign(settings,'SNAP_GROUND',value);assert.deepEqual(s.normalize(JSON.parse(JSON.stringify(settings))),settings);assert.ok(s.format(value).startsWith('Ctrl+'));
+ }
+ assert.equal(s.fromEvent({type:'wheel',deltaY:0}),null);assert.equal(s.fromEvent({code:'ShiftLeft'}),null);
 });
-test('shortcuts reject duplicate bindings, modifiers alone, and invalid saved values',()=>{
-    const settings=s.defaults();
-    assert.throws(()=>s.assign(settings,'AUTO_FIT',settings.bindings.SNAP_GROUND),/Already assigned/);
-    assert.throws(()=>s.assign(settings,'AUTO_FIT',{code:'ShiftLeft'}),/supported key/);
-    assert.equal(s.fromEvent({code:'ShiftLeft'}),null);
-    const restored=s.normalize({version:1,keepDirection:'yes',bindings:{AUTO_FIT:{code:'KeyZ',alt:'yes'}}});
-    assert.deepEqual(restored,s.defaults());
-    assert.equal(s.normalize({version:1,adjustMoveDirection:'yes'}).adjustMoveDirection,false);
-    assert.equal(s.normalize({version:1,followSelected:'yes'}).followSelected,false);
-    assert.equal(s.normalize({version:1}).followSelected,false);
-    const older=s.defaults();delete older.adjustMoveDirection;
-    assert.equal(s.normalize(older).adjustMoveDirection,false);
-    // A custom key that is another action's default must survive loading.
-    s.assign(settings,'SNAP_GROUND',null);s.assign(settings,'AUTO_FIT',s.defaults().bindings.SNAP_GROUND);
-    assert.deepEqual(s.normalize(settings),settings);
+test('drag bindings require a mouse button and conflicts are rejected',()=>{
+ const settings=s.defaults();assert.throws(()=>s.assign(settings,'ROTATE_DRAG',s.fromEvent({code:'KeyX'})),/mouse button/);assert.throws(()=>s.assign(settings,'ROTATE_DRAG',s.fromEvent({type:'wheel',deltaY:1})),/mouse button/);
+ s.assign(settings,'ROTATE_DRAG',s.fromEvent({type:'pointerdown',button:2}));assert.equal(s.format(settings.bindings.ROTATE_DRAG),'Right mouse');assert.throws(()=>s.assign(settings,'SNAP_GROUND',settings.bindings.ROTATE_DRAG),/Already assigned/);
 });
-
-test('new Auto Adjust shortcut preserves existing user assignments during settings upgrade',()=>{
-    const older=s.defaults();delete older.bindings.AUTO_ADJUST;
-    older.bindings.SNAP_GROUND={code:'KeyB',alt:true,shift:true,ctrl:false,meta:false};
-    const restored=s.normalize(older);
-    assert.deepEqual(restored.bindings.SNAP_GROUND,older.bindings.SNAP_GROUND);assert.equal(restored.bindings.AUTO_ADJUST,null);
-    delete older.bindings.SNAP_GROUND;
-    assert.equal(s.format(s.normalize(older).bindings.AUTO_ADJUST),'Alt+Shift+B');
+test('duplicate migration preserves custom assignments before new defaults',()=>{
+ const raw={version:1,bindings:{SNAP_GROUND:s.defaults().bindings.CORNER_TO_MOUSE}},restored=s.normalize(raw);assert.deepEqual(restored.bindings.SNAP_GROUND,raw.bindings.SNAP_GROUND);assert.equal(restored.bindings.CORNER_TO_MOUSE,null);
 });
-
-test('placement settings migrate, persist signed heights and normalize invalid values',()=>{
-    const defaults=s.normalize({version:1});
-    assert.equal(defaults.originGroundFallback,undefined);assert.equal(defaults.useOriginGround,false);assert.equal(defaults.fallbackGroundHeight,0);assert.equal(defaults.moveLongitudinal,'none');assert.equal(defaults.moveLateral,'none');
-    const saved={...defaults,useOriginGround:true,fallbackGroundHeight:-.35,moveLongitudinal:'forward',moveLateral:'right'};
-    assert.deepEqual(s.normalize({...saved,originGroundFallback:false}),saved);
-    const invalid=s.normalize({...saved,fallbackGroundHeight:Infinity,moveLongitudinal:'left',moveLateral:'backward'});
-    assert.equal(invalid.fallbackGroundHeight,0);assert.equal(invalid.moveLongitudinal,'none');assert.equal(invalid.moveLateral,'none');
+test('appearance, auto toggles, signed ground height and direction options persist and validate',()=>{
+ const settings={...s.defaults(),autoMove:false,autoGround:false,background:'#abcdef',projectionFollow:false,projectionSize:32,useOriginGround:true,fallbackGroundHeight:-.4,moveLongitudinal:'forward',moveLateral:'right'};assert.deepEqual(s.normalize(settings),settings);
+ const invalid=s.normalize({...settings,projectionSize:100,background:'red',fallbackGroundHeight:Infinity,moveLongitudinal:'left'});assert.equal(invalid.projectionSize,2);assert.equal(invalid.background,null);assert.equal(invalid.fallbackGroundHeight,0);assert.equal(invalid.moveLongitudinal,'none');
 });

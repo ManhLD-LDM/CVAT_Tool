@@ -12,24 +12,32 @@
         ['ROTATE_RIGHT','Rotate +90°','BracketRight','c3d-btn-rot-right'],
         ['FLIP','Rotate 180°','KeyF','c3d-btn-flip'],
     ].map(([id,label,code,button])=>({id,label,button,binding:{code,alt:true,shift:true,ctrl:false,meta:false}}));
+    definitions.find(d=>d.id==='MOVE_TO_MOUSE').binding={code:'KeyM',alt:false,shift:false,ctrl:false,meta:false};
+    definitions.push({id:'CORNER_TO_MOUSE',label:'Nearest corner to cursor · Top/Side/Front',binding:{code:'KeyE',alt:false,shift:false,ctrl:false,meta:false}},
+        {id:'ROTATE_DRAG',label:'Rotate by circular drag · 3D',gesture:true,binding:{code:'Mouse0',hold:'KeyR',alt:false,shift:false,ctrl:false,meta:false}});
     const validCode=code=>typeof code==='string'&&/^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-9]|1[0-9]|2[0-4])|Arrow(Up|Down|Left|Right)|BracketLeft|BracketRight|Backquote|Backslash|Comma|Period|Slash|Semicolon|Quote|Minus|Equal|Space|Enter|Tab|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Numpad(Add|Subtract|Multiply|Divide|Decimal|Enter))$/.test(code);
     function binding(value){
-        if(!value||!validCode(value.code)||!['alt','shift','ctrl','meta'].every(k=>typeof value[k]==='boolean'))return null;
-        return {code:value.code,alt:value.alt,shift:value.shift,ctrl:value.ctrl,meta:value.meta};
+        if(!value||!(validCode(value.code)||/^(Mouse[0-4]|WheelUp|WheelDown)$/.test(value.code))||!['alt','shift','ctrl','meta'].every(k=>typeof value[k]==='boolean'))return null;
+        if(value.hold&&(!validCode(value.hold)||! /^(Mouse|Wheel)/.test(value.code)))return null;
+        return {code:value.code,...(value.hold?{hold:value.hold}:{}),alt:value.alt,shift:value.shift,ctrl:value.ctrl,meta:value.meta};
     }
-    const signature=b=>b?`${b.code}:${+b.alt}${+b.shift}${+b.ctrl}${+b.meta}`:'';
-    const fromEvent=e=>binding({code:e.code,alt:!!e.altKey,shift:!!e.shiftKey,ctrl:!!e.ctrlKey,meta:!!e.metaKey});
+    const signature=b=>b?`${b.code}:${b.hold||''}:${+b.alt}${+b.shift}${+b.ctrl}${+b.meta}`:'';
+    const fromEvent=(e,hold)=>binding({code:e.type==='wheel'?(e.deltaY<0?'WheelUp':e.deltaY>0?'WheelDown':''):e.type==='pointerdown'||e.type==='mousedown'?`Mouse${e.button}`:e.code,...(hold?{hold}:{}),alt:!!e.altKey,shift:!!e.shiftKey,ctrl:!!e.ctrlKey,meta:!!e.metaKey});
     function format(b){
         if(!b)return 'Unassigned';
         const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
-        return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
+        const mouse={Mouse0:'Left mouse',Mouse1:'Middle mouse',Mouse2:'Right mouse',Mouse3:'Mouse back',Mouse4:'Mouse forward',WheelUp:'Wheel up',WheelDown:'Wheel down'};
+        return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',b.hold?.replace(/^Key|^Digit/,''),mouse[b.code]||names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
     }
-    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,useOriginGround:false,fallbackGroundHeight:0,moveLongitudinal:'none',moveLateral:'none',presetOverrides:{},followSelected:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    const defaults=()=>({version:2,keepDirection:false,useOriginGround:false,fallbackGroundHeight:0,moveLongitudinal:'none',moveLateral:'none',presetOverrides:{},followSelected:false,autoMove:true,autoGround:true,background:null,projectionFollow:true,projectionSize:2,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
     function normalize(raw){
         const result=defaults();
-        if(!raw||raw.version!==1)return result;
+        if(!raw||![1,2].includes(raw.version))return result;
         result.keepDirection=raw.keepDirection===true;
-        result.adjustMoveDirection=raw.adjustMoveDirection===true;
+        result.autoMove=raw.autoMove!==false;result.autoGround=raw.autoGround!==false;
+        result.background=/^#[0-9a-f]{6}$/i.test(raw.background)?raw.background:null;
+        result.projectionFollow=raw.projectionFollow!==false;
+        if(Number.isFinite(raw.projectionSize)&&raw.projectionSize>=1&&raw.projectionSize<=32)result.projectionSize=raw.projectionSize;
         result.useOriginGround=raw.useOriginGround===true;
         if(Number.isFinite(raw.fallbackGroundHeight))result.fallbackGroundHeight=raw.fallbackGroundHeight;
         if(['none','forward','backward'].includes(raw.moveLongitudinal))result.moveLongitudinal=raw.moveLongitudinal;
@@ -38,13 +46,12 @@
             if(/^(vehicles:[a-z-]+|two-wheels|pedestrian|Animal|Obstacle)$/.test(key)&&Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]))result.presetOverrides[key]=value.slice();
         }
         result.followSelected=raw.followSelected===true;
-        for(const [key,max] of [['maxShrinkDistance',.4],['maxShrinkPercent',50]])if(Number.isFinite(raw[key])&&raw[key]>=0&&raw[key]<=max)result[key]=raw[key];
         // Load valid custom bindings first so a default cannot steal a saved key.
         const seen=new Set(),missing=[];
         for(const d of definitions){
             if(raw.bindings?.[d.id]===null){result.bindings[d.id]=null;continue;}
             const b=binding(raw.bindings?.[d.id]);
-            if(b&&!seen.has(signature(b))){result.bindings[d.id]=b;seen.add(signature(b));}
+            if(b&&(!d.gesture||/^Mouse[0-4]$/.test(b.code))&&!seen.has(signature(b))){result.bindings[d.id]=b;seen.add(signature(b));}
             else {result.bindings[d.id]=null;missing.push(d);}
         }
         for(const d of missing)if(!seen.has(signature(d.binding))){result.bindings[d.id]={...d.binding};seen.add(signature(d.binding));}
@@ -53,7 +60,8 @@
     function assign(settings,id,value){
         if(!definitions.some(d=>d.id===id))throw new Error('Unknown action');
         const b=value===null?null:binding(value);
-        if(value!==null&&!b)throw new Error('Press a supported key, with optional modifiers');
+        if(value!==null&&!b)throw new Error('Press a supported key or mouse input, with optional modifiers');
+        if(b&&definitions.find(d=>d.id===id).gesture&&!/^Mouse[0-4]$/.test(b.code))throw new Error('Drag controls require a mouse button, optionally with a held key');
         const duplicate=b&&definitions.find(d=>d.id!==id&&signature(settings.bindings[d.id])===signature(b));
         if(duplicate)throw new Error(`Already assigned to ${duplicate.label}; clear that binding first`);
         settings.bindings[id]=b;

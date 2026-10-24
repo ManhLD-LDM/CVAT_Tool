@@ -1,0 +1,26 @@
+const fs=require('node:fs'),{expect}=require('@playwright/test');
+const three=require('esbuild').buildSync({stdin:{contents:"window.__THREE_TEST=require('three');",resolveDir:process.cwd()},bundle:true,write:false,format:'iife',minify:true}).outputFiles[0].text;
+async function fixture(page,{ground=true,object=true,origin=0}={}){
+ await page.goto('http://127.0.0.1:4173/extension/manifest.json');await page.evaluate(()=>localStorage.clear());
+ await page.setContent('<html data-c3d-demo="true"><body style="margin:0;background:#202630"><canvas id="perspective" style="position:absolute;left:30px;top:40px;width:600px;height:300px;background:#080d14"></canvas><canvas id="top" style="position:absolute;left:30px;top:390px;width:600px;height:300px;background:#080d14"></canvas><canvas id="side" style="position:absolute;left:30px;top:740px;width:280px;height:200px;background:#080d14"></canvas><canvas id="front" style="position:absolute;left:340px;top:740px;width:280px;height:200px;background:#080d14"></canvas></body></html>');
+ await page.addStyleTag({path:'extension/styles.css'});await page.addScriptTag({content:three});
+ await page.evaluate(({ground,object,origin})=>{
+  const T=window.__THREE_TEST,views={},cuboid={},label={id:1,name:'vehicles',color:'#60a5fa'},history=[];window.savedEdits=history;window.nativeInputs=[];
+  const points=[];if(ground)for(let x=-12;x<=12;x+=.3)for(let y=-12;y<=12;y+=.3)points.push(x,y,0);
+  if(object)for(let i=0;i<=24;i++)for(let j=0;j<=12;j++)for(const z of [.4,.7,1,1.3])points.push(-.8+i/15,-.4+j/15,z);
+  const geometry=new T.BufferGeometry();geometry.setAttribute('position',new T.Float32BufferAttribute(points,3));const material=new T.PointsMaterial({size:2});
+  for(const name of ['perspective','top','side','front']){const camera=name==='perspective'?new T.PerspectiveCamera(60,2,.1,200):new T.OrthographicCamera(-10,10,5,-5,.1,200);camera.position.set(...({perspective:[0,0,20],top:[0,0,20],side:[0,-20,1],front:[20,0,1]}[name]));camera.up.set(...(['side','front'].includes(name)?[0,0,1]:[0,1,0]));camera.lookAt(0,0,1);camera.updateProjectionMatrix();camera.updateMatrixWorld();const scene=new T.Scene();scene.background=new T.Color('#000000');scene.add(new T.Points(geometry,material));const mesh=new T.Mesh(new T.BoxGeometry(),new T.MeshBasicMaterial());mesh.position.set(0,0,1);mesh.scale.set(4,2,2);scene.add(mesh);cuboid[name]=mesh;const target=new T.Vector3(0,0,1),controls={enabled:true,target,getTarget(v){return v.copy(target);},setLookAt(x,y,z,tx,ty,tz){camera.position.set(x,y,z);target.set(tx,ty,tz);camera.lookAt(target);},update(){}};views[name]={scene,camera,controls,renderer:{domElement:document.getElementById(name)},rayCaster:{renderer:new T.Raycaster()}};}
+  const box={clientID:1,serverID:20,frame:0,objectType:'track',shapeType:'cuboid',points:[0,0,1,0,0,0,4,2,2,0,0,0,0,0,0,0],label,outside:false,lock:false,async save(){history.push(this.points.slice());return {...this,points:this.points.slice()};}};
+  const canvas={activate(){},mode:()=> 'idle',render(){},html:()=>Object.fromEntries(Object.entries(views).map(([k,v])=>[k,v.renderer.domElement])),view:{cameraSettings:{perspective:{lookAt:[0,0,origin]}},views,drawnObjects:{1:{cuboid,data:{points:box.points}}}}};
+  const images={};for(let i=0;i<8;i++){const image=document.createElement('canvas');image.width=320;image.height=180;const ctx=image.getContext('2d');ctx.fillStyle=['#1e3a8a','#166534','#7e22ce','#9f1239','#854d0e','#0e7490','#4338ca','#be123c'][i];ctx.fillRect(0,0,320,180);ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText('Camera '+(i+1),70,95);images['camera-'+(i+1)+'.jpg']=image;}
+  window.testImages=images;window.contextCalls=0;const job={id:1,taskId:42,dimension:'3d',labels:[label],actions:{get:async()=>history},annotations:{hasUnsavedChanges:()=>history.length>0},frames:{contextImage:async()=>{contextCalls++;return testImages;}}};
+  const state={annotation:{job:{instance:job},player:{frame:{number:0}},annotations:{states:[box],activatedStateID:1},canvas:{instance:canvas},workspace:'standard3d'}};window.testState=state;window.testViews=views;
+  const listeners=new Set();window.__store__={getState:()=>state,subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},dispatch(a){if(a.type==='UPDATE_ANNOTATIONS_SUCCESS'){state.annotation.annotations.states=a.payload.states;for(const s of a.payload.states){const b=canvas.view.drawnObjects[s.clientID];b.data.points=s.points;for(const mesh of Object.values(b.cuboid)){mesh.position.fromArray(s.points);mesh.rotation.set(...s.points.slice(3,6));mesh.scale.fromArray(s.points,6);}}}for(const fn of listeners)fn();}};
+ },{ground,object,origin});
+ for(const file of ['copilot_main.js','copilot_panel.js'])await page.addScriptTag({content:fs.readFileSync('extension/'+file,'utf8')});
+ await expect(page.locator('#c3d-btn-settings')).toBeEnabled();await expect.poll(()=>page.evaluate(()=>__CVAT_COPILOT_BRIDGE.adapter.getSnapshot().capabilities.controls)).toBe(true);
+ // Wait for the saved/default controls to cross the bridge before sending input.
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,80)));
+ await page.evaluate(()=>{for(const type of ['keydown','pointerdown','wheel'])window.addEventListener(type,e=>nativeInputs.push({type,code:e.code,button:e.button}),false);});
+}
+module.exports={fixture};

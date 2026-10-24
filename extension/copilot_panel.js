@@ -372,108 +372,36 @@
         return seededClusters(points, currentBox, ground, distance)[0]?.cluster || [];
     }
 
-    // Local cleanup of five faces. Ground fixes the bottom; heading is immutable.
-    // Unlike Auto-Fit, this does not impose class dimensions or search for a heading.
-    function autoAdjustOptions(options = {}) {
-        const {maxShrinkDistance = .1,maxShrinkPercent = 5}=options;
-        if(!Number.isFinite(maxShrinkDistance)||maxShrinkDistance<0||maxShrinkDistance>.4||!Number.isFinite(maxShrinkPercent)||maxShrinkPercent<0||maxShrinkPercent>50)throw new Error('Shrink limits must be 0–40 cm and 0–50%');
-        return {maxShrinkDistance,maxShrinkPercent};
+    // Position-only adjustment: close gaps without changing dimensions or orientation.
+    function autoAdjustOptions(options={}) {
+        return {autoMove:options.autoMove!==false,autoGround:options.autoGround!==false,
+            moveLongitudinal:['forward','backward'].includes(options.moveLongitudinal)?options.moveLongitudinal:'none',
+            moveLateral:['left','right'].includes(options.moveLateral)?options.moveLateral:'none'};
     }
-    function autoAdjustBox(points, currentBox, ground, neighborBoxes = [], options = {}) {
-        const {maxShrinkDistance,maxShrinkPercent}=autoAdjustOptions(options);
-        const original=Array.from(currentBox.points||currentBox);
-        if(!parseCVAT16Points(original))throw new Error('Invalid box coordinates');
-        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw new Error('Auto Adjust supports upright boxes only');
-        if(!canManuallySnapGround(ground)||(ground.confidence!=null&&ground.confidence<.65))throw new Error('Reliable ground required for Auto Adjust; box unchanged');
-        const plane=makePlane(ground.a,ground.b,ground.c),snap=snapGroundPoints(original,plane);
-        if(Math.abs(snap.deltaZ)>1.5)throw new Error('Ground adjustment exceeds 1.5m; box unchanged');
-        const base=snap.newPoints,c=Math.cos(base[5]),s=Math.sin(base[5]),owned=new Set();
-        const roi=extractBoxROI(points,{points:base},.4);
-        const rmse=Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0;
-        const groundClearance=Math.max(.2,3*rmse);
-        // Remove the entire near-ground band before clustering. Otherwise road
-        // returns can bridge into the object and supply false face evidence.
-        // Use each point's local plane height so slopes are handled correctly.
-        const local=roi.filter(p=>p[2]-plane.getTargetZ(p[0],p[1])>groundClearance+1e-6);
-        const excludedNearGroundPoints=roi.length-local.length;
-        for(const box of neighborBoxes)if(parseCVAT16Points(box.points))for(const p of extractBoxROI(local,box,.02))owned.add(p);
-        const clusters=seededClusters(local.filter(p=>!owned.has(p)),{points:base},ground,.45).map(({cluster})=>{
-            const interior=extractBoxROI(cluster,{points:base},0),cells=new Set(interior.map(p=>p.map(v=>Math.floor(v/.08)).join(',')));
-            return {cluster,inside:cells.size};
-        }).filter(item=>item.inside>=10&&item.cluster.length>=20).sort((a,b)=>b.inside-a.inside);
-        if(!clusters.length)throw new Error(`Insufficient object points above the ${(groundClearance*100).toFixed(0)}cm ground exclusion band; box unchanged`);
-        if(clusters[1]&&clusters[1].inside>=clusters[0].inside*.8)throw new Error('Ambiguous object clusters inside this box; Auto Adjust left it unchanged');
-        const cluster=clusters[0].cluster,cells=new Map();
-        for(const p of cluster){const key=p.map(v=>Math.floor(v/.08)).join(',');if(!cells.has(key))cells.set(key,[c*(p[0]-base[0])+s*(p[1]-base[1]),-s*(p[0]-base[0])+c*(p[1]-base[1]),p[2]]);}
-        const support=[...cells.values()];
-        if(support.length<12)throw new Error('Too few occupied object cells; box unchanged');
-        const extent=(band,axis)=>{let lo=Infinity,hi=-Infinity;for(const p of band){lo=Math.min(lo,p[axis]);hi=Math.max(hi,p[axis]);}return hi-lo;};
-        let rejectedBoundaryCandidates=0;
-        function supportedPatch(band,other){
-            // A few returns or a one-dimensional noise streak are not a surface.
-            // Work in occupied cells, so duplicated returns cannot buy confidence.
-            const grid=new Map(),radius=.24,key=p=>p.map(v=>Math.floor(v/radius));
-            for(const p of band){const k=key(p).join(',');if(!grid.has(k))grid.set(k,[]);grid.get(k).push(p);}
-            const seen=new Set();
-            for(const seed of band){
-                if(seen.has(seed))continue;
-                const patch=[seed];seen.add(seed);
-                for(let i=0;i<patch.length;i++){
-                    const p=patch[i],[x,y,z]=key(p);
-                    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)for(let dz=-1;dz<=1;dz++)for(const q of grid.get(`${x+dx},${y+dy},${z+dz}`)||[]){
-                        if(!seen.has(q)&&Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2])<=radius+1e-8){seen.add(q);patch.push(q);}
-                    }
-                }
-                if(patch.length>=6&&other.every(a=>extent(patch,a)>=Math.min(.15,base[6+a]*.15)-1e-8)&&other.some(a=>extent(patch,a)>=Math.min(.25,base[6+a]*.25)-1e-8))return patch;
-            }
-            return null;
+    function autoAdjustBox(points,currentBox,ground,neighborBoxes=[],options={}) {
+        const original=Array.from(currentBox.points||currentBox),result=original.slice(),opts=autoAdjustOptions(options);
+        if(!parseCVAT16Points(original))throw Error('Invalid box coordinates');
+        if(Math.abs(original[3])>1e-6||Math.abs(original[4])>1e-6)throw Error('Auto Adjust push supports upright boxes only');
+        if(!canManuallySnapGround(ground))throw Error('Reliable ground required to exclude road points from pushing');
+        const clearance=Math.max(.2,3*(Number.isFinite(ground.rmse)?Math.max(0,ground.rmse):0));
+        const aboveGround=points.filter(q=>q[2]-(ground.a*q[0]+ground.b*q[1]+ground.c)>clearance+1e-6);
+        const owned=new Set();for(const b of neighborBoxes)if(parseCVAT16Points(b.points))for(const q of extractBoxROI(aboveGround,b,.02))owned.add(q);
+        const candidates=seededClusters(aboveGround.filter(q=>!owned.has(q)),{points:original},ground,.45).filter(c=>c.cluster.length>=20);
+        if(!candidates.length)throw Error('No supported object points; box unchanged');
+        if(candidates[1]?.overlap>=candidates[0].overlap*.6)throw Error('Ambiguous object clusters; box unchanged');
+        const cells=new Map();for(const q of candidates[0].cluster){const k=q.map(v=>Math.floor(v/.12)).join(',');if(!cells.has(k))cells.set(k,q);}
+        if(cells.size<10)throw Error('Too few occupied cells for supported contact');
+        const c=Math.cos(original[5]),s=Math.sin(original[5]),xs=[],ys=[];
+        for(const q of cells.values()){const x=q[0]-original[0],y=q[1]-original[1];xs.push(c*x+s*y);ys.push(-s*x+c*y);}
+        const bounds=values=>{values.sort((a,b)=>a-b);return [values[Math.floor((values.length-1)*.01)],values[Math.ceil((values.length-1)*.99)]];};
+        const shifts=[0,0],alignment={longitudinal:opts.moveLongitudinal,lateral:opts.moveLateral};
+        for(const [axis,choice,values] of [[0,opts.moveLongitudinal,xs],[1,opts.moveLateral,ys]]){
+            if(choice==='none')continue;const [lo,hi]=bounds(values),size=original[6+axis];
+            if(hi-lo>size+1e-6||lo < -size/2-.02||hi>size/2+.02)throw Error('Supported object extends beyond the box; resize manually before pushing');
+            shifts[axis]=choice==='forward'||choice==='left'?Math.max(0,lo+size/2):Math.min(0,hi-size/2);
         }
-        function edge(axis,sign){
-            const sorted=support.slice().sort((a,b)=>sign*(a[axis]-b[axis]));
-            for(let i=0;i<sorted.length;i++){
-                if(i&&sorted[i][axis]===sorted[i-1][axis])continue;
-                let j=i;while(j<sorted.length&&sign*(sorted[j][axis]-sorted[i][axis])<=.06+1e-8)j++;
-                if(j-i<6){rejectedBoundaryCandidates++;continue;}
-                const band=sorted.slice(i,j),other=[0,1,2].filter(a=>a!==axis);
-                const patch=supportedPatch(band,other);
-                if(patch){
-                    const values=patch.map(p=>p[axis]).sort((a,b)=>a-b);
-                    // A local surface estimate, not the extreme of a mixed band.
-                    const value=values[Math.floor(values.length/2)],uncertainOutside=support.filter(p=>sign*(p[axis]-value)<-.03-1e-8).length>=3;
-                    return {value,band:patch,uncertainOutside};
-                }
-                rejectedBoundaryCandidates++;
-            }
-            return null;
-        }
-        const old=[-base[6]/2,base[6]/2,-base[7]/2,base[7]/2,base[2]+base[8]/2],next=old.slice();
-        const names=['rear','front','right','left','top'],limitedFaces=[],retainedFaces=[];
-        for(let face=0;face<5;face++){
-            const axis=face<2?0:face<4?1:2,sign=face<4&&face%2===0?1:-1,e=edge(axis,sign);
-            if(!e){retainedFaces.push(names[face]);continue;}
-            const desired=e.value-sign*.03,shrinking=sign*(desired-old[face])>0;
-            // Weak outlying returns cannot justify expansion, but may be a real
-            // thin part. Do not shrink through a group of such uncertain returns.
-            if(shrinking&&e.uncertainOutside){retainedFaces.push(names[face]);continue;}
-            // Never walk a face across an occluded region, even on repeated
-            // presses: distant evidence means preserve, not clamp-and-shrink.
-            const shrinkLimit=Math.min(maxShrinkDistance,base[6+axis]*maxShrinkPercent/100);
-            if(shrinking&&sign*(e.value-old[face])>shrinkLimit+1e-8){retainedFaces.push(names[face]);continue;}
-            // Empty space alone is not evidence of a hidden surface. Side
-            // shrinking needs vertical surface support; top needs an XY patch.
-            if(shrinking&&(axis<2?extent(e.band,2)<Math.min(.25,base[8]*.2):extent(e.band,0)<Math.min(.25,base[6]*.2)||extent(e.band,1)<Math.min(.2,base[7]*.2))){retainedFaces.push(names[face]);continue;}
-            const delta=desired-old[face];if(!shrinking&&Math.abs(delta)>.4+1e-8)limitedFaces.push(names[face]);
-            if(Math.abs(delta)>.01)next[face]=old[face]+Math.max(-.4,Math.min(.4,delta));
-        }
-        const dx=(next[0]+next[1])/2,dy=(next[2]+next[3])/2,result=original.slice();
-        result[0]=base[0]+c*dx-s*dy;result[1]=base[1]+s*dx+c*dy;
-        result[6]=next[1]-next[0];result[7]=next[3]-next[2];
-        const bottom=Math.max(...[[-1,-1],[-1,1],[1,-1],[1,1]].map(([x,y])=>plane.getTargetZ(result[0]+c*x*result[6]/2-s*y*result[7]/2,result[1]+s*x*result[6]/2+c*y*result[7]/2)));
-        result[8]=next[4]-bottom;result[2]=bottom+result[8]/2;
-        if(result.slice(6,9).some(v=>v<.1)||!parseCVAT16Points(result))throw new Error('Object extent is too small or ground intersects the top; box unchanged');
-        if(result[8]<base[8]-Math.min(maxShrinkDistance,base[8]*maxShrinkPercent/100)-1e-8)throw new Error('Grounded height would shrink beyond the local limit; box unchanged');
-        return {points:result,changed:result.some((v,i)=>Math.abs(v-original[i])>1e-6),pointCount:cluster.length,
-            faceChanges:Object.fromEntries(names.map((name,i)=>[name,next[i]-old[i]])),limitedFaces,retainedFaces,groundClearance,excludedNearGroundPoints,rejectedBoundaryCandidates};
+        result[0]+=c*shifts[0]-s*shifts[1];result[1]+=s*shifts[0]+c*shifts[1];
+        return {points:result,alignment,pointCount:cells.size,shifts};
     }
 
     // Mouse placement is a position correction, not a dimension or heading fit.
@@ -1165,7 +1093,7 @@ function mount(env){
    dialog.querySelector('[data-page-size]').onchange=e=>{model.pageSize=Number(e.target.value);model.page=model.from+Math.floor((model.page-model.from)/model.pageSize)*model.pageSize;dialog.dataset.density=model.pageSize;renderPage();};
    dialog.querySelector('[data-action="apply"]').onclick=apply;
    dialog.querySelector('[data-action="export"]').onclick=()=>{
-    const data={schema:'cvat-batch-preview/v1',version:'1.21.1',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
+    const data={schema:'cvat-batch-preview/v1',version:'1.22.3',jobId:model.jobId,clientId:model.clientId,serverId:model.serverId,
      keyframes:model.keyframes,baseline:model.baseline,frames:[...model.cards.values()],note:'Diagnostic preview; sampled ROI only, not a full point-cloud sequence or certified ground truth'};
     const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'})),link=document.createElement('a');
     link.href=url;link.download='batch-job'+model.jobId+'-track'+model.clientId+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
@@ -1508,24 +1436,32 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
         ['ROTATE_RIGHT','Rotate +90°','BracketRight','c3d-btn-rot-right'],
         ['FLIP','Rotate 180°','KeyF','c3d-btn-flip'],
     ].map(([id,label,code,button])=>({id,label,button,binding:{code,alt:true,shift:true,ctrl:false,meta:false}}));
+    definitions.find(d=>d.id==='MOVE_TO_MOUSE').binding={code:'KeyM',alt:false,shift:false,ctrl:false,meta:false};
+    definitions.push({id:'CORNER_TO_MOUSE',label:'Nearest corner to cursor · Top/Side/Front',binding:{code:'KeyE',alt:false,shift:false,ctrl:false,meta:false}},
+        {id:'ROTATE_DRAG',label:'Rotate by circular drag · 3D',gesture:true,binding:{code:'Mouse0',hold:'KeyR',alt:false,shift:false,ctrl:false,meta:false}});
     const validCode=code=>typeof code==='string'&&/^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|F([1-9]|1[0-9]|2[0-4])|Arrow(Up|Down|Left|Right)|BracketLeft|BracketRight|Backquote|Backslash|Comma|Period|Slash|Semicolon|Quote|Minus|Equal|Space|Enter|Tab|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Numpad(Add|Subtract|Multiply|Divide|Decimal|Enter))$/.test(code);
     function binding(value){
-        if(!value||!validCode(value.code)||!['alt','shift','ctrl','meta'].every(k=>typeof value[k]==='boolean'))return null;
-        return {code:value.code,alt:value.alt,shift:value.shift,ctrl:value.ctrl,meta:value.meta};
+        if(!value||!(validCode(value.code)||/^(Mouse[0-4]|WheelUp|WheelDown)$/.test(value.code))||!['alt','shift','ctrl','meta'].every(k=>typeof value[k]==='boolean'))return null;
+        if(value.hold&&(!validCode(value.hold)||! /^(Mouse|Wheel)/.test(value.code)))return null;
+        return {code:value.code,...(value.hold?{hold:value.hold}:{}),alt:value.alt,shift:value.shift,ctrl:value.ctrl,meta:value.meta};
     }
-    const signature=b=>b?`${b.code}:${+b.alt}${+b.shift}${+b.ctrl}${+b.meta}`:'';
-    const fromEvent=e=>binding({code:e.code,alt:!!e.altKey,shift:!!e.shiftKey,ctrl:!!e.ctrlKey,meta:!!e.metaKey});
+    const signature=b=>b?`${b.code}:${b.hold||''}:${+b.alt}${+b.shift}${+b.ctrl}${+b.meta}`:'';
+    const fromEvent=(e,hold)=>binding({code:e.type==='wheel'?(e.deltaY<0?'WheelUp':e.deltaY>0?'WheelDown':''):e.type==='pointerdown'||e.type==='mousedown'?`Mouse${e.button}`:e.code,...(hold?{hold}:{}),alt:!!e.altKey,shift:!!e.shiftKey,ctrl:!!e.ctrlKey,meta:!!e.metaKey});
     function format(b){
         if(!b)return 'Unassigned';
         const names={BracketLeft:'[',BracketRight:']',Backquote:'`',Backslash:'\\',Comma:',',Period:'.',Slash:'/',Semicolon:';',Quote:"'",Minus:'-',Equal:'='};
-        return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
+        const mouse={Mouse0:'Left mouse',Mouse1:'Middle mouse',Mouse2:'Right mouse',Mouse3:'Mouse back',Mouse4:'Mouse forward',WheelUp:'Wheel up',WheelDown:'Wheel down'};
+        return [b.ctrl&&'Ctrl',b.alt&&'Alt',b.shift&&'Shift',b.meta&&'Meta',b.hold?.replace(/^Key|^Digit/,''),mouse[b.code]||names[b.code]||b.code.replace(/^Key|^Digit/,'')].filter(Boolean).join('+');
     }
-    const defaults=()=>({version:1,keepDirection:false,adjustMoveDirection:false,useOriginGround:false,fallbackGroundHeight:0,moveLongitudinal:'none',moveLateral:'none',presetOverrides:{},followSelected:false,maxShrinkDistance:.1,maxShrinkPercent:5,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
+    const defaults=()=>({version:2,keepDirection:false,useOriginGround:false,fallbackGroundHeight:0,moveLongitudinal:'none',moveLateral:'none',presetOverrides:{},followSelected:false,autoMove:true,autoGround:true,background:null,projectionFollow:true,projectionSize:2,bindings:Object.fromEntries(definitions.map(d=>[d.id,{...d.binding}]))});
     function normalize(raw){
         const result=defaults();
-        if(!raw||raw.version!==1)return result;
+        if(!raw||![1,2].includes(raw.version))return result;
         result.keepDirection=raw.keepDirection===true;
-        result.adjustMoveDirection=raw.adjustMoveDirection===true;
+        result.autoMove=raw.autoMove!==false;result.autoGround=raw.autoGround!==false;
+        result.background=/^#[0-9a-f]{6}$/i.test(raw.background)?raw.background:null;
+        result.projectionFollow=raw.projectionFollow!==false;
+        if(Number.isFinite(raw.projectionSize)&&raw.projectionSize>=1&&raw.projectionSize<=32)result.projectionSize=raw.projectionSize;
         result.useOriginGround=raw.useOriginGround===true;
         if(Number.isFinite(raw.fallbackGroundHeight))result.fallbackGroundHeight=raw.fallbackGroundHeight;
         if(['none','forward','backward'].includes(raw.moveLongitudinal))result.moveLongitudinal=raw.moveLongitudinal;
@@ -1534,13 +1470,12 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
             if(/^(vehicles:[a-z-]+|two-wheels|pedestrian|Animal|Obstacle)$/.test(key)&&Array.isArray(value)&&value.length===3&&value.every((v,i)=>Number.isFinite(v)&&v>=.1&&v<=[30,8,8][i]))result.presetOverrides[key]=value.slice();
         }
         result.followSelected=raw.followSelected===true;
-        for(const [key,max] of [['maxShrinkDistance',.4],['maxShrinkPercent',50]])if(Number.isFinite(raw[key])&&raw[key]>=0&&raw[key]<=max)result[key]=raw[key];
         // Load valid custom bindings first so a default cannot steal a saved key.
         const seen=new Set(),missing=[];
         for(const d of definitions){
             if(raw.bindings?.[d.id]===null){result.bindings[d.id]=null;continue;}
             const b=binding(raw.bindings?.[d.id]);
-            if(b&&!seen.has(signature(b))){result.bindings[d.id]=b;seen.add(signature(b));}
+            if(b&&(!d.gesture||/^Mouse[0-4]$/.test(b.code))&&!seen.has(signature(b))){result.bindings[d.id]=b;seen.add(signature(b));}
             else {result.bindings[d.id]=null;missing.push(d);}
         }
         for(const d of missing)if(!seen.has(signature(d.binding))){result.bindings[d.id]={...d.binding};seen.add(signature(d.binding));}
@@ -1549,7 +1484,8 @@ if(typeof window!=='undefined')window.__C3D_CREATE_SESSION_TRANSPORT=createSessi
     function assign(settings,id,value){
         if(!definitions.some(d=>d.id===id))throw new Error('Unknown action');
         const b=value===null?null:binding(value);
-        if(value!==null&&!b)throw new Error('Press a supported key, with optional modifiers');
+        if(value!==null&&!b)throw new Error('Press a supported key or mouse input, with optional modifiers');
+        if(b&&definitions.find(d=>d.id===id).gesture&&!/^Mouse[0-4]$/.test(b.code))throw new Error('Drag controls require a mouse button, optionally with a held key');
         const duplicate=b&&definitions.find(d=>d.id!==id&&signature(settings.bindings[d.id])===signature(b));
         if(duplicate)throw new Error(`Already assigned to ${duplicate.label}; clear that binding first`);
         settings.bindings[id]=b;
@@ -1733,6 +1669,179 @@ root.__C3D_ANNOTATION_IO_UI={mount};
 })(typeof window!=='undefined'?window:globalThis);
 
 ;
+/* Shared, read-only feature guides. Help never invokes the feature it describes. */
+(function(root){
+ 'use strict';
+ const guides={
+  move:{title:'Quick box move / aim Top view',shortcut:'MOVE_TO_MOUSE',steps:['Hover 3D and use this binding to aim Top view at the LiDAR point under the cursor. This only moves the view.','Hover Top view and use the same binding to place the selected box center at the cursor. Z, dimensions and orientation stay unchanged.','Side/Front do not support this action. Configure the binding in Shortcuts & controls.']},
+  corner:{title:'Quick corner grab',shortcut:'CORNER_TO_MOUSE',steps:['Select a box and hover Top, Side or Front. Place the cursor where the nearest corner should go, then use this binding.','The visible dimensions resize using native corner behavior. The opposite corner stays anchored and the hidden dimension stays fixed.','The corner cannot cross its opposite corner; the minimum dimension is 0.1 m. Save CVAT to persist the edit.']},
+  rotate:{title:'Quick direction rotation',shortcut:'ROTATE_DRAG',steps:['In 3D, hold the configured key and mouse button, then circle the cursor around the selected box center.','Yaw previews live; size and position stay fixed. Release the mouse to commit one edit. Escape or releasing the held key cancels.','Start away from the projected center. Drag controls can be rebound, including mouse-only dragging.']},
+  freecam:{title:'Free Cam',shortcut:'FREECAM',steps:['Toggle Free Cam on. The green ON state means it is active.','W/A/S/D move horizontally, Q/E move vertically, Shift moves faster, and right-drag looks around.','Press Escape or toggle the button off to return camera control to CVAT. This does not edit annotations.']},
+  autofit:{title:'Auto-Fit',shortcut:'AUTO_FIT',steps:['Select a box and verify the saved length/width/height preset for its class or subtype.','Auto-Fit aligns the box to supported object points and the chosen ground source. It may change size and direction; Keep direction preserves the current orientation.','Review the result, use native Undo if needed, and Save CVAT to persist it.']},
+  adjust:{title:'Auto Adjust',shortcut:'AUTO_ADJUST',steps:['Expand Auto Adjust options to choose Move to mouse, Ground snap and the two push directions.','The stages run in that order. Pushes close gaps along the box axes, using supported object points and excluding ground. Size and orientation never change.','With Move to mouse enabled, hover Top view first. If any enabled stage fails, no preceding stages are committed.']},
+  ground:{title:'Ground Snap',shortcut:'SNAP_GROUND',steps:['Select a box and snap its bottom to reliable local road.','Use origin ground explicitly to use the fixed reference height plus offset instead. It is never used as an automatic fallback.','Missing reliable ground or an excessive vertical correction leaves the box unchanged. Review and Save CVAT.']},
+  inspect:{title:'Inspect ground',steps:['Preview the selected box bottom, ground heights and proposed vertical movement without editing the box.','The report includes the chosen source and signed corner gaps. Re-inspect after changing geometry, frame or ground settings.']},
+  origin:{title:'Use origin ground',steps:['Off: measure local road under the box. Missing local road stops the operation.','On: use one fixed horizontal height equal to the LiDAR reset reference height plus the signed offset. Road tilt is ignored.','This source choice applies to ground-dependent actions, including Auto Adjust and Auto-Fit.']},
+  offset:{title:'Origin ground offset',steps:['Enter the signed height offset in meters from the reset reference. Negative values lower the target plane; positive values raise it.','Only used while Use origin ground is enabled. Inspect ground to check the resulting height before editing.']},
+  autoMove:{title:'Auto Adjust: Move to mouse',steps:['When enabled, Auto Adjust first places the center at cursor XY in Top view.','Use Quick box move in 3D to aim Top view first, then hover Top before running Auto Adjust. Disable this stage to keep the current XY position before snapping or pushing.']},
+  autoGround:{title:'Auto Adjust: Ground snap',steps:['When enabled, Auto Adjust snaps the bottom to the chosen ground source before pushing.','Disabling this stage keeps Z unchanged. Pushing still needs reliable ground evidence to exclude road points.']},
+  pushForward:{title:'Longitudinal push',steps:['Choose Forward, Backward or Off relative to the box heading.','Forward closes the gap at the rear face; Backward closes the gap at the front face. The whole box translates, without changing dimensions or direction.']},
+  pushSide:{title:'Lateral push',steps:['Choose Left, Right or Off relative to the box heading.','Left closes the right-side gap; Right closes the left-side gap. This runs after the longitudinal push and preserves dimensions and direction.']},
+  preset:{title:'Auto-Fit size preset',steps:['Edit length, width and height in meters, then Save preset. Values are stored for the selected class/subtype.','Saving a preset does not edit the box. It is used the next time Auto-Fit runs; Reset preset restores its default.']},
+  keepDirection:{title:'Keep direction',steps:['Enable this to preserve the selected box orientation during Auto-Fit.','This is separate from Auto Adjust, which always preserves orientation.']},
+  rotateLeft:{title:'Rotate −90°',shortcut:'ROTATE_LEFT',steps:['Rotate the selected box yaw by −90°. Dimensions and center stay fixed.','Review the direction, Undo if needed, and Save CVAT.']},
+  rotateRight:{title:'Rotate +90°',shortcut:'ROTATE_RIGHT',steps:['Rotate the selected box yaw by +90°. Dimensions and center stay fixed.','Review the direction, Undo if needed, and Save CVAT.']},
+  flip:{title:'Flip direction',shortcut:'FLIP',steps:['Rotate the selected box yaw by 180°. Dimensions and center stay fixed.','Review the direction and Save CVAT.']},
+  follow:{title:'Target lock',steps:['Enable Target lock, then double-click a box in the canvas to lock its ID and camera target.','Orbit and zoom remain available while the camera follows that object across frames. Double-click another box to change target, or turn the option off to release it.','This only changes selection/camera behavior, not annotation geometry.']},
+  background:{title:'Viewport background',steps:['Choose a color or enter a six-digit HEX value to change the background in all four views.','The setting survives reloads in this browser profile. Reset background returns to native appearance.']},
+  pointSize:{title:'Projection point size',steps:['Turn off Follow CVAT point size to adjust Top/Side/Front points independently, from 1 to 32 px.','The 3D viewport point size is unchanged. Follow CVAT or Reset projection size restores native behavior.']},
+  reference:{title:'POV reference images',steps:['Open a floating viewer of current-frame CVAT context images. Auto uses the selected/locked box direction relative to the LiDAR car, otherwise the camera look-at target.','Use Configure wheel to assign images to directions. Apply saves the wheel per server/task, shared by jobs in that task.','Scroll over the image to zoom, left-drag to pan when enlarged, and Fit to see the full image.']},
+  wheel:{title:'Configure direction wheel',steps:['Select a direction sector, then click an image thumbnail to assign it. Use the small top-right magnifier for a larger preview without changing assignments.','Edit direction names/angles, drag sector boundaries, or add/remove slots. Check the vehicle-forward heading for your dataset.','Apply saves the wheel per server/task; Cancel discards edits. Different tasks have separate configurations.']},
+  imageZoom:{title:'Image zoom and pan',steps:['Scroll up/down over the image to zoom around the cursor. The −/+ buttons also change magnification, from 25% to 800%.','Left-drag an enlarged image to pan. Fit restores the full image. This never changes the CVAT camera or annotations.']},
+  imageMode:{title:'Auto / manual POV direction',steps:['Auto chooses the image from the selected/locked box center, or the camera look-at target when no box is selected.','Choose a direction manually to stop automatic switching. Re-enable Auto to follow the target again.']},
+  heading:{title:'Vehicle-forward heading',steps:['Calibrate vehicle forward clockwise from the data +X direction. Zero means +X is forward.','The wheel itself keeps Front at the top; this offset aligns the sectors with your dataset. Apply saves the calibration.']},
+  qc:{title:'Run QC',shortcut:'QC',steps:['Scan available boxes and LiDAR evidence for geometry or ground issues. Select an issue to inspect its box.','QC is advisory and does not edit annotations. Fixes require an explicit action and Save CVAT.']},
+  autoQC:{title:'Auto QC',steps:['Automatically refresh advisory QC after selection, frame or geometry changes.','Turn it off when you prefer to run QC manually. Scanning does not edit annotations.']},
+  qcColors:{title:'3D error colors',steps:['Temporarily color boxes according to current QC results.','Turning this off restores their native class colors; annotation labels and geometry are unchanged.']},
+  batch:{title:'Batch Track Review',steps:['Select a cuboid track, choose a frame range and compute proposals for review.','Review Top/Side/Front projections, adjust drafts if needed, and select only the frames you want to apply. Original keyframes are protected by default.','Apply writes the selected changes through native editing. Save CVAT persists them.']},
+  batchEdit:{title:'Batch Edit',steps:['Select a track and choose size or property updates over the desired range.','Only checked fields change. Some properties apply to the whole track; inspect the scope and preview before confirming.','Apply writes native edits. Review the result and Save CVAT.']},
+  export:{title:'Export annotation JSON',steps:['Download all job annotations, including unsaved editor changes, with display-ID metadata.','Keep exports as backups or templates. Exporting does not edit annotations or replace Save CVAT.']},
+  import:{title:'Edit IDs from JSON',steps:['Choose an annotation JSON template and review explicit target display IDs.','Preview and confirm the intended mappings before applying. Existing matched objects are edited in place to preserve their IDs.','Review the result and Save CVAT.']},
+  recreate:{title:'Delete and import new',steps:['This separate workflow replaces current annotations and creates new objects; CVAT assigns new IDs.','Review the backup and explicit confirmation steps carefully before applying. Use Edit IDs from JSON when you want to preserve existing IDs.']},
+  session:{title:'CVAT session / server import-export',steps:['Open the session tools for server-side import/export.','Server exports do not include unsaved editor changes; save the job first when you need those changes on the server.','Dataset replacement is separate from in-place editor JSON editing. Review backup and confirmation steps.']},
+  controls:{title:'Shortcuts & controls',steps:['Select a binding and record inside the capture area. Release a key for keyboard-only, or hold it while clicking/scrolling for a combination.','Mouse buttons, wheel and modifier combinations are supported. Drag actions require a mouse button.','Clear removes a binding; Reset restores its default. Quick-control hints update to match your saved bindings.']},
+  focus:{title:'Focus selected box',steps:['Frame the selected box in the 3D viewport while preserving the viewing direction when supported.','This changes the camera only.']},
+  selection:{title:'Selected box',steps:['Choose the current-frame object by its displayed CVAT ID. The tool actions apply to this selection.','With Target lock enabled, double-click a box in the canvas to change the locked target instead.']},
+  class:{title:'Box class',steps:['Choose the class for the selected box. This edits its native annotation label while preserving the object identity.','Check class/subtype attributes and the Auto-Fit preset after changing class. Save CVAT to persist the edit.']},
+  work:{title:'Work log and daily KPI',steps:['Choose a day and target, then start a shift to observe edits. End the shift when finished.','Counts reflect observed changes, not quality acceptance. Undo can reduce net changed counts.','History stays in this browser profile per server. Export CSV for a portable daily record.']},
+  fitExport:{title:'Export Auto-Fit case',steps:['Run Auto-Fit first, review or adjust its result, then export the case for debugging.','The file includes the seed/fitted/current boxes and local point-cloud evidence. This does not edit annotations.']},
+  update:{title:'Update online',steps:['Check for a newer published release and install it when available.','The updater must be set up. Pending CVAT edits are saved and verified before reloading; save failures block reload.']},
+  reload:{title:'Reload local',steps:['Save pending CVAT edits and reload the extension folder currently loaded by the browser.','This does not copy source changes into a different installer-managed folder. Check the footer version after reload.']}
+ };
+ function create({getBinding=null}={}){
+  const doc=root.document;let popup=null,active=null,info=null,signature='',disposed=false;const buttons=new Set();
+  function close(restore=true){popup?.remove();popup=null;signature='';if(active){active.setAttribute('aria-expanded','false');active.removeAttribute('aria-controls');if(restore&&active.isConnected)active.focus();}active=null;info=null;}
+  function position(){if(!popup||!active)return;const r=active.getBoundingClientRect();if(!r.width||!r.height){close(false);return;}const p=popup.getBoundingClientRect(),left=r.left-p.width-10;popup.style.left=Math.max(12,Math.min(root.innerWidth-p.width-12,left>=12?left:r.right-p.width))+'px';popup.style.top=Math.max(12,Math.min(root.innerHeight-p.height-12,r.top))+'px';}
+  function refresh(){for(const b of buttons)if(!b.isConnected)buttons.delete(b);if(getBinding)for(const node of doc.querySelectorAll('[data-control-hint]')){const key=node.dataset.controlHint,binding=getBinding(key);node.textContent=binding+(key==='ROTATE_DRAG'&&binding!=='Unassigned'?' · drag':'');}if(!popup)return;const binding=info.shortcut?getBinding?.(info.shortcut):'',next=JSON.stringify([info,binding]);if(next===signature)return;signature=next;const body=popup.querySelector('.c3d-help-body');body.replaceChildren();if(binding){const hint=doc.createElement('p');hint.className='c3d-help-binding';hint.textContent='Control: '+binding+(info.shortcut==='ROTATE_DRAG'?' · drag':'');body.append(hint);}const steps=doc.createElement('ol');for(const text of info.steps){const li=doc.createElement('li');li.textContent=text;steps.append(li);}body.append(steps);position();}
+  function show(button,data){if(active===button){close();return;}close(false);active=button;info=data;popup=doc.createElement('section');popup.className='c3d-help-popover';popup.setAttribute('role','dialog');popup.setAttribute('aria-label',data.title+' guide');popup.id='c3d-help-'+Math.random().toString(36).slice(2);const header=doc.createElement('header'),title=doc.createElement('strong'),dismiss=doc.createElement('button'),body=doc.createElement('div');title.textContent=data.title;dismiss.type='button';dismiss.textContent='×';dismiss.setAttribute('aria-label','Close feature guide');dismiss.onclick=()=>close();body.className='c3d-help-body';header.append(title,dismiss);popup.append(header,body);doc.body.append(popup);button.setAttribute('aria-expanded','true');button.setAttribute('aria-controls',popup.id);refresh();position();dismiss.focus();}
+  function button(data){const b=doc.createElement('button');b.type='button';b.className='c3d-help-button';b.textContent='?';b.title='Guide: '+data.title;b.setAttribute('aria-label','Help: '+data.title);b.setAttribute('aria-expanded','false');b.onclick=e=>{e.preventDefault();e.stopPropagation();show(b,data);};buttons.add(b);return b;}
+  function attach(target,data){if(!target||target.dataset.c3dHelp)return;target.dataset.c3dHelp='true';const row=doc.createElement('div');row.className='c3d-feature-row';target.parentNode.insertBefore(row,target);row.append(target,button(data));return row;}
+  function mountPanel(panel){const box=panel.querySelector('#c3d-task-box');if(box&&!box.querySelector('.c3d-quick-legend')){const group=doc.createElement('section');group.className='c3d-task-group c3d-quick-legend';const title=doc.createElement('h3');title.textContent='Quick controls';group.append(title);for(const [label,scope,key,guide] of [['Aim Top view','3D','MOVE_TO_MOUSE','move'],['Move box to cursor','Top','MOVE_TO_MOUSE','move'],['Grab nearest corner','Top / Side / Front','CORNER_TO_MOUSE','corner'],['Rotate direction','3D','ROTATE_DRAG','rotate']]){const row=doc.createElement('div'),kbd=doc.createElement('kbd'),text=doc.createElement('span'),small=doc.createElement('small');row.className='c3d-control-hint';kbd.dataset.controlHint=key;text.textContent=label;small.textContent=scope;text.append(small);row.append(kbd,text,button(guides[guide]));group.append(row);}box.prepend(group);}
+   const entries=[['#c3d-btn-freecam','freecam'],['#c3d-btn-move','move'],['#c3d-btn-autofit','autofit'],['#c3d-btn-adjust','adjust'],['#c3d-btn-ground','ground'],['#c3d-btn-ground-debug','inspect'],['#c3d-btn-rot-left','rotateLeft'],['#c3d-btn-rot-right','rotateRight'],['#c3d-btn-flip','flip'],['#c3d-origin-ground','origin'],['#c3d-ground-height','offset'],['#c3d-auto-move','autoMove'],['#c3d-auto-ground','autoGround'],['#c3d-move-longitudinal','pushForward'],['#c3d-move-lateral','pushSide'],['.c3d-preset','preset'],['#c3d-keep-direction','keepDirection'],['#c3d-follow-selected','follow'],['#c3d-background','background'],['#c3d-projection-number','pointSize'],['#c3d-projection-follow','pointSize'],['#c3d-btn-reference','reference'],['#c3d-btn-scan','qc'],['#c3d-auto','autoQC'],['#c3d-colors','qcColors'],['#c3d-batch','batch'],['#c3d-batch-size','batchEdit'],['#c3d-btn-export-ann','export'],['#c3d-btn-import-replace','import'],['#c3d-btn-import-recreate','recreate'],['#c3d-session','session'],['#c3d-btn-settings','controls'],['#c3d-btn-focus','focus'],['#c3d-btn-export-fit','fitExport'],['[data-update-install]','update'],['[data-update-local]','reload'],['[data-work-in]','work'],['[data-work-out]','work'],['[data-work-set]','work'],['[data-work-export]','work']];
+   entries.push(['#c3d-select-box','selection'],['.c3d-class-row','class'],['#c3d-filter','qc']);
+   for(const [selector,key] of entries){let target=panel.querySelector(selector);if(target?.matches('input,select'))target=target.closest('label')||target;attach(target,guides[key]);}refresh();
+  }
+  const outside=e=>{if(popup&&!popup.contains(e.target)&&!active?.contains(e.target))close(false);},escape=e=>{if(popup&&e.code==='Escape'){e.preventDefault();e.stopImmediatePropagation();close();}};
+  doc.addEventListener('pointerdown',outside,true);doc.addEventListener('keydown',escape,true);doc.addEventListener('scroll',position,true);root.addEventListener('resize',position);
+  return {guides,button,attach,mountPanel,refresh,close,dispose(){if(disposed)return;disposed=true;close(false);for(const b of buttons)b.remove();buttons.clear();doc.removeEventListener('pointerdown',outside,true);doc.removeEventListener('keydown',escape,true);doc.removeEventListener('scroll',position,true);root.removeEventListener('resize',position);}};
+ }
+ root.__C3D_FEATURE_HELP={create,guides};
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+/* Shared direction wheel model: clockwise degrees, vehicle forward = zero. */
+(function(root){
+ 'use strict';
+ const wrap=a=>((a%360)+360)%360;
+ const difference=(a,b)=>((a-b+540)%360)-180;
+ function defaults(){return {version:1,heading:0,slots:[['Back',180,0],['Front',0,1],['Front-left',315,2],['Left',270,3],['Back-left',225,4],['Front-right',45,5],['Right',90,6],['Back-right',135,7]].map(([name,angle,image],i)=>({id:'pov-'+i,name,angle,image,start:null}))};}
+ function normalize(raw){const out=defaults();if(raw?.version!==1)return out;if(Number.isFinite(raw.heading))out.heading=wrap(raw.heading);if(!Array.isArray(raw.slots)||raw.slots.length>32)return out;
+  const ids=new Set(),angles=new Set();out.slots=[];for(const s of raw.slots){if(!s||typeof s.id!=='string'||!s.id||s.id.length>80||ids.has(s.id)||typeof s.name!=='string'||!Number.isFinite(s.angle)||angles.has(wrap(s.angle))||!(s.image===null||Number.isInteger(s.image)&&s.image>=0&&s.image<64))continue;ids.add(s.id);angles.add(wrap(s.angle));out.slots.push({id:s.id,name:s.name.slice(0,80),angle:wrap(s.angle),image:s.image,start:Number.isFinite(s.start)?wrap(s.start):null});}return out;}
+ function sectors(config){const slots=[...config.slots].sort((a,b)=>a.angle-b.angle);return slots.map((s,i)=>{const previous=slots[(i+slots.length-1)%slots.length],gap=slots.length===1?360:wrap(s.angle-previous.angle),mid=wrap(previous.angle+gap/2),custom=s.start;
+  const start=Number.isFinite(custom)&&wrap(custom-previous.angle)>0&&wrap(custom-previous.angle)<gap?custom:mid;return {...s,start};});}
+ function select(config,bearing,previousId=null){if(!Number.isFinite(bearing))return null;const slots=sectors(config);if(!slots.length)return null;if(slots.length===1)return slots[0];const angle=wrap(bearing-config.heading);
+  const inside=(s,i,margin=0)=>{const end=slots[(i+1)%slots.length].start;return wrap(angle-s.start)>=margin&&wrap(angle-s.start)<=wrap(end-s.start)-margin;};
+  let i=slots.findIndex((s,i)=>inside(s,i));if(i<0)i=0;const next=slots[i],previous=slots.find(s=>s.id===previousId);
+  // A 3 degree dead band prevents flicker when crossing a boundary.
+  if(previous&&previous.id!==next.id&&Math.min(Math.abs(difference(angle,next.start)),Math.abs(difference(angle,slots[(i+1)%slots.length].start)))<3)return previous;
+  return next;
+ }
+ function bearing(origin,target){if(!origin||!target||![...origin,...target].every(Number.isFinite)||Math.hypot(target[0]-origin[0],target[1]-origin[1])<.05)return null;return wrap(-Math.atan2(target[1]-origin[1],target[0]-origin[0])*180/Math.PI);}
+ const api={defaults,normalize,sectors,select,bearing,wrap};root.__C3D_REFERENCE_IMAGES=api;if(typeof module!=='undefined'&&module.exports)module.exports=api;
+})(typeof window!=='undefined'?window:globalThis);
+
+;
+/* Floating current-frame reference viewer and editable direction wheel. */
+(function(root){
+ 'use strict';
+ function mount({request,toast,getSnapshot}){
+  const model=root.__C3D_REFERENCE_IMAGES,doc=root.document,help=root.__C3D_FEATURE_HELP?.create();
+  let viewer=null,dialog=null,preview=null,refreshConfig=null,config=model.defaults(),images=[],key='',frameKey='',loadingKey='',generation=0,selected=null,manual=null,auto=true,timer=null,polling=false,enabled=false,disposed=false;
+  const node=(tag,cls,text)=>{const n=doc.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;};
+  const button=(text,fn)=>{const n=node('button','c3d-btn-secondary',text);n.type='button';n.onclick=fn;return n;};
+  const read=async k=>root.chrome?.storage?.local?(await root.chrome.storage.local.get(k))[k]:JSON.parse(root.localStorage.getItem(k)||'null');
+  const write=async(k,v)=>{if(root.chrome?.storage?.local)await root.chrome.storage.local.set({[k]:v});else root.localStorage.setItem(k,JSON.stringify(v));};
+  // Keep magnification local to each image widget; it never affects CVAT cameras.
+  function imageView(name){
+   const element=node('div','c3d-image-view'),toolbar=node('div','c3d-image-zoom'),viewport=node('div','c3d-image-viewport'),stage=node('div','c3d-image-stage'),img=node('img','c3d-reference-image'),percent=node('output');
+   let zoom=1,currentImage=null,pan=null;img.alt=name;img.draggable=false;percent.setAttribute('aria-live','polite');
+   const out=button('🔍 −',()=>changeZoom(zoom/1.25)),inside=button('🔍 +',()=>changeZoom(zoom*1.25)),fit=button('Fit',()=>{zoom=1;layout(true);});
+   out.setAttribute('aria-label','Zoom out '+name);inside.setAttribute('aria-label','Zoom in '+name);fit.setAttribute('aria-label','Fit '+name);toolbar.append(out,percent,inside,fit);if(help)toolbar.append(help.button(help.guides.imageZoom));
+   function size(){const width=viewport.clientWidth,height=viewport.clientHeight,ratio=(img.naturalWidth||currentImage?.width||16)/(img.naturalHeight||currentImage?.height||9),base=Math.min(width,height*ratio);return {width,height,imageWidth:base*zoom,imageHeight:base*zoom/ratio};}
+   function layout(center=false){percent.value=Math.round(zoom*100)+'%';percent.textContent=percent.value;out.disabled=!currentImage||zoom<=.25;inside.disabled=!currentImage||zoom>=8;fit.disabled=!currentImage;const s=size();if(!s.width||!s.height)return;const width=Math.max(s.width,s.imageWidth),height=Math.max(s.height,s.imageHeight);stage.style.width=width+'px';stage.style.height=height+'px';img.style.width=s.imageWidth+'px';img.style.height=s.imageHeight+'px';img.style.left=Math.max(0,(s.width-s.imageWidth)/2)+'px';img.style.top=Math.max(0,(s.height-s.imageHeight)/2)+'px';viewport.classList.toggle('c3d-can-pan',s.imageWidth>s.width+.5||s.imageHeight>s.height+.5);if(center){viewport.scrollLeft=(width-s.width)/2;viewport.scrollTop=(height-s.height)/2;}}
+   function changeZoom(value,anchor){const next=Math.min(8,Math.max(.25,value));if(next===zoom)return;const old=size(),ax=anchor?.x??old.width/2,ay=anchor?.y??old.height/2,x=(viewport.scrollLeft+ax-Math.max(0,(old.width-old.imageWidth)/2))/(old.imageWidth||1),y=(viewport.scrollTop+ay-Math.max(0,(old.height-old.imageHeight)/2))/(old.imageHeight||1);zoom=next;layout();const s=size();viewport.scrollLeft=Math.max(0,(s.width-s.imageWidth)/2)+x*s.imageWidth-ax;viewport.scrollTop=Math.max(0,(s.height-s.imageHeight)/2)+y*s.imageHeight-ay;}
+   viewport.title='Scroll to zoom · left-drag to pan when enlarged';
+   viewport.addEventListener('wheel',e=>{if(!currentImage||!e.deltaY)return;e.preventDefault();e.stopPropagation();const rect=viewport.getBoundingClientRect(),pixels=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?viewport.clientHeight:1),factor=Math.exp(-Math.max(-600,Math.min(600,pixels))*Math.log(1.25)/100);changeZoom(zoom*factor,{x:e.clientX-rect.left,y:e.clientY-rect.top});},{passive:false});
+   viewport.addEventListener('pointerdown',e=>{if(e.button!==0||!viewport.classList.contains('c3d-can-pan'))return;pan={x:e.clientX,y:e.clientY,left:viewport.scrollLeft,top:viewport.scrollTop};viewport.setPointerCapture(e.pointerId);viewport.classList.add('c3d-panning');e.preventDefault();e.stopPropagation();});
+   viewport.addEventListener('pointermove',e=>{if(!pan)return;viewport.scrollLeft=pan.left+pan.x-e.clientX;viewport.scrollTop=pan.top+pan.y-e.clientY;});
+   for(const type of ['pointerup','pointercancel','lostpointercapture'])viewport.addEventListener(type,()=>{pan=null;viewport.classList.remove('c3d-panning');});
+   img.onload=()=>layout(true);stage.append(img);viewport.append(stage);element.append(toolbar,viewport);const observer=root.ResizeObserver?new root.ResizeObserver(()=>layout()):null;observer?.observe(viewport);
+   return {element,img,setImage(image,alt=name){currentImage=image||null;img.alt=alt;viewport.hidden=!image;if(image){if(img.getAttribute('src')!==image.url)img.src=image.url;}else img.removeAttribute('src');layout();},dispose(){observer?.disconnect();img.onload=null;}};
+  }
+  function closePreview(restoreFocus=true){if(!preview)return;help?.close(false);const old=preview;preview=null;old._picture.dispose();old.remove();if(restoreFocus&&old._trigger?.isConnected)old._trigger.focus();}
+  function openPreview(image,index,trigger){if(!image)return;closePreview(false);preview=node('section','c3d-reference-preview');preview.setAttribute('role','dialog');preview.setAttribute('aria-label','Context image preview');preview.tabIndex=-1;preview._trigger=trigger;
+   const header=node('header','c3d-reference-header'),close=button('×',()=>closePreview());close.setAttribute('aria-label','Close image preview');header.append(node('strong','',`Preview · ${index+1} · ${image.name}`),close);drag(preview,header);
+   const picture=imageView('preview image');preview._picture=picture;preview.append(header,picture.element);preview.addEventListener('keydown',e=>{if(e.code==='Escape'){e.preventDefault();e.stopImmediatePropagation();closePreview();}});doc.body.append(preview);picture.setImage(image,image.name);close.focus();
+  }
+  function drag(panel,handle){let start=null;handle.addEventListener('pointerdown',e=>{if(e.button!==0||e.target.closest('button,input,select'))return;const r=panel.getBoundingClientRect();start={x:e.clientX,y:e.clientY,left:r.left,top:r.top};handle.setPointerCapture(e.pointerId);e.preventDefault();});handle.addEventListener('pointermove',e=>{if(!start)return;panel.style.left=Math.max(0,Math.min(root.innerWidth-panel.offsetWidth,e.clientX-start.x+start.left))+'px';panel.style.top=Math.max(0,Math.min(root.innerHeight-50,e.clientY-start.y+start.top))+'px';panel.style.right='auto';});handle.addEventListener('pointerup',()=>start=null);handle.addEventListener('pointercancel',()=>start=null);}
+  function makeViewer(){viewer=node('section','c3d-reference-window');viewer.setAttribute('aria-label','Directional reference image');const header=node('header','c3d-reference-header'),title=node('strong','','Reference image'),configure=button('Configure wheel',openConfig);header.append(title,configure,button('×',()=>{help?.close(false);enabled=false;viewer.hidden=true;}));if(help)help.attach(configure,help.guides.wheel);drag(viewer,header);
+   const toolbar=node('div','c3d-reference-toolbar'),label=node('label'),check=node('input');check.type='checkbox';check.checked=auto;check.onchange=()=>{auto=check.checked;selected=null;void poll();};label.append(check,doc.createTextNode(' Auto'));const select=node('select');select.setAttribute('aria-label','Reference direction');select.onchange=()=>{manual=select.value;auto=false;check.checked=false;render();};toolbar.append(label,select);if(help)help.attach(label,help.guides.imageMode);
+   const picture=imageView('reference image');const status=node('p','c3d-reference-status');status.setAttribute('role','status');viewer.append(header,toolbar,picture.element,status);doc.body.append(viewer);viewer._={title,select,img:picture.img,picture,status};render();}
+  function render(message){if(!viewer)return;const ui=viewer._,slots=config.slots;
+   if(ui.select.dataset.signature!==JSON.stringify(slots)){ui.select.replaceChildren();for(const slot of slots){const option=node('option','',slot.name);option.value=slot.id;ui.select.append(option);}ui.select.dataset.signature=JSON.stringify(slots);}
+   const slot=auto?slots.find(s=>s.id===selected):slots.find(s=>s.id===manual)||slots[0],image=slot&&images[slot.image];if(slot)ui.select.value=slot.id;
+   ui.title.textContent='Reference · '+(slot?.name||'No direction');
+   ui.picture.setImage(image&&!message?image:null,image?.name||'Current CVAT context image');ui.img.hidden=!image||!!message;
+   ui.status.textContent=message||(!slots.length?'No POV slots configured':!slot?'Direction unavailable near LiDAR origin':!image?'No image assigned or available for '+slot.name:`Frame ${getSnapshot()?.frame} · ${image.name} · ${auto?'Auto':'Manual'}`);
+  }
+  async function onSnapshot(snapshot){if(disposed||!enabled||!snapshot?.connected)return;const taskKey='c3d.reference.v1:'+root.location.origin+':'+(snapshot.taskId??snapshot.jobId),nextFrame=`${snapshot.sessionId}:${snapshot.jobId}:${snapshot.frame}`;
+   if(taskKey!==key){key=taskKey;config=model.defaults();selected=null;try{const saved=await read(taskKey);if(key!==taskKey||disposed)return;config=model.normalize(saved);}catch(error){toast('Image configuration unavailable: '+error.message,true);}}
+   if(nextFrame!==frameKey&&loadingKey!==nextFrame){loadingKey=nextFrame;frameKey='';images=[];selected=null;closePreview(false);refreshConfig?.();const run=++generation;render('Loading current-frame context images…');
+    try{const result=await request('GET_CONTEXT_IMAGES',{sessionId:snapshot.sessionId,jobId:snapshot.jobId,frame:snapshot.frame});if(run!==generation||disposed||`${getSnapshot()?.sessionId}:${getSnapshot()?.jobId}:${getSnapshot()?.frame}`!==nextFrame)return;images=result.images;frameKey=nextFrame;loadingKey='';refreshConfig?.();render();}
+    catch(error){if(run===generation){loadingKey='';render('Context images unavailable: '+error.message);}}}
+  }
+  async function poll(){if(disposed||!enabled||polling)return;polling=true;try{const s=getSnapshot();if(!s?.connected){render('Waiting for CVAT');return;}await onSnapshot(s);if(!auto||!frameKey)return;const result=await request('GET_REFERENCE_VIEW',{sessionId:s.sessionId,jobId:s.jobId,frame:s.frame});if(`${getSnapshot()?.sessionId}:${getSnapshot()?.jobId}:${getSnapshot()?.frame}`!==frameKey)return;
+    const bearing=model.bearing(result.origin,result.target),slot=model.select(config,bearing,selected);selected=slot?.id||null;render(bearing===null?'Direction unavailable: no target or target is at LiDAR origin':undefined);
+   }catch(error){render(error.message);}finally{polling=false;}}
+  function open(){enabled=true;if(!viewer)makeViewer();viewer.hidden=false;void poll();if(!timer)timer=root.setInterval(()=>void poll(),350);}
+  function openConfig(){if(dialog){dialog.focus();return;}const editingKey=key;let draft=JSON.parse(JSON.stringify(config)),active=draft.slots[0]?.id||null;dialog=node('section','c3d-reference-config');dialog.setAttribute('role','dialog');dialog.setAttribute('aria-label','Reference direction wheel');dialog.tabIndex=-1;
+   const header=node('header','c3d-reference-header');header.append(node('strong','','Reference direction wheel'));if(help)header.append(help.button(help.guides.wheel));header.append(button('Cancel',close));drag(dialog,header);
+   const note=node('p','','Vehicle forward is at the top. Select a slot to assign an image. Drag a boundary to change its coverage. Angles run clockwise from forward.');
+   const headingLabel=node('label','','Vehicle forward heading in data (° clockwise from +X) '),heading=node('input');heading.type='number';heading.step='1';heading.value=draft.heading;heading.onchange=()=>{if(Number.isFinite(heading.valueAsNumber))draft.heading=model.wrap(heading.valueAsNumber);};headingLabel.append(heading);if(help)headingLabel.append(help.button(help.guides.heading));
+   const wheelHost=node('div','c3d-wheel-host'),editor=node('div','c3d-wheel-editor'),thumbnails=node('div','c3d-reference-thumbnails'),status=node('p');status.setAttribute('role','status');
+   const actions=node('div','c3d-reference-toolbar');actions.append(button('Add slot',()=>{if(draft.slots.length>=32){status.textContent='Maximum 32 slots';return;}const sorted=[...draft.slots].sort((a,b)=>a.angle-b.angle);let angle=0,gap=0;for(let i=0;i<sorted.length;i++){const next=sorted[(i+1)%sorted.length],size=sorted.length===1?360:model.wrap(next.angle-sorted[i].angle);if(size>gap){gap=size;angle=model.wrap(sorted[i].angle+size/2);}}const id='pov-'+Date.now();draft.slots.push({id,name:'New direction',angle,image:null,start:null});for(const s of draft.slots)s.start=null;active=id;draw();}),button('Remove slot',()=>{draft.slots=draft.slots.filter(s=>s.id!==active);for(const s of draft.slots)s.start=null;active=draft.slots[0]?.id||null;draw();}),button('Reset wheel',()=>{draft=model.defaults();heading.value=0;active=draft.slots[0].id;draw();}),button('Apply',async()=>{const normalized=model.normalize(draft);if(normalized.slots.length!==draft.slots.length){status.textContent='Each slot needs a distinct direction angle and valid image';return;}const savedKey=editingKey;if(key!==editingKey){status.textContent='Task changed; reopen configuration';return;}if(!savedKey){status.textContent='Wait for a connected CVAT frame';return;}try{await write(savedKey,normalized);if(key!==savedKey){status.textContent='Task changed; reopen configuration';return;}config=normalized;selected=null;close();render();void poll();}catch(error){status.textContent='Could not save: '+error.message;}}));
+   function close(){help?.close(false);closePreview(false);refreshConfig=null;dialog?.remove();dialog=null;}
+   const svgNS='http://www.w3.org/2000/svg';const svgNode=(tag,attributes)=>{const n=doc.createElementNS(svgNS,tag);for(const [k,v] of Object.entries(attributes||{}))n.setAttribute(k,String(v));return n;};
+   const point=(angle,radius)=>[180+Math.sin(angle*Math.PI/180)*radius,180-Math.cos(angle*Math.PI/180)*radius];
+   function draw(){wheelHost.replaceChildren();editor.replaceChildren();thumbnails.replaceChildren();const svg=svgNode('svg',{viewBox:'0 0 360 360','aria-label':'Editable direction wheel'}),slots=model.sectors(draft);let dragging=null;
+    for(let i=0;i<slots.length;i++){const slot=slots[i],end=slots[(i+1)%slots.length].start,span=slots.length===1?359.999:model.wrap(end-slot.start),a=point(slot.start,167),b=point(slot.start+span,167),path=svgNode('path',{d:`M180 180 L${a[0]} ${a[1]} A167 167 0 ${span>180?1:0} 1 ${b[0]} ${b[1]} Z`,fill:slot.id===active?'#1d4d78':'#182638',stroke:'#435773','data-slot':slot.id});path.addEventListener('click',()=>{active=slot.id;draw();});svg.append(path);
+     const pos=point(slot.angle,113),image=images[slot.image];if(image){const im=svgNode('image',{href:image.url,x:pos[0]-30,y:pos[1]-24,width:60,height:38,'pointer-events':'none',preserveAspectRatio:'xMidYMid slice'});svg.append(im);const magnify=svgNode('g',{role:'button',tabindex:0,'aria-label':`Preview ${slot.name} image`,class:'c3d-wheel-magnify'}),bg=svgNode('rect',{x:pos[0]+12,y:pos[1]-24,width:18,height:18,rx:3,fill:'#0b1220',stroke:'#93c5fd'}),icon=svgNode('text',{x:pos[0]+21,y:pos[1]-11,'text-anchor':'middle',fill:'#fff','font-size':12,'pointer-events':'none'});icon.textContent='⌕';magnify.append(bg,icon);const show=e=>{e.preventDefault();e.stopPropagation();openPreview(image,slot.image,magnify);};magnify.addEventListener('click',show);magnify.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')show(e);});svg.append(magnify);}const text=svgNode('text',{x:pos[0],y:pos[1]+26,'text-anchor':'middle',fill:'#e2e8f0','font-size':10,'pointer-events':'none'});text.textContent=slot.name;svg.append(text);
+     if(slots.length>1){const line=svgNode('line',{x1:180,y1:180,x2:a[0],y2:a[1],stroke:'#93c5fd','stroke-width':12,'stroke-opacity':.35,'data-boundary':slot.id,style:'cursor:ew-resize'});line.addEventListener('pointerdown',e=>{dragging=slot.id;svg.setPointerCapture(e.pointerId);e.preventDefault();e.stopPropagation();});svg.append(line);}
+    }
+    svg.addEventListener('pointermove',e=>{if(!dragging)return;const r=svg.getBoundingClientRect(),angle=model.wrap(Math.atan2(e.clientX-r.left-r.width/2,-(e.clientY-r.top-r.height/2))*180/Math.PI),line=svg.querySelector(`[data-boundary="${dragging}"]`),p=point(angle,167);line.setAttribute('x2',p[0]);line.setAttribute('y2',p[1]);const slot=draft.slots.find(s=>s.id===dragging);slot.start=angle;});svg.addEventListener('pointerup',()=>{if(dragging){dragging=null;draw();}});svg.addEventListener('pointercancel',()=>{dragging=null;draw();});
+    const center=svgNode('circle',{cx:180,cy:180,r:29,fill:'#0b1220',stroke:'#93c5fd','pointer-events':'none'}),label=svgNode('text',{x:180,y:184,'text-anchor':'middle',fill:'#fff','font-size':12,'pointer-events':'none'});label.textContent='LiDAR ↑';svg.append(center,label);wheelHost.append(svg);
+    const slot=draft.slots.find(s=>s.id===active);if(!slot){editor.append(node('p','','Add a direction slot to begin.'));return;}
+    for(const [field,title,type] of [['name','Direction name','text'],['angle','Direction angle (°)','number']]){const l=node('label','',title+' '),input=node('input');input.type=type;input.value=slot[field];input.onchange=()=>{if(type==='number'){if(!Number.isFinite(input.valueAsNumber))return;slot[field]=model.wrap(input.valueAsNumber);}else slot[field]=input.value.slice(0,80);draw();};l.append(input);editor.append(l);}
+    const unassign=button('No image',()=>{slot.image=null;draw();});thumbnails.append(unassign);images.forEach((image,i)=>{const card=node('div','c3d-reference-thumbnail-card'),b=button('',()=>{slot.image=i;draw();});b.classList.toggle('c3d-selected',slot.image===i);const img=node('img');img.src=image.url;img.alt=image.name;b.append(img,node('span','',`${i+1} · ${image.name}`));const magnify=button('⌕',()=>openPreview(image,i,magnify));magnify.classList.add('c3d-thumbnail-magnify');magnify.setAttribute('aria-label',`Preview image ${i+1}: ${image.name}`);magnify.title='Open larger preview';card.append(b,magnify);thumbnails.append(card);});
+   }
+   dialog.addEventListener('keydown',e=>{if(e.code==='Escape'){e.stopPropagation();close();}});dialog.append(header,note,headingLabel,wheelHost,editor,node('p','','Choose a current-frame image for the selected slot:'),thumbnails,status,actions);doc.body.append(dialog);refreshConfig=draw;draw();dialog.focus();
+  }
+  return {open,onSnapshot,dispose(){disposed=true;generation++;root.clearInterval(timer);closePreview(false);help?.dispose();refreshConfig=null;viewer?._.picture.dispose();viewer?.remove();dialog?.remove();}};
+ }
+ root.__C3D_REFERENCE_IMAGES_UI={mount};
+})(typeof window!=='undefined'?window:globalThis);
+
+;
 /* Isolated-world HUD. Reads unsaved CVAT editor snapshots via the bridge.
  * No credentials, cached-job fallback or direct annotation REST writes.
  */
@@ -1743,7 +1852,9 @@ root.__C3D_ANNOTATION_IO_UI={mount};
     const shortcuts=window.__C3D_SHORTCUTS,settingsKey='c3d.settings.v1';
     let settings=shortcuts.defaults(),settingsReady=false,recording=null,settingsPanel=null;
     let saveQueue=Promise.resolve();
-    let followSyncKey='';
+    let followSyncKey='',controlsSyncKey='';
+    let referenceUI=null,helpUI=null;
+    function syncControls(){if(!settingsReady||!snapshot?.connected||!snapshot.capabilities?.controls)return;const key=snapshot.sessionId+JSON.stringify(settings);if(key===controlsSyncKey)return;controlsSyncKey=key;request('SET_CONTROLS',{settings}).catch(error=>{controlsSyncKey='';toast(error.message,true);});}
     function syncFollowCamera(){
         if(!settingsReady||!snapshot?.connected||!snapshot.capabilities?.followCamera)return;
         const key=`${snapshot.sessionId}:${settings.followSelected}`;
@@ -1756,7 +1867,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             const stored=globalThis.chrome?.storage?.local ? (await chrome.storage.local.get(settingsKey))[settingsKey] : JSON.parse(localStorage.getItem(settingsKey)||'null');
             settings=shortcuts.normalize(stored);
         }catch(error){console.warn('[CVAT 3D TOOL] Settings unavailable:',error.message);}
-        settingsReady=true;refreshShortcutHints();renderInspector();syncFollowCamera();
+        settingsReady=true;refreshShortcutHints();renderInspector();syncFollowCamera();syncControls();refreshAppearance?.();
     }
     function saveSettings(){
         const value=JSON.parse(JSON.stringify(settings));
@@ -1764,7 +1875,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             if(globalThis.chrome?.storage?.local)await chrome.storage.local.set({[settingsKey]:value});
             else localStorage.setItem(settingsKey,JSON.stringify(value));
         }).catch(error=>toast('Could not save settings: '+error.message,true));
-        refreshShortcutHints();
+        refreshShortcutHints();syncControls();
     }
     function refreshShortcutHints(){
         if(!root)return;
@@ -1772,71 +1883,60 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             const node=el(d.button);if(!node)continue;
             const hint=shortcuts.format(settings.bindings[d.id]);
             node.title=d.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse?'Move to mouse unavailable: top-view camera or canvas API missing':`${d.label} · ${hint}`;
-            if(d.id==='AUTO_ADJUST')node.title+=` · Shrink toward nearby supported faces within ${+(settings.maxShrinkDistance*100).toFixed(2)} cm or ${settings.maxShrinkPercent}% of the dimension, whichever is smaller`;
-            const kbd=node.querySelector('kbd');if(kbd)kbd.textContent=hint;
+            let kbd=node.querySelector('kbd');if(!kbd){kbd=document.createElement('kbd');node.append(kbd);}kbd.textContent=hint;
         }
         if(el('c3d-keep-direction')){el('c3d-keep-direction').checked=settings.keepDirection;el('c3d-keep-direction').disabled=!settingsReady||busy;}
-        if(el('c3d-adjust-direction')){el('c3d-adjust-direction').checked=settings.adjustMoveDirection;el('c3d-adjust-direction').disabled=!settingsReady||busy;}
         if(el('c3d-follow-selected')){
             const input=el('c3d-follow-selected');input.checked=settings.followSelected;input.disabled=!settingsReady||!snapshot?.capabilities?.followCamera;
             input.parentElement.title=snapshot?.capabilities?.followCamera?'Double-click a box to lock its ID and camera target. Hover and single-click cannot change it. Double-click another box or turn Target lock off to release.':'Target lock unavailable: perspective camera or orbit controls missing';
             text('c3d-follow-status',settings.followSelected?(snapshot?.followCameraStatus||'Waiting for camera'):'');
         }
-        for(const [id,key] of [['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']]){
+        for(const [id,key] of [['c3d-auto-move','autoMove'],['c3d-auto-ground','autoGround'],['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']]){
             const input=el(id);if(!input)continue;
             if(input.type==='checkbox')input.checked=settings[key];else if(document.activeElement!==input)input.value=String(settings[key]);
             input.disabled=!settingsReady||busy;
         }
         if(el('c3d-btn-settings'))el('c3d-btn-settings').disabled=!settingsReady;
+        helpUI?.refresh();
     }
     function closeSettings(){recording=null;settingsPanel?.remove();settingsPanel=null;el('c3d-btn-settings')?.focus();}
     function openSettings(){
         if(settingsPanel||!settingsReady)return;
-        settingsPanel=document.createElement('div');settingsPanel.className='c3d-shortcut-settings';settingsPanel.setAttribute('role','dialog');settingsPanel.setAttribute('aria-label','Keyboard shortcuts');
-        const shrinkHeading=document.createElement('strong');shrinkHeading.textContent='Auto Adjust Box — shrink limits';
-        const shrinkNote=document.createElement('p');shrinkNote.textContent='Use the smaller of these limits per face. Only nearby supported points permit shrinking. Zero disables shrinking; expansion and ground contact remain active.';
-        const shrinkFields=document.createElement('div');
-        const inputs={};
-        for(const [key,label,max,scale] of [['maxShrinkDistance','Maximum shrink distance (cm)',40,100],['maxShrinkPercent','Maximum shrink (%)',50,1]]){
-            const row=document.createElement('label');row.className='c3d-shrink-field';row.textContent=label;
-            const input=document.createElement('input');input.type='number';input.min='0';input.max=String(max);input.step='any';input.value=String(+(settings[key]*scale).toFixed(4));input.setAttribute('aria-label',label);inputs[key]=input;
-            input.onchange=()=>{
-                if(!input.value.trim()||!input.checkValidity()){input.setAttribute('aria-invalid','true');message.textContent=`Enter a value from 0 to ${max}`;return;}
-                input.removeAttribute('aria-invalid');settings[key]=input.valueAsNumber/scale;saveSettings();message.textContent='Shrink limits saved';
-            };
-            row.append(input);shrinkFields.append(row);
-        }
-        const resetShrink=document.createElement('button');resetShrink.className='c3d-btn-secondary';resetShrink.textContent='Reset shrink limits';resetShrink.onclick=()=>{const defaults=shortcuts.defaults();for(const key of Object.keys(inputs)){settings[key]=defaults[key];inputs[key].value=String(defaults[key]*(key==='maxShrinkDistance'?100:1));inputs[key].removeAttribute('aria-invalid');}saveSettings();message.textContent='Shrink defaults restored';};
-        const heading=document.createElement('strong');heading.textContent='Keyboard shortcuts';
-        const note=document.createElement('p');note.textContent='Click a shortcut, then press a key combination. Escape cancels recording. Browser-reserved keys may be unavailable; CVAT shortcuts may conflict.';
-        const list=document.createElement('div');
-        const message=document.createElement('p');message.setAttribute('role','status');message.id='c3d-shortcut-message';
-        function render(){
-            list.replaceChildren();
-            for(const d of shortcuts.definitions){
-                const row=document.createElement('div');row.className='c3d-shortcut-row';
-                const label=document.createElement('span');label.textContent=d.label;
-                const record=document.createElement('button');record.className='c3d-btn-mini';record.dataset.action=d.id;record.setAttribute('aria-label',`Record ${d.label} shortcut`);record.textContent=recording===d.id?'Press keys…':shortcuts.format(settings.bindings[d.id]);
-                record.onclick=()=>{recording=d.id;message.textContent='Press a key combination; Escape cancels.';render();list.querySelector(`[data-action="${d.id}"]`)?.focus();};
-                const clear=document.createElement('button');clear.className='c3d-btn-mini';clear.textContent='Clear';clear.setAttribute('aria-label',`Clear ${d.label} shortcut`);
-                const reset=document.createElement('button');reset.className='c3d-btn-mini';reset.textContent='Reset';reset.setAttribute('aria-label',`Reset ${d.label} shortcut`);
-                function set(value){try{shortcuts.assign(settings,d.id,value);recording=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}}
-                clear.onclick=()=>set(null);reset.onclick=()=>set(d.binding);
-                row.append(label,record,clear,reset);list.append(row);
-            }
-        }
-        const resetAll=document.createElement('button');resetAll.className='c3d-btn-secondary';resetAll.textContent='Reset all shortcuts';resetAll.onclick=()=>{settings.bindings=shortcuts.defaults().bindings;recording=null;saveSettings();message.textContent='Defaults restored';render();};
+        settingsPanel=document.createElement('div');settingsPanel.className='c3d-shortcut-settings';settingsPanel.setAttribute('role','dialog');settingsPanel.setAttribute('aria-label','Shortcuts & controls');
+        const heading=document.createElement('strong');heading.textContent='Shortcuts & controls';
+        const note=document.createElement('p');note.textContent='Record keyboard, mouse buttons, wheel, or held-key + mouse combinations. Mouse controls override native actions only in applicable viewports. Drag controls require a mouse button. Escape cancels.';
+        const list=document.createElement('div'),capture=document.createElement('div'),message=document.createElement('p');
+        message.id='c3d-shortcut-message';message.setAttribute('role','status');capture.className='c3d-control-capture';capture.tabIndex=0;capture.setAttribute('aria-label','Control capture area');capture.textContent='Select Record, then use your input here';
+        let held=null,pendingKey=null;
+        function commit(value){try{shortcuts.assign(settings,recording,value);recording=null;held=null;pendingKey=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}}
+        function render(){list.replaceChildren();for(const d of shortcuts.definitions){const row=document.createElement('div');row.className='c3d-shortcut-row';const label=document.createElement('span');label.textContent=d.label;
+            const record=document.createElement('button');record.className='c3d-btn-mini';record.dataset.action=d.id;record.textContent=recording===d.id?'Recording…':shortcuts.format(settings.bindings[d.id]);record.setAttribute('aria-label','Record '+d.label+' shortcut');
+            record.onclick=()=>{recording=d.id;held=null;pendingKey=null;message.textContent='Use the capture area. Release a key for keyboard-only, or hold it while clicking/scrolling. Native CVAT bindings may conflict.';render();capture.focus();};
+            const clear=document.createElement('button');clear.textContent='Clear';clear.className='c3d-btn-mini';clear.onclick=()=>{recording=d.id;commit(null);};clear.setAttribute('aria-label','Clear '+d.label+' shortcut');
+            const reset=document.createElement('button');reset.textContent='Reset';reset.className='c3d-btn-mini';reset.onclick=()=>{recording=d.id;commit(d.binding);};reset.setAttribute('aria-label','Reset '+d.label+' shortcut');row.append(label,record,clear,reset);list.append(row);
+        }}
+        capture.addEventListener('keydown',event=>{if(!recording||event.code==='Escape')return;event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;const value=shortcuts.fromEvent(event);if(value){held=event.code;pendingKey=value;}});
+        capture.addEventListener('keyup',event=>{if(!recording)return;event.preventDefault();event.stopImmediatePropagation();if(event.code===held){const value=pendingKey;held=null;pendingKey=null;if(value)commit(value);}});
+        for(const type of ['pointerdown','wheel'])capture.addEventListener(type,event=>{event.preventDefault();event.stopImmediatePropagation();if(!recording)return;const value=shortcuts.fromEvent(event,held);if(value)commit(value);},{passive:false});
+        for(const type of ['contextmenu','auxclick','pointerup'])capture.addEventListener(type,event=>{event.preventDefault();event.stopPropagation();});
+        capture.addEventListener('blur',()=>{held=null;pendingKey=null;});
+        settingsPanel.addEventListener('keydown',event=>{if(event.code!=='Escape')return;event.preventDefault();event.stopImmediatePropagation();if(recording){recording=null;held=null;pendingKey=null;message.textContent='Recording cancelled';render();}else closeSettings();});
+        const resetAll=document.createElement('button');resetAll.className='c3d-btn-secondary';resetAll.textContent='Reset all controls';resetAll.onclick=()=>{settings.bindings=shortcuts.defaults().bindings;recording=null;saveSettings();message.textContent='Defaults restored';render();};
         const close=document.createElement('button');close.className='c3d-btn-secondary';close.textContent='Close';close.onclick=closeSettings;
-        settingsPanel.addEventListener('keydown',event=>{
-            if(event.code==='Escape'){event.preventDefault();event.stopImmediatePropagation();if(recording){recording=null;message.textContent='Recording cancelled';render();}else closeSettings();return;}
-            if(!recording)return;
-            event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;
-            const value=shortcuts.fromEvent(event);
-            if(!value){message.textContent='Press a supported key, with optional modifiers';return;}
-            try{shortcuts.assign(settings,recording,value);recording=null;saveSettings();message.textContent='Saved';render();}catch(error){message.textContent=error.message;}
-        },true);
-        settingsPanel.append(shrinkHeading,shrinkNote,shrinkFields,resetShrink,heading,note,list,message,resetAll,close);root.append(settingsPanel);render();close.focus();settingsPanel.scrollTop=0;
+        settingsPanel.append(heading,note,list,capture,message,resetAll,close);root.append(settingsPanel);render();close.focus();
     }
+    function mountAppearance(host){
+        host.innerHTML='<h3>Appearance</h3><label>Background <input id="c3d-background" type="color" aria-label="Viewport background"><input id="c3d-background-hex" type="text" aria-label="Background HEX" maxlength="7" placeholder="#000000"></label><button id="c3d-background-reset" class="c3d-btn-secondary">Reset background</button><label><input id="c3d-projection-follow" type="checkbox"> Follow CVAT point size</label><label>Top / Side / Front point size (px) <input id="c3d-projection-size" type="range" min="1" max="32" step="0.5"><input id="c3d-projection-number" type="number" min="1" max="32" step="0.5" aria-label="Projection point size"></label><button id="c3d-projection-reset" class="c3d-btn-secondary">Reset projection size</button><p class="c3d-task-note">Projection size is independent of the 3D viewport. See Box → Quick controls for your current viewport bindings.</p><button id="c3d-btn-reference" class="c3d-btn-secondary">Reference images</button>';
+        function refresh(){el('c3d-background').value=settings.background||'#000000';if(document.activeElement!==el('c3d-background-hex'))el('c3d-background-hex').value=settings.background||'';el('c3d-projection-follow').checked=settings.projectionFollow;for(const id of ['c3d-projection-size','c3d-projection-number']){if(document.activeElement!==el(id))el(id).value=settings.projectionSize;el(id).disabled=settings.projectionFollow;}}
+        el('c3d-background').oninput=e=>{settings.background=e.target.value;saveSettings();refresh();};
+        el('c3d-background-hex').onchange=e=>{if(!/^#[0-9a-f]{6}$/i.test(e.target.value)){toast('Use a six-digit HEX color, e.g. #243447',true);refresh();return;}settings.background=e.target.value.toLowerCase();saveSettings();refresh();};
+        el('c3d-background-reset').onclick=()=>{settings.background=null;saveSettings();refresh();};
+        el('c3d-projection-follow').onchange=e=>{settings.projectionFollow=e.target.checked;saveSettings();refresh();};
+        for(const id of ['c3d-projection-size','c3d-projection-number'])el(id).oninput=e=>{const value=Number(e.target.value);if(!Number.isFinite(value)||value<1||value>32)return;settings.projectionSize=value;saveSettings();refresh();};
+        el('c3d-projection-reset').onclick=()=>{settings.projectionFollow=true;settings.projectionSize=2;saveSettings();refresh();};
+        el('c3d-btn-reference').onclick=()=>{referenceUI??=window.__C3D_REFERENCE_IMAGES_UI?.mount({request,toast,getSnapshot:()=>snapshot});referenceUI?.open();};refresh();return refresh;
+    }
+    let refreshAppearance=null;
     function geometry(required=true) {
         const api=window.__CVAT_COPILOT_MATH;
         if(api && ['makePlane','parseCVAT16Points','auditFrame'].every(name=>typeof api[name]==='function'))return api;
@@ -1936,21 +2036,22 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             if(!preset?.dimensions){toast('Set and save L/W/H preset for this class/subtype first',true);return;}
             payload={...payload,keepDirection:settings.keepDirection,presetDimensions:preset.dimensions};
         }
-        if(type==='AUTO_ADJUST')payload={...payload,maxShrinkDistance:settings.maxShrinkDistance,maxShrinkPercent:settings.maxShrinkPercent};
+        if(type==='AUTO_ADJUST')payload={...payload,autoMove:settings.autoMove,autoGround:settings.autoGround,moveLongitudinal:settings.moveLongitudinal,moveLateral:settings.moveLateral};
         if(['SNAP_GROUND','MOVE_TO_MOUSE','AUTO_ADJUST','AUTO_FIT'].includes(type))payload={...payload,useOriginGround:settings.useOriginGround,fallbackGroundHeight:settings.fallbackGroundHeight};
-        if(type==='MOVE_TO_MOUSE')payload={...payload,adjustDirection:settings.adjustMoveDirection,moveLongitudinal:settings.moveLongitudinal,moveLateral:settings.moveLateral};
-        let ref;try{if(type!=='FREECAM')ref=reference();}catch(error){toast(error.message,true);return;}
+        let ref;try{if(!['FREECAM','AIM_TOP'].includes(type))ref=reference();}catch(error){toast(error.message,true);return;}
         busy=true;renderInspector();status('Processing…');
         try {
             if(type==='AUTO_FIT'){toast(payload.keepDirection?'Auto-Fitting: keeping direction…':'Auto-Fitting: applying fixed preset, aligning position/direction and checking ground…');await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));}
-            const result=await request(type,type==='FREECAM'?payload:{ref,...payload});
+            const result=await request(type,['FREECAM','AIM_TOP'].includes(type)?payload:{ref,...payload});
             if(type==='AUTO_FIT'){
                 const timing=Number.isFinite(result.elapsedMs)?` · ${(result.elapsedMs/1000).toFixed(2)}s`:'';
                 toast((result.previousFrame?result.message:`Auto-Fit updated${payload.keepDirection?' · direction preserved':''}${result.preset?' · '+result.preset.dimensions.join(' × ')+' m · grounded':''}${result.warning?' · '+result.warning:''} · review box and Save CVAT`)+timing);
                 if(result.timingsMs)console.info('[CVAT 3D TOOL] Auto-Fit timings (ms)',result.timingsMs);
             }
-            else if(type==='MOVE_TO_MOUSE')toast(result.previousFrame?result.message:`${result.refined?'Box centered on nearby object':'Moved to mouse; center not refined'}${result.directionAdjusted?` · direction aligned (${result.directionDeltaDegrees>=0?'+':''}${result.directionDeltaDegrees.toFixed(1)}°)`:payload.adjustDirection?' · direction unchanged':''}${Object.values(result.alignment||{}).some(v=>v!=='none')?' · face aligned: '+Object.values(result.alignment).filter(v=>v!=='none').join(' + '):''}${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?' · origin ground Z '+(result.groundHeight??payload.fallbackGroundHeight).toFixed(2)+'m':result.groundSource?' · snapped to ground':''}${result.warning?' · '+result.warning:''} · Save CVAT`);
-            else if(type==='AUTO_ADJUST')toast(result.previousFrame?result.message:result.unchanged?`Auto Adjust: no supported local correction${result.warning?' · '+result.warning:''}`:`Auto Adjust updated sides/top · direction preserved · bottom on ${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?'origin ground':'local road'}${result.warning?' · '+result.warning:''} · review box and Save CVAT`);
+            else if(type==='AIM_TOP')toast(result.message);
+            else if(type==='MOVE_TO_MOUSE')toast('Box center moved to cursor · size, orientation and Z preserved · Save CVAT');
+            else if(type==='CORNER_TO_MOUSE')toast('Nearest corner moved to cursor · Save CVAT');
+            else if(type==='AUTO_ADJUST')toast(result.unchanged?'Auto Adjust: no change needed':'Auto Adjust complete · size and orientation preserved · Save CVAT');
             else if(type==='ROTATE'||type==='SNAP_GROUND'||type==='SET_LABEL') {
                 toast(result.previousFrame ? result.message : type==='SNAP_GROUND' ? `Box snapped to ${(result.groundSource==='lidar-reference'||result.groundSource==='coordinate-origin')?'LiDAR reset point + offset':result.groundFallback?'road near LiDAR XY origin (fallback; verify remote terrain)':'local ground'} · bottom Z ${result.bottomZ?.toFixed(2)??'—'}m · ΔZ ${result.deltaZ.toFixed(2)}m${result.orientationWarning?' · '+result.orientationWarning:''} · save via Save CVAT` : 'Editor updated · save via Save CVAT');
             } else if(type==='FREECAM')toast(result.enabled?'Free Cam: WASD/QE · Shift fast · right-click drag to look · Esc exit':'Returned camera control to CVAT');
@@ -1971,7 +2072,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(previousScope!==nextScope) {grounds={};issues=[];selectedIssue=null;groundRun++;lastRevisionKey='';}
         snapshot=next;
         workUI?.onSnapshot(next);
-        syncFollowCamera();
+        syncFollowCamera();syncControls();refreshAppearance?.();void referenceUI?.onSnapshot(next);
         if(!root && shouldShow())createHUD();
         if(!root)return;
         renderInspector();
@@ -1998,19 +2099,20 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         const inspector=group('Thông tin box');inspector.append(root.querySelector('.c3d-class-row'));const geometryDetails=details('Vị trí, kích thước & ground');geometryDetails.append(root.querySelector('.c3d-inspector-grid'));move('c3d-road-info',geometryDetails);move('c3d-btn-ground-debug',geometryDetails);move('c3d-ground-debug-result',geometryDetails);inspector.append(geometryDetails);panels.box.append(inspector);
         const quick=group('Căn chỉnh nhanh'),actions=node('div','c3d-quick-actions');move('c3d-btn-autofit',actions);move('c3d-btn-ground',actions);quick.append(actions);
         quick.append(root.querySelector('.c3d-rot-grid'));panels.box.append(quick);
-        const advanced=details('Preset & căn chỉnh nâng cao');advanced.append(root.querySelector('.c3d-preset'));advanced.append(el('c3d-keep-direction').closest('label'));move('c3d-btn-adjust',advanced);
-        for(const id of ['c3d-origin-ground','c3d-ground-height','c3d-btn-move','c3d-move-longitudinal'])advanced.append(el(id).closest('.c3d-fit-row'));
+        const advanced=details('Preset & căn chỉnh nâng cao');advanced.append(root.querySelector('.c3d-preset'));advanced.append(el('c3d-keep-direction').closest('label'));
+        const auto=details('Auto Adjust options');move('c3d-btn-adjust',quick);auto.append(el('c3d-auto-move').closest('.c3d-fit-row'),el('c3d-move-longitudinal').closest('.c3d-fit-row'));quick.append(auto);
+        for(const id of ['c3d-origin-ground','c3d-ground-height','c3d-btn-move'])advanced.append(el(id).closest('.c3d-fit-row'));
         quick.append(advanced);
         const qc=panels.qc;qc.append(root.querySelector('.c3d-metrics-bar'));move('c3d-btn-scan',qc);qc.append(root.querySelector('.c3d-toggles'),root.querySelector('.c3d-issue-header-bar'),root.querySelector('.c3d-legend'));move('c3d-issue-list',qc);
         const camera=group('Điều hướng camera');move('c3d-btn-freecam',camera);camera.append(el('c3d-follow-selected').closest('label'));move('c3d-follow-status',camera);camera.append(node('p','c3d-task-note','Free Cam và Target lock chỉ thay đổi góc nhìn, không sửa annotation.'));panels.camera.append(camera);
-        const appearance=group('Hiển thị LiDAR');appearance.append(node('p','c3d-task-note','Point size sử dụng thiết lập Appearance của CVAT. Batch Review có đồng bộ và tùy chỉnh riêng ngay trong cửa sổ review.'));panels.camera.append(appearance);
+        const appearance=group('Appearance');panels.camera.append(appearance);
         const data=group('Annotation toàn job');data.append(node('p','c3d-task-note','JSON gồm mọi frame và thay đổi chưa lưu trong editor. Đối chiếu #clientID trước khi áp dụng.'));move('c3d-btn-export-ann',data);move('c3d-btn-import-replace',data);move('c3d-file-import',data);
         const danger=details('Xóa annotation & import mới');danger.classList.add('c3d-danger-zone');danger.append(node('p','c3d-task-note','Xóa toàn bộ annotation hiện tại; CVAT cấp ID mới. Có bước xác nhận và tải bản dự phòng.'));move('c3d-btn-import-recreate',danger);data.append(danger);panels.data.append(data);
         const session=details('Phiên CVAT & import/export server');move('c3d-session',session);panels.data.append(session);
-        const settingsGroup=group('Cài đặt công cụ');move('c3d-btn-settings',settingsGroup);settingsGroup.append(node('p','c3d-task-note','Phím tắt, giới hạn Auto Adjust và các thiết lập đã lưu.'));const debug=details('Chẩn đoán Auto-Fit');move('c3d-btn-export-fit',debug);settingsGroup.append(debug);panels.settings.append(settingsGroup);
+        const settingsGroup=group('Cài đặt công cụ');move('c3d-btn-settings',settingsGroup);settingsGroup.append(node('p','c3d-task-note','Keyboard, mouse buttons, wheel and drag controls.'));const debug=details('Chẩn đoán Auto-Fit');move('c3d-btn-export-fit',debug);settingsGroup.append(debug);panels.settings.append(settingsGroup);
         const batches=node('section','c3d-task-batches');batches.append(node('h3','','Nhiều frame'));const batchActions=node('div','c3d-action-grid');move('c3d-batch',batchActions);move('c3d-batch-size',batchActions);batches.append(batchActions);
-        const updater=root.querySelector('.c3d-update-row');workspace.append(nav,pages);body.replaceChildren(context,selected,workspace,batches,updater);root.append(footer);
-        const titleLabels={'c3d-btn-autofit':'Auto-Fit','c3d-btn-ground':'Snap ground','c3d-btn-adjust':'Auto Adjust','c3d-btn-scan':'Quét QC','c3d-btn-export-ann':'Export toàn job (.json)','c3d-btn-settings':'Phím tắt & Auto Adjust'};
+        const updater=root.querySelector('.c3d-update-row');workspace.append(nav,pages);body.replaceChildren(context,selected,workspace,batches,updater);root.append(footer);refreshAppearance=mountAppearance(appearance);
+        const titleLabels={'c3d-btn-autofit':'Auto-Fit','c3d-btn-ground':'Snap ground','c3d-btn-adjust':'Auto Adjust','c3d-btn-scan':'Quét QC','c3d-btn-export-ann':'Export toàn job (.json)','c3d-btn-settings':'Shortcuts & controls'};
         for(const [id,label] of Object.entries(titleLabels)){const n=el(id);n.firstChild.textContent=label+' ';}
         let active='box',expanded=false,position=null;const header=root.querySelector('.c3d-header');
         el('c3d-btn-toggle').setAttribute('aria-expanded','true');
@@ -2049,7 +2151,8 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                     <button id="c3d-btn-adjust" class="c3d-btn-secondary">Auto Adjust Box <kbd></kbd></button>
                     <div class="c3d-fit-row c3d-placement-options"><label title="Unchecked: use surrounding road, including below Z = 0. Checked: all boxes use the same horizontal Z: LiDAR camera reset point height plus offset. Road tilt is ignored."><input id="c3d-origin-ground" type="checkbox"> Use origin ground (fixed height + offset)</label></div>
                     <div class="c3d-fit-row c3d-placement-options"><label>Origin ground offset (m) <input id="c3d-ground-height" type="number" step="any" value="0" style="width:80px" title="Signed ground height offset from the empty-space double-click camera reset point"></label></div>
-                    <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button><label title="Align the longest box axis with the object's longest axis; maximum 30° correction; size stays unchanged"><input id="c3d-adjust-direction" type="checkbox"> Adjust direction</label></div>
+                    <div class="c3d-fit-row"><button id="c3d-btn-move" class="c3d-btn-secondary">Move to mouse <kbd></kbd></button></div>
+                    <div class="c3d-fit-row"><label><input id="c3d-auto-move" type="checkbox" checked> Move to mouse</label><label><input id="c3d-auto-ground" type="checkbox" checked> Ground snap</label></div>
                     <div class="c3d-fit-row c3d-placement-options"><label>Longitudinal <select id="c3d-move-longitudinal"><option value="none">None</option><option value="forward">Push forward</option><option value="backward">Push backward</option></select></label><label>Lateral <select id="c3d-move-lateral"><option value="none">None</option><option value="left">Push left</option><option value="right">Push right</option></select></label></div>
                     <button id="c3d-btn-settings" class="c3d-btn-secondary">Settings &amp; shortcuts</button>
                     <button id="c3d-btn-export-fit" class="c3d-btn-secondary" title="Chỉ export 1 box đang chọn + LiDAR xung quanh để debug thuật toán">Export Auto-Fit Case (Debug 1 Box)</button>
@@ -2076,7 +2179,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
                 <div class="c3d-issue-header-bar"><span class="c3d-config-label">GEOMETRY ISSUES</span><select id="c3d-filter" aria-label="Filter severity"><option value="ALL">All</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select></div>
                 <div class="c3d-legend"><span class="c3d-dot critical"></span> Critical <span class="c3d-dot warning"></span> Warning <span class="c3d-dot info"></span> Info / Unchecked</div>
                 <div id="c3d-issue-list" role="list" aria-label="QC issue list"></div>
-                <div class="c3d-footer"><span>v1.21.1 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
+                <div class="c3d-footer"><span>v1.22.3 · Reference QC thresholds</span><span id="c3d-status-msg">Waiting for editor</span></div>
             </div><div id="c3d-toast" role="status" aria-live="polite"></div>`;
         document.body.appendChild(root);
         updateUI=window.__C3D_UPDATE_CLIENT?.mount({root,request,toast,flush:()=>Promise.all([saveQueue,workUI?.flush()]),afterSave:()=>workUI?.flush(),importPending:()=>serverImportPending});
@@ -2118,13 +2221,12 @@ root.__C3D_ANNOTATION_IO_UI={mount};
             } catch (error) { toast('Lỗi import: ' + error.message, true); }
         });
         el('c3d-keep-direction').addEventListener('change',event=>{settings.keepDirection=event.target.checked;saveSettings();});
-        for(const [id,key] of [['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']])el(id).addEventListener('change',event=>{
+        for(const [id,key] of [['c3d-auto-move','autoMove'],['c3d-auto-ground','autoGround'],['c3d-origin-ground','useOriginGround'],['c3d-ground-height','fallbackGroundHeight'],['c3d-move-longitudinal','moveLongitudinal'],['c3d-move-lateral','moveLateral']])el(id).addEventListener('change',event=>{
             const input=event.target;
             if(input.type==='number'&&(!input.value.trim()||!Number.isFinite(input.valueAsNumber))){input.value=String(settings[key]);toast('Enter a finite signed ground height in meters',true);return;}
             settings[key]=input.type==='checkbox'?input.checked:input.type==='number'?input.valueAsNumber:input.value;
             saveSettings();renderInspector();
         });
-        el('c3d-adjust-direction').addEventListener('change',event=>{settings.adjustMoveDirection=event.target.checked;saveSettings();});
         el('c3d-follow-selected').addEventListener('change',event=>{settings.followSelected=event.target.checked;followSyncKey='';saveSettings();syncFollowCamera();});
         el('c3d-btn-settings').addEventListener('click',openSettings);
         function editPreset(reset=false){
@@ -2182,6 +2284,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         root.addEventListener('pointerup',()=>{drag=null;});
         taskUI=arrangeTasks();
         workUI=window.__C3D_WORK_UI?.mount({root,panel:taskUI.workPanel,request,snapshot:()=>snapshot,toast});
+        helpUI=window.__C3D_FEATURE_HELP?.create({getBinding:id=>shortcuts.format(settings.bindings[id])});helpUI?.mountPanel(root);
         renderInspector();
     }
     function options(select,values,placeholder) {
@@ -2222,17 +2325,17 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         const canEdit=!!box&&!box.locked&&!box.groundTruth&&cap.edit&&!busy;
         for(const id of ['c3d-btn-rot-left','c3d-btn-rot-right','c3d-btn-flip','c3d-select-class'])el(id).disabled=!canEdit;
         const ground=box&&grounds[box.id];el('c3d-btn-ground').disabled=!canEdit||!settingsReady||(!settings.useOriginGround&&!cap.ground);
-        el('c3d-btn-ground').title='Snap xuống mặt đất cục bộ; nếu thiếu điểm, dùng cao độ đường đo gần gốc LiDAR XY (0,0). Giả định hệ tọa độ theo xe LiDAR; cần kiểm tra địa hình xa xe.';
+        el('c3d-btn-ground').title='Use reliable local ground, or the explicitly enabled origin ground. Missing local ground leaves the box unchanged.';
         el('c3d-btn-autofit').disabled=!canEdit||!cap.ground;
         el('c3d-btn-autofit').disabled ||= !settingsReady;
-        el('c3d-btn-adjust').disabled=!canEdit||!cap.ground||!settingsReady;
+        el('c3d-btn-adjust').disabled=!canEdit||!settingsReady;
         el('c3d-btn-move').disabled=!canEdit||!cap.moveToMouse||!settingsReady;
         refreshShortcutHints();
         el('c3d-batch').disabled=!box||box.objectType!=='track'||!cap.batch||busy;
         el('c3d-batch-size').disabled=!box||box.objectType!=='track'||box.groundTruth||!cap.batchSize||!cap.edit||busy;
         el('c3d-batch').title=cap.batch?'Review one track across frames':'Requires native CVAT cuboid tracks';
         el('c3d-btn-export-fit').disabled=!box||busy||s?.mode==='demo';
-        el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);
+        el('c3d-btn-freecam').disabled=!cap.freeCam||busy;el('c3d-btn-freecam').classList.toggle('c3d-active',!!s?.freeCam);el('c3d-btn-freecam').setAttribute('aria-pressed',String(!!s?.freeCam));el('c3d-btn-freecam').firstChild.textContent=s?.freeCam?'Free Cam · ON ':'Free Cam ';
         el('c3d-btn-focus').disabled=!box||!cap.selection;el('c3d-btn-scan').disabled=!s?.connected;
         text('c3d-prop-subtype',box?.subType ? box.subType.toUpperCase() : (box ? 'None' : '—'));
         text('c3d-prop-pos',geom?geom.center.map(n=>n.toFixed(2)).join(' / ')+' m':'—');
@@ -2302,6 +2405,7 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         container.scrollTop=scroll;
     }
     function keydown(event) {
+        if(snapshot?.capabilities?.controls)return;
         if(event.target?.closest?.('.c3d-task-nav'))return;
         if(!root||!settingsReady||settingsPanel||event.repeat||event.isComposing||event.target?.closest?.('input:not([type="checkbox"]):not([type="radio"]),textarea,select,[contenteditable]:not([contenteditable="false"]),[role="dialog"],dialog')||document.querySelector('[role="dialog"],dialog[open]'))return;
         const pressed=shortcuts.fromEvent(event);if(!pressed)return;
@@ -2312,6 +2416,11 @@ root.__C3D_ANNOTATION_IO_UI={mount};
         if(match.id==='MOVE_TO_MOUSE'&&!snapshot?.capabilities?.moveToMouse){toast('Move to mouse unavailable: top-view camera or canvas API missing',true);return;}
         actions[match.id]();
     }
+    function control(event){let data;try{data=JSON.parse(event.detail);}catch(_){return;}if(data.error){toast(data.error,true);return;}if(busy||settingsPanel||!settingsReady)return;
+        const type=data.action,payload={pointer:data.pointer};
+        const actions={AUTO_FIT:()=>action('AUTO_FIT',payload),AUTO_ADJUST:()=>action('AUTO_ADJUST',payload),SNAP_GROUND:()=>action('SNAP_GROUND'),MOVE_TO_MOUSE:()=>action(data.pointer?.name==='perspective'?'AIM_TOP':'MOVE_TO_MOUSE',payload),CORNER_TO_MOUSE:()=>action('CORNER_TO_MOUSE',payload),FLIP:()=>action('ROTATE',{degrees:180}),ROTATE_LEFT:()=>action('ROTATE',{degrees:-90}),ROTATE_RIGHT:()=>action('ROTATE',{degrees:90}),QC:()=>runQC(true),FREECAM:()=>action('FREECAM',{enabled:!snapshot?.freeCam})};actions[type]?.();
+    }
+    window.addEventListener('c3d:control:v3',control);
     function shouldShow(){
         if(document.documentElement.dataset.c3dDemo==='true')return true;
         const path=window.location.pathname;
@@ -2321,11 +2430,11 @@ root.__C3D_ANNOTATION_IO_UI={mount};
     function routeCheck(){
         if(disposed)return;
         if(shouldShow()){if(!root)createHUD();if(!snapshot?.connected)request('GET_SNAPSHOT').then(acceptSnapshot).catch(()=>status('Bridge not ready'));}
-        else if(root){workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
+        else if(root){helpUI?.dispose();helpUI=null;referenceUI?.dispose();referenceUI=null;refreshAppearance=null;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;updateUI?.dispose();updateUI=null;root.remove();root=null;grounds={};issues=[];snapshot=null;lastRevisionKey='';groundRun++;request('CLEAR_QC_APPEARANCE').catch(()=>{});}
     }
     function dispose(){
-        disposed=true;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
-        window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);
+        helpUI?.dispose();helpUI=null;referenceUI?.dispose();referenceUI=null;disposed=true;workUI?.dispose();workUI=null;taskUI?.dispose();taskUI=null;importUI?.dispose();updateUI?.dispose();updateUI=null;closeSettings();batchSizeUI?.dispose();batchSizeUI=null;batchUI?.dispose();batchUI=null;if(globalThis.chrome?.runtime?.id)chrome.runtime.onMessage.removeListener(sessionMessage);clearInterval(routeTimer);clearTimeout(qcTimer);clearTimeout(toastTimer);groundRun++;
+        window.removeEventListener('c3d:response:v2',receive);window.removeEventListener('c3d:snapshot:v2',receiveSnapshot);window.removeEventListener('keydown',keydown,true);window.removeEventListener('c3d:control:v3',control);
         for(const waiter of pending.values()){clearTimeout(waiter.timeout);waiter.reject(new Error('Panel stopped'));}pending.clear();root?.remove();root=null;
     }
     const sessionTransport=window.__C3D_CREATE_SESSION_TRANSPORT?.({snapshot:()=>snapshot,url:()=>location.href,cookie:()=>document.cookie,fetch:(...args)=>fetch(...args),onImportSubmitted:()=>{serverImportPending=true;}});
